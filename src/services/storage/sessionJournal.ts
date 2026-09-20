@@ -1,9 +1,15 @@
 import { MMKV } from 'react-native-mmkv';
 
-export const sessionStorage = new MMKV({
-  id: 'audio-session-journal',
-  encryptionKey: 'session-journal-secure-key'
-});
+let _storage: MMKV | null = null;
+
+function getStorage(): MMKV {
+  if (!_storage) {
+    _storage = new MMKV({
+      id: 'audio-session-journal',
+    });
+  }
+  return _storage;
+}
 
 export type RecordingStatus = 'RECORDING' | 'PAUSED' | 'FINALIZED' | 'INTERRUPTED';
 
@@ -22,9 +28,6 @@ export interface ActiveSessionRecord {
 const ACTIVE_SESSION_KEY = 'active_recording_session';
 
 export const SessionJournal = {
-  /**
-   * Commits a new recording session to synchronous storage.
-   */
   startSession(record: Omit<ActiveSessionRecord, 'lastHeartbeatTimestamp' | 'byteOffsetEstimate' | 'status'>): void {
     const fullRecord: ActiveSessionRecord = {
       ...record,
@@ -32,48 +35,37 @@ export const SessionJournal = {
       byteOffsetEstimate: 0,
       status: 'RECORDING',
     };
-    sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
+    getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
   },
 
-  /**
-   * Invoked every 2 seconds by the recording loop to maintain a crash-recovery point.
-   */
   updateHeartbeat(byteOffset: number): void {
-    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
+    const raw = getStorage().getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
     try {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.lastHeartbeatTimestamp = Date.now();
       record.byteOffsetEstimate = byteOffset;
-      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
-    } catch {
-      // In-memory corruption guard
-    }
+      getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+    } catch {}
   },
 
-  /**
-   * Sets the session state to PAUSED or INTERRUPTED.
-   */
   setStatus(status: RecordingStatus): void {
-    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
+    const raw = getStorage().getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
     try {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.status = status;
-      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+      getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
   },
 
-  /**
-   * Inspects storage for orphaned sessions after an app crash or system kill.
-   */
   checkOrphanedSession(): ActiveSessionRecord | null {
-    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
-    if (!raw) return null;
-
     try {
+      const raw = getStorage().getString(ACTIVE_SESSION_KEY);
+      if (!raw) return null;
+
       const record: ActiveSessionRecord = JSON.parse(raw);
       if (record.status !== 'FINALIZED') {
         return record;
@@ -84,10 +76,7 @@ export const SessionJournal = {
     return null;
   },
 
-  /**
-   * Clears the active session journal once the audio file is safely finalized.
-   */
   clearSession(): void {
-    sessionStorage.delete(ACTIVE_SESSION_KEY);
+    getStorage().delete(ACTIVE_SESSION_KEY);
   }
 };
