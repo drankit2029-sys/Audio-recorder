@@ -1,9 +1,4 @@
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'expo-module-gradle-plugin'
-
-group = 'expo.modules.audiohardwarerouter'
-version = '1.0.0'
 
 android {
     compileSdkVersion 34
@@ -18,6 +13,5 @@ android {
 }
 
 dependencies {
-    implementation project(':expo-modules-core')
-    implementation "org.jetbrains.kotlin:kotlin-stdlib"
+    implementation 'com.facebook.react:react-android'
 }

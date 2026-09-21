@@ -1,26 +1,23 @@
 // modules/audio-hardware-router/src/index.ts
-import { EventEmitter, NativeModulesProxy, requireNativeModule } from 'expo-modules-core';
+import { NativeModules, NativeEventEmitter } from 'react-native';
+
+const { AudioHardwareRouter: NativeModule } = NativeModules;
 
 export interface AudioInputDevice {
   id: number;
   name: string;
-  type: 'builtin_mic' | 'wired_headset' | 'usb_device' | 'usb_headset' | 'usb_accessory' | 'bluetooth_sco' | 'bluetooth_a2dp' | 'external_input';
+  type:
+    | 'builtin_mic'
+    | 'wired_headset'
+    | 'usb_device'
+    | 'usb_headset'
+    | 'usb_accessory'
+    | 'bluetooth_sco'
+    | 'bluetooth_a2dp'
+    | 'external_input';
   typeCode: number;
   sampleRates: number[];
   channelCounts: number[];
-}
-
-let NativeModule: any = null;
-try {
-  NativeModule = requireNativeModule('AudioHardwareRouter');
-} catch {
-  NativeModule = NativeModulesProxy?.AudioHardwareRouter ?? null;
-}
-
-if (!NativeModule) {
-  console.warn(
-    '[AudioHardwareRouter] Native module not detected. Ensure "audio-hardware-router": "file:./modules/audio-hardware-router" is in package.json and rebuild the native APK.'
-  );
 }
 
 const DEFAULT_BUILTIN_DEVICE: AudioInputDevice = {
@@ -35,7 +32,7 @@ const DEFAULT_BUILTIN_DEVICE: AudioInputDevice = {
 export const AudioHardwareRouter = {
   getAvailableInputs(): AudioInputDevice[] {
     try {
-      const result = NativeModule?.getAvailableInputs();
+      const result = NativeModule?.getAvailableInputs?.();
       if (Array.isArray(result) && result.length > 0) {
         return result;
       }
@@ -44,17 +41,32 @@ export const AudioHardwareRouter = {
     }
     return [DEFAULT_BUILTIN_DEVICE];
   },
+
   setPreferredInputDevice(deviceId: number): boolean {
-    return NativeModule?.setPreferredInputDevice(deviceId) ?? false;
+    try {
+      return NativeModule?.setPreferredInputDevice?.(deviceId) ?? false;
+    } catch {
+      return false;
+    }
   },
+
   clearPreferredInputDevice(): boolean {
-    return NativeModule?.clearPreferredInputDevice() ?? false;
+    try {
+      return NativeModule?.clearPreferredInputDevice?.() ?? false;
+    } catch {
+      return false;
+    }
   },
+
   getActiveInputDevice(): AudioInputDevice | null {
-    return NativeModule?.getActiveInputDevice() ?? null;
+    try {
+      return NativeModule?.getActiveInputDevice?.() ?? null;
+    } catch {
+      return null;
+    }
   },
 };
 
 export const AudioHardwareRouterEmitter = NativeModule
-  ? new EventEmitter(NativeModule)
+  ? new NativeEventEmitter(NativeModule)
   : null;
