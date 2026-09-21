@@ -9,7 +9,9 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.audiorecorder.app",
       "infoPlist": {
-        "UIBackgroundModes": ["audio"],
+        "UIBackgroundModes": [
+          "audio"
+        ],
         "NSMicrophoneUsageDescription": "AudioRecorder requires microphone access to capture uncompressed master audio."
       }
     },
@@ -42,7 +44,8 @@
           }
         }
       ],
-      "./plugins/withAndroidAudioForegroundService"
+      "./plugins/withAndroidAudioForegroundService",
+      "expo-sharing"
     ]
   }
 }
