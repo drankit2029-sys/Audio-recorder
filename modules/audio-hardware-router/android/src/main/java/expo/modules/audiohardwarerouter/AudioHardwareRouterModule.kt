@@ -1,3 +1,4 @@
+
 package expo.modules.audiohardwarerouter
 
 import android.content.Context
@@ -12,8 +13,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
 
 class AudioHardwareRouterModule : Module() {
     private val context: Context
-        get() = appContext.androidContext ?: appContext.reactContext
-        ?: throw IllegalStateException("Android Context is not available")
+        get() = appContext.reactContext
+            ?: throw IllegalStateException("React Context is not available")
 
     private val audioManager: AudioManager
         get() = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -96,7 +97,6 @@ class AudioHardwareRouterModule : Module() {
     private fun getInputsList(): List<Map<String, Any>> {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         val inputs = devices.filter { it.isSource }
-        
         val listToMap = if (inputs.isNotEmpty()) inputs else devices.toList()
         return listToMap.map { mapDeviceInfo(it) }
     }
