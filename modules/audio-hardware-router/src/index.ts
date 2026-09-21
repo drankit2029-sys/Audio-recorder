@@ -14,12 +14,35 @@ let NativeModule: any = null;
 try {
   NativeModule = requireNativeModule('AudioHardwareRouter');
 } catch {
-  NativeModule = NativeModulesProxy.AudioHardwareRouter ?? null;
+  NativeModule = NativeModulesProxy?.AudioHardwareRouter ?? null;
 }
+
+if (!NativeModule) {
+  console.warn(
+    '[AudioHardwareRouter] Native module not detected. Ensure "audio-hardware-router": "file:./modules/audio-hardware-router" is in package.json and rebuild the native APK.'
+  );
+}
+
+const DEFAULT_BUILTIN_DEVICE: AudioInputDevice = {
+  id: 1,
+  name: 'Built-in Microphone',
+  type: 'builtin_mic',
+  typeCode: 15,
+  sampleRates: [44100, 48000],
+  channelCounts: [1, 2],
+};
 
 export const AudioHardwareRouter = {
   getAvailableInputs(): AudioInputDevice[] {
-    return NativeModule?.getAvailableInputs() ?? [];
+    try {
+      const result = NativeModule?.getAvailableInputs();
+      if (Array.isArray(result) && result.length > 0) {
+        return result;
+      }
+    } catch (e) {
+      console.warn('[AudioHardwareRouter] getAvailableInputs error:', e);
+    }
+    return [DEFAULT_BUILTIN_DEVICE];
   },
   setPreferredInputDevice(deviceId: number): boolean {
     return NativeModule?.setPreferredInputDevice(deviceId) ?? false;

@@ -7,6 +7,7 @@
     "@notifee/react-native": "^9.1.8",
     "@shopify/react-native-skia": "2.6.2",
     "expo": "~57.0.24",
+    "audio-hardware-router": "file:./modules/audio-hardware-router",
     "expo-audio": "~57.0.5",
     "expo-build-properties": "~57.0.21",
     "expo-dev-client": "~57.0.19",

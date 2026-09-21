@@ -12,7 +12,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
 
 class AudioHardwareRouterModule : Module() {
     private val context: Context
-        get() = appContext.reactContext ?: throw IllegalStateException("React Context not initialized")
+        get() = appContext.androidContext ?: appContext.reactContext
+        ?: throw IllegalStateException("Android Context is not available")
 
     private val audioManager: AudioManager
         get() = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -38,15 +39,19 @@ class AudioHardwareRouterModule : Module() {
 
         OnStartObserving {
             if (!isListenerRegistered) {
-                audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
-                isListenerRegistered = true
+                try {
+                    audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
+                    isListenerRegistered = true
+                } catch (_: Exception) {}
             }
         }
 
         OnStopObserving {
             if (isListenerRegistered) {
-                audioManager.unregisterAudioDeviceCallback(deviceCallback)
-                isListenerRegistered = false
+                try {
+                    audioManager.unregisterAudioDeviceCallback(deviceCallback)
+                    isListenerRegistered = false
+                } catch (_: Exception) {}
             }
         }
 
@@ -59,8 +64,7 @@ class AudioHardwareRouterModule : Module() {
                 val availableDevices = audioManager.availableCommunicationDevices
                 val target = availableDevices.find { it.id == deviceId }
                 if (target != null) {
-                    val success = audioManager.setCommunicationDevice(target)
-                    return@Function success
+                    return@Function audioManager.setCommunicationDevice(target)
                 }
             }
             return@Function false
@@ -91,7 +95,10 @@ class AudioHardwareRouterModule : Module() {
 
     private fun getInputsList(): List<Map<String, Any>> {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        return devices.filter { it.isSource }.map { mapDeviceInfo(it) }
+        val inputs = devices.filter { it.isSource }
+        
+        val listToMap = if (inputs.isNotEmpty()) inputs else devices.toList()
+        return listToMap.map { mapDeviceInfo(it) }
     }
 
     private fun mapDeviceInfo(info: AudioDeviceInfo): Map<String, Any> {
@@ -107,20 +114,23 @@ class AudioHardwareRouterModule : Module() {
             else -> "external_input"
         }
 
-        val name = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val address = info.address
-            if (!address.isNullOrEmpty()) "${info.productName} ($address)" else info.productName.toString()
-        } else {
-            info.productName.toString()
+        val rawName = info.productName?.toString() ?: ""
+        val displayName = when {
+            rawName.isNotBlank() -> rawName
+            typeCode == AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Built-in Microphone"
+            typeCode == AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired Headset Mic"
+            typeCode == AudioDeviceInfo.TYPE_USB_DEVICE || typeCode == AudioDeviceInfo.TYPE_USB_HEADSET -> "USB Audio Interface"
+            typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth Audio Input"
+            else -> "Input #${info.id}"
         }
 
         return mapOf(
             "id" to info.id,
-            "name" to (if (name.isBlank()) "Microphone ${info.id}" else name),
+            "name" to displayName,
             "type" to typeString,
             "typeCode" to typeCode,
-            "sampleRates" to info.sampleRates.toList(),
-            "channelCounts" to info.channelCounts.toList()
+            "sampleRates" to (info.sampleRates?.toList() ?: emptyList<Int>()),
+            "channelCounts" to (info.channelCounts?.toList() ?: emptyList<Int>())
         )
     }
 }
