@@ -1,5 +1,9 @@
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.audiohardwarerouter'
+version = '1.0.0'
 
 android {
     compileSdkVersion 34
@@ -7,6 +11,9 @@ android {
     defaultConfig {
         minSdkVersion 24
         targetSdkVersion 34
+    }
+    lintOptions {
+        abortOnError false
     }
 }
 

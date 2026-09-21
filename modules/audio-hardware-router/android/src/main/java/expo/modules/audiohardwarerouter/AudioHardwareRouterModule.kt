@@ -5,10 +5,22 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.records.Field
+import expo.modules.kotlin.records.Record
+
+class DeviceInfoRecord : Record {
+    @Field var id: Int = 0
+    @Field var name: String = ""
+    @Field var type: String = "external_input"
+    @Field var typeCode: Int = 0
+    @Field var sampleRates: List<Int> = emptyList()
+    @Field var channelCounts: List<Int> = emptyList()
+}
 
 class AudioHardwareRouterModule : Module() {
     private val context: Context
@@ -81,7 +93,7 @@ class AudioHardwareRouterModule : Module() {
         }
 
         Function("getActiveInputDevice") {
-            var result: Map<String, Any>? = null
+            var result: DeviceInfoRecord? = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val active = audioManager.communicationDevice
                 if (active != null) {
@@ -93,17 +105,20 @@ class AudioHardwareRouterModule : Module() {
     }
 
     private fun dispatchDevicesUpdate() {
-        sendEvent("onAudioDevicesUpdated", mapOf("devices" to getInputsList()))
+        sendEvent("onAudioDevicesUpdated", Bundle().apply {
+            // Send update notification event
+            putBoolean("hasUpdate", true)
+        })
     }
 
-    private fun getInputsList(): List<Map<String, Any>> {
+    private fun getInputsList(): List<DeviceInfoRecord> {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
         val inputs = devices.filter { it.isSource }
-        val listToMap = if (inputs.isNotEmpty()) inputs else devices.toList()
-        return listToMap.map { mapDeviceInfo(it) }
+        val list = if (inputs.isNotEmpty()) inputs else devices.toList()
+        return list.map { mapDeviceInfo(it) }
     }
 
-    private fun mapDeviceInfo(info: AudioDeviceInfo): Map<String, Any> {
+    private fun mapDeviceInfo(info: AudioDeviceInfo): DeviceInfoRecord {
         val typeCode = info.type
         val typeString = when (typeCode) {
             AudioDeviceInfo.TYPE_BUILTIN_MIC -> "builtin_mic"
@@ -126,13 +141,13 @@ class AudioHardwareRouterModule : Module() {
             else -> "Input #${info.id}"
         }
 
-        return mapOf(
-            "id" to info.id,
-            "name" to displayName,
-            "type" to typeString,
-            "typeCode" to typeCode,
-            "sampleRates" to (info.sampleRates?.toList() ?: emptyList<Int>()),
-            "channelCounts" to (info.channelCounts?.toList() ?: emptyList<Int>())
-        )
+        return DeviceInfoRecord().apply {
+            this.id = info.id
+            this.name = displayName
+            this.type = typeString
+            this.typeCode = typeCode
+            this.sampleRates = info.sampleRates?.toList() ?: emptyList()
+            this.channelCounts = info.channelCounts?.toList() ?: emptyList()
+        }
     }
 }

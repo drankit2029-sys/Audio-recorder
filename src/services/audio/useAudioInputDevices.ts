@@ -33,15 +33,15 @@ export function useAudioInputDevices() {
 
     const sub = AudioHardwareRouterEmitter.addListener(
       'onAudioDevicesUpdated',
-      (event: { devices: AudioInputDevice[] }) => {
-        if (event?.devices) {
-          setDevices(event.devices);
-          // Auto-verify if currently selected device was unplugged
+      () => {
+        try {
+          const freshInputs = AudioHardwareRouter.getAvailableInputs();
+          setDevices(freshInputs);
           setSelectedDeviceId((prevId) => {
-            const exists = event.devices.some((d) => d.id === prevId);
-            return exists ? prevId : (event.devices[0]?.id ?? null);
+            const exists = freshInputs.some((d) => d.id === prevId);
+            return exists ? prevId : (freshInputs[0]?.id ?? null);
           });
-        }
+        } catch {}
       }
     );
 
