@@ -26,12 +26,12 @@ export default function App() {
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
 
   const {
-  devices,
-  selectedDeviceId,
-  selectedDevice,
-  selectDevice,
-  refreshDevices, 
-} = useAudioInputDevices();
+    devices,
+    selectedDeviceId,
+    selectedDevice,
+    selectDevice,
+    refreshDevices,
+  } = useAudioInputDevices();
 
   const {
     engineState,
@@ -138,48 +138,48 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-async function bootstrap() {
-try {
-await ForegroundServiceManager.initialize();
+    async function bootstrap() {
+      try {
+        await ForegroundServiceManager.initialize();
 
-const perms = await AudioModule.requestRecordingPermissionsAsync();
-if (!perms.granted) {
-Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
-return;
-}
+        const perms = await AudioModule.requestRecordingPermissionsAsync();
+        if (!perms.granted) {
+          Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
+          return;
+        }
 
-await AudioModule.setAudioModeAsync({
-allowsRecording: true,
-playsInSilentMode: true,
-interruptionMode: 'doNotMix',
-shouldRouteThroughEarpiece: false,
-});
+        await AudioModule.setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: 'doNotMix',
+          shouldRouteThroughEarpiece: false,
+        });
 
-// Query hardware capsules immediately now that permissions are confirmed
-refreshDevices();
+        // Query hardware capsules immediately now that permissions are confirmed
+        refreshDevices();
 
-setRecordings(RecordingLibrary.getAll());
+        setRecordings(RecordingLibrary.getAll());
 
-const orphaned = SessionJournal.checkOrphanedSession();
-if (orphaned) {
-Alert.alert(
-'Interrupted Recording Found',
-Session ${orphaned.sessionId} did not finalize properly.,
-[
-{ text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-{ text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
- ]
-);
-}
-} catch (err) {
-console.error('Bootstrap error:', err);
-} finally {
-setIsReady(true);
-}
-}
+        const orphaned = SessionJournal.checkOrphanedSession();
+        if (orphaned) {
+          Alert.alert(
+            'Interrupted Recording Found',
+            `Session ${orphaned.sessionId} did not finalize properly.`,
+            [
+              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+            ]
+          );
+        }
+      } catch (err) {
+        console.error('Bootstrap error:', err);
+      } finally {
+        setIsReady(true);
+      }
+    }
 
-bootstrap();
-}, [refreshDevices]);
+    bootstrap();
+  }, [refreshDevices]);
 
   useEffect(() => {
     if (engineState === 'RECORDING') {
