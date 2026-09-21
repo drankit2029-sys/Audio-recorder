@@ -1,0 +1,9 @@
+{
+  "name": "audio-hardware-router",
+  "platforms": ["android"],
+  "android": {
+    "modules": [
+      "expo.modules.audiohardwarerouter.AudioHardwareRouterModule"
+    ]
+  }
+}

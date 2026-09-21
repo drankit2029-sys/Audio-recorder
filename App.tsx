@@ -14,13 +14,23 @@ import { AudioMeter } from './src/components/meter/AudioMeter';
 import { RecordingLibraryModal } from './src/components/library/RecordingLibraryModal';
 import { TeleprompterDeck } from './src/components/prompter/TeleprompterDeck';
 import { AudioSettingsModal } from './src/components/settings/AudioSettingsModal';
-import { ForegroundServiceManager } from './src/services/audio/foregroundServiceManager';
+import { ForegroundServiceManager } from './src/services/audio/ForegroundServiceManager';
+import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices';
+import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 
 export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [libraryVisible, setLibraryVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [deviceModalVisible, setDeviceModalVisible] = useState(false);
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
+
+  const {
+    devices,
+    selectedDeviceId,
+    selectedDevice,
+    selectDevice,
+  } = useAudioInputDevices();
 
   const {
     engineState,
@@ -35,47 +45,14 @@ export default function App() {
   } = useAudioRecording();
 
   const lastNotificationUpdateRef = useRef<number>(0);
+  const durationMsRef = useRef<number>(durationMs);
+  durationMsRef.current = durationMs;
 
-  useEffect(() => {
-    async function bootstrap() {
-      try {
-        await ForegroundServiceManager.initialize();
+  const pauseRecordingRef = useRef(pauseRecording);
+  pauseRecordingRef.current = pauseRecording;
 
-        const perms = await AudioModule.requestRecordingPermissionsAsync();
-        if (!perms.granted) {
-          Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
-          return;
-        }
-
-        await AudioModule.setAudioModeAsync({
-          allowsRecording: true,
-          playsInSilentMode: true,
-          interruptionMode: 'doNotMix',
-          shouldRouteThroughEarpiece: false,
-        });
-
-        setRecordings(RecordingLibrary.getAll());
-
-        const orphaned = SessionJournal.checkOrphanedSession();
-        if (orphaned) {
-          Alert.alert(
-            'Interrupted Recording Found',
-            `Session ${orphaned.sessionId} did not finalize properly.`,
-            [
-              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
-            ]
-          );
-        }
-      } catch (err) {
-        console.error('Bootstrap error:', err);
-      } finally {
-        setIsReady(true);
-      }
-    }
-
-    bootstrap();
-  }, []);
+  const resumeRecordingRef = useRef(resumeRecording);
+  resumeRecordingRef.current = resumeRecording;
 
   const formatTimer = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
@@ -84,38 +61,9 @@ export default function App() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Sync notification with live duration counter
-  useEffect(() => {
-    if (engineState === 'RECORDING') {
-      const now = Date.now();
-      if (now - lastNotificationUpdateRef.current >= 1000) {
-        lastNotificationUpdateRef.current = now;
-        ForegroundServiceManager.updateProgress(formatTimer(durationMs), activePreset.badge);
-      }
-    }
-  }, [durationMs, engineState, activePreset]);
-
-  const handleRecordPress = async () => {
-    try {
-      if (engineState === 'IDLE' || engineState === 'STOPPED' || engineState === 'ERROR') {
-        await activateKeepAwakeAsync();
-        await ForegroundServiceManager.startService(activePreset.badge);
-        await startRecording();
-      } else if (engineState === 'RECORDING') {
-        await pauseRecording();
-      } else if (engineState === 'PAUSED') {
-        await resumeRecording();
-      }
-    } catch (e: any) {
-      await deactivateKeepAwake();
-      await ForegroundServiceManager.stopService();
-      Alert.alert('Recording Error', e.message);
-    }
-  };
-
   const handleStopPress = async () => {
     try {
-      const finalDuration = durationMs;
+      const finalDuration = durationMsRef.current;
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
 
@@ -159,6 +107,114 @@ export default function App() {
     }
   };
 
+  const handleStopPressRef = useRef(handleStopPress);
+  handleStopPressRef.current = handleStopPress;
+
+  useEffect(() => {
+    ForegroundServiceManager.registerHandlers({
+      onPause: async () => {
+        try {
+          await pauseRecordingRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onPause failed:', e);
+        }
+      },
+      onResume: async () => {
+        try {
+          await resumeRecordingRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onResume failed:', e);
+        }
+      },
+      onStop: async () => {
+        try {
+          await handleStopPressRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onStop failed:', e);
+        }
+      },
+    });
+  }, []);
+
+  useEffect(() => {
+    async function bootstrap() {
+      try {
+        await ForegroundServiceManager.initialize();
+
+        const perms = await AudioModule.requestRecordingPermissionsAsync();
+        if (!perms.granted) {
+          Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
+          return;
+        }
+
+        await AudioModule.setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: 'doNotMix',
+          shouldRouteThroughEarpiece: false,
+        });
+
+        setRecordings(RecordingLibrary.getAll());
+
+        const orphaned = SessionJournal.checkOrphanedSession();
+        if (orphaned) {
+          Alert.alert(
+            'Interrupted Recording Found',
+            `Session ${orphaned.sessionId} did not finalize properly.`,
+            [
+              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+            ]
+          );
+        }
+      } catch (err) {
+        console.error('Bootstrap error:', err);
+      } finally {
+        setIsReady(true);
+      }
+    }
+
+    bootstrap();
+  }, []);
+
+  useEffect(() => {
+    if (engineState === 'RECORDING') {
+      const now = Date.now();
+      if (now - lastNotificationUpdateRef.current >= 1000) {
+        lastNotificationUpdateRef.current = now;
+        ForegroundServiceManager.updateProgress(
+          formatTimer(durationMs),
+          activePreset.badge,
+          false
+        );
+      }
+    } else if (engineState === 'PAUSED') {
+      ForegroundServiceManager.updateProgress(
+        formatTimer(durationMs),
+        activePreset.badge,
+        true
+      );
+    }
+  }, [durationMs, engineState, activePreset]);
+
+  const handleRecordPress = async () => {
+    try {
+      if (engineState === 'IDLE' || engineState === 'STOPPED' || engineState === 'ERROR') {
+        await activateKeepAwakeAsync();
+        await ForegroundServiceManager.startService(activePreset.badge);
+        await startRecording();
+      } else if (engineState === 'RECORDING') {
+        await pauseRecording();
+      } else if (engineState === 'PAUSED') {
+        await resumeRecording();
+      }
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      Alert.alert('Recording Error', e.message);
+    }
+  };
+
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
@@ -189,18 +245,32 @@ export default function App() {
             </View>
           </View>
 
-          {/* Integrated Console Deck */}
+          {/* Console Deck */}
           <View style={styles.deck}>
             <TeleprompterDeck engineState={engineState} />
 
-            <TouchableOpacity
-              style={styles.presetBadgeContainer}
-              onPress={() => setSettingsVisible(true)}
-              disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-            >
-              <View style={styles.presetBadgeDot} />
-              <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
-            </TouchableOpacity>
+            {/* Badges: Format & Active Input Mic */}
+            <View style={styles.badgesRow}>
+              <TouchableOpacity
+                style={styles.presetBadgeContainer}
+                onPress={() => setSettingsVisible(true)}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <View style={styles.presetBadgeDot} />
+                <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.inputBadgeContainer}
+                onPress={() => setDeviceModalVisible(true)}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <Text style={styles.inputBadgeIcon}>🎙️</Text>
+                <Text style={styles.inputBadgeText} numberOfLines={1}>
+                  {selectedDevice ? selectedDevice.name : 'Default Input'}
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             <Text style={styles.timer}>{formatTimer(durationMs)}</Text>
 
@@ -227,6 +297,17 @@ export default function App() {
             </View>
           </View>
 
+          {/* Hardware Input Device Modal */}
+          <InputDeviceModal
+            visible={deviceModalVisible}
+            onClose={() => setDeviceModalVisible(false)}
+            devices={devices}
+            selectedDeviceId={selectedDeviceId}
+            onSelectDevice={selectDevice}
+            engineState={engineState}
+          />
+
+          {/* Settings Modal */}
           <AudioSettingsModal
             visible={settingsVisible}
             onClose={() => setSettingsVisible(false)}
@@ -235,6 +316,7 @@ export default function App() {
             engineState={engineState}
           />
 
+          {/* Library Modal */}
           <RecordingLibraryModal
             visible={libraryVisible}
             onClose={() => setLibraryVisible(false)}
@@ -327,6 +409,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 50,
   },
+  badgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+    maxWidth: '96%',
+  },
   presetBadgeContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -337,7 +426,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#383838',
-    marginTop: 4,
   },
   presetBadgeDot: {
     width: 6,
@@ -350,6 +438,26 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
+  },
+  inputBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#1C2620',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2E4C38',
+    maxWidth: 160,
+  },
+  inputBadgeIcon: {
+    fontSize: 11,
+  },
+  inputBadgeText: {
+    color: '#00E676',
+    fontSize: 11,
+    fontWeight: '600',
   },
   timer: {
     fontSize: 44,
