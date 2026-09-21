@@ -1,4 +1,3 @@
-
 package expo.modules.audiohardwarerouter
 
 import android.content.Context
@@ -57,36 +56,39 @@ class AudioHardwareRouterModule : Module() {
         }
 
         Function("getAvailableInputs") {
-            return@Function getInputsList()
+            getInputsList()
         }
 
         Function("setPreferredInputDevice") { deviceId: Int ->
+            var success = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val availableDevices = audioManager.availableCommunicationDevices
                 val target = availableDevices.find { it.id == deviceId }
                 if (target != null) {
-                    return@Function audioManager.setCommunicationDevice(target)
+                    success = audioManager.setCommunicationDevice(target)
                 }
             }
-            return@Function false
+            success
         }
 
         Function("clearPreferredInputDevice") {
+            var success = false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager.clearCommunicationDevice()
-                return@Function true
+                success = true
             }
-            return@Function false
+            success
         }
 
         Function("getActiveInputDevice") {
+            var result: Map<String, Any>? = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val active = audioManager.communicationDevice
                 if (active != null) {
-                    return@Function mapDeviceInfo(active)
+                    result = mapDeviceInfo(active)
                 }
             }
-            return@Function null
+            result
         }
     }
 
