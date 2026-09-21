@@ -1,15 +1,10 @@
-import { MMKV } from 'react-native-mmkv';
+// src/services/storage/sessionJournal.ts
+import { createMMKV } from 'react-native-mmkv';
 
-let _storage: MMKV | null = null;
-
-function getStorage(): MMKV {
-  if (!_storage) {
-    _storage = new MMKV({
-      id: 'audio-session-journal',
-    });
-  }
-  return _storage;
-}
+// Initialize using the v4 Nitro Modules factory function
+export const sessionStorage = createMMKV({
+  id: 'audio-session-journal',
+});
 
 export type RecordingStatus = 'RECORDING' | 'PAUSED' | 'FINALIZED' | 'INTERRUPTED';
 
@@ -35,35 +30,35 @@ export const SessionJournal = {
       byteOffsetEstimate: 0,
       status: 'RECORDING',
     };
-    getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
+    sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
   },
 
   updateHeartbeat(byteOffset: number): void {
-    const raw = getStorage().getString(ACTIVE_SESSION_KEY);
+    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
     try {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.lastHeartbeatTimestamp = Date.now();
       record.byteOffsetEstimate = byteOffset;
-      getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
   },
 
   setStatus(status: RecordingStatus): void {
-    const raw = getStorage().getString(ACTIVE_SESSION_KEY);
+    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
     try {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.status = status;
-      getStorage().set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
   },
 
   checkOrphanedSession(): ActiveSessionRecord | null {
     try {
-      const raw = getStorage().getString(ACTIVE_SESSION_KEY);
+      const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
       if (!raw) return null;
 
       const record: ActiveSessionRecord = JSON.parse(raw);
@@ -77,6 +72,7 @@ export const SessionJournal = {
   },
 
   clearSession(): void {
-    getStorage().delete(ACTIVE_SESSION_KEY);
+    // .remove() replaced .delete() in v4
+    sessionStorage.remove(ACTIVE_SESSION_KEY);
   }
 };

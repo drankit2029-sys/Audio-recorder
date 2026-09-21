@@ -1,19 +1,49 @@
-import { useEffect, useState } from 'react';
-import { StyleSheet, Text, View, Alert } from 'react-native';
+// App.tsx
+import 'react-native-gesture-handler';
+import { useEffect, useState, useRef } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AudioModule } from 'expo-audio';
-import { SessionJournal, ActiveSessionRecord } from './src/services/storage/sessionJournal';
+import * as FileSystem from 'expo-file-system/legacy';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { SessionJournal } from './src/services/storage/sessionJournal';
+import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
+import { useAudioRecording, EngineState } from './src/services/audio/useAudioRecording';
+import { AudioMeter } from './src/components/meter/AudioMeter';
+import { RecordingLibraryModal } from './src/components/library/RecordingLibraryModal';
+import { TeleprompterDeck } from './src/components/prompter/TeleprompterDeck';
+import { AudioSettingsModal } from './src/components/settings/AudioSettingsModal';
+import { ForegroundServiceManager } from './src/services/audio/foregroundServiceManager';
 
 export default function App() {
   const [isReady, setIsReady] = useState(false);
-  const [orphanedSession, setOrphanedSession] = useState<ActiveSessionRecord | null>(null);
+  const [libraryVisible, setLibraryVisible] = useState(false);
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [recordings, setRecordings] = useState<SavedRecording[]>([]);
+
+  const {
+    engineState,
+    durationMs,
+    meteringDb,
+    activePreset,
+    setPresetKey,
+    startRecording,
+    pauseRecording,
+    resumeRecording,
+    stopRecording,
+  } = useAudioRecording();
+
+  const lastNotificationUpdateRef = useRef<number>(0);
 
   useEffect(() => {
-    async function bootstrapAudioEnvironment() {
+    async function bootstrap() {
       try {
-        const status = await AudioModule.requestRecordingPermissionsAsync();
-        if (!status.granted) {
-          Alert.alert("Permission Required", "Microphone access is required to record master audio.");
+        await ForegroundServiceManager.initialize();
+
+        const perms = await AudioModule.requestRecordingPermissionsAsync();
+        if (!perms.granted) {
+          Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
           return;
         }
 
@@ -24,91 +54,333 @@ export default function App() {
           shouldRouteThroughEarpiece: false,
         });
 
-        const crashedSession = SessionJournal.checkOrphanedSession();
-        if (crashedSession) {
-          setOrphanedSession(crashedSession);
+        setRecordings(RecordingLibrary.getAll());
+
+        const orphaned = SessionJournal.checkOrphanedSession();
+        if (orphaned) {
           Alert.alert(
-            "Interrupted Recording Found",
-            "An unfinalized recording was found from a previous session.",
+            'Interrupted Recording Found',
+            `Session ${orphaned.sessionId} did not finalize properly.`,
             [
-              { text: "Discard", style: "destructive", onPress: () => SessionJournal.clearSession() },
-              { text: "Recover", onPress: () => console.log("Recovering session:", crashedSession.sessionId) }
+              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
             ]
           );
         }
-      } catch (error) {
-        console.error("Audio bootstrap error:", error);
+      } catch (err) {
+        console.error('Bootstrap error:', err);
       } finally {
         setIsReady(true);
       }
     }
 
-    bootstrapAudioEnvironment();
+    bootstrap();
   }, []);
 
-  if (!isReady) {
-    return (
-      <SafeAreaProvider>
-        <View style={styles.container}>
-          <Text style={styles.statusText}>Initializing Audio Engine...</Text>
-        </View>
-      </SafeAreaProvider>
-    );
-  }
+  const formatTimer = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Sync notification with live duration counter
+  useEffect(() => {
+    if (engineState === 'RECORDING') {
+      const now = Date.now();
+      if (now - lastNotificationUpdateRef.current >= 1000) {
+        lastNotificationUpdateRef.current = now;
+        ForegroundServiceManager.updateProgress(formatTimer(durationMs), activePreset.badge);
+      }
+    }
+  }, [durationMs, engineState, activePreset]);
+
+  const handleRecordPress = async () => {
+    try {
+      if (engineState === 'IDLE' || engineState === 'STOPPED' || engineState === 'ERROR') {
+        await activateKeepAwakeAsync();
+        await ForegroundServiceManager.startService(activePreset.badge);
+        await startRecording();
+      } else if (engineState === 'RECORDING') {
+        await pauseRecording();
+      } else if (engineState === 'PAUSED') {
+        await resumeRecording();
+      }
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      Alert.alert('Recording Error', e.message);
+    }
+  };
+
+  const handleStopPress = async () => {
+    try {
+      const finalDuration = durationMs;
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+
+      const outputUri = await stopRecording();
+
+      if (outputUri) {
+        let sizeBytes = 0;
+        try {
+          const info = await FileSystem.getInfoAsync(outputUri);
+          if (info.exists && !info.isDirectory) {
+            sizeBytes = info.size;
+          }
+        } catch {}
+
+        const now = new Date();
+        const newRecord: SavedRecording = {
+          id: `take_${Date.now()}`,
+          name: `Take ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
+          uri: outputUri,
+          sizeBytes,
+          durationMs: finalDuration,
+          createdAt: Date.now(),
+        };
+
+        const updated = RecordingLibrary.save(newRecord);
+        setRecordings(updated);
+
+        Alert.alert(
+          'Take Finalized',
+          `Saved ${newRecord.name} (${(sizeBytes / 1024).toFixed(1)} KB)`,
+          [
+            { text: 'OK' },
+            { text: 'View in Library', onPress: () => setLibraryVisible(true) },
+          ]
+        );
+      }
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      Alert.alert('Stop Error', e.message);
+    }
+  };
 
   return (
-    <SafeAreaProvider>
-      <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Audio Recorder</Text>
-          <Text style={styles.statusText}>
-            System Status: <Text style={{ color: '#00E676' }}>Ready</Text>
-          </Text>
-        </View>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.container}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View>
+              <Text style={styles.title}>Audio Recorder</Text>
+              <Text style={styles.statusText}>
+                State: <Text style={{ color: getStatusColor(engineState) }}>{engineState}</Text>
+              </Text>
+            </View>
 
-        <View style={styles.deck}>
-          <Text style={styles.placeholderText}>Audio Engine Scaffold Ready</Text>
-        </View>
-      </SafeAreaView>
-    </SafeAreaProvider>
+            <View style={styles.headerButtons}>
+              <TouchableOpacity
+                style={styles.headerBtn}
+                onPress={() => setSettingsVisible(true)}
+              >
+                <Text style={styles.headerBtnText}>FORMAT</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.headerBtn, styles.takesBtn]}
+                onPress={() => setLibraryVisible(true)}
+              >
+                <Text style={styles.takesBtnText}>TAKES ({recordings.length})</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Integrated Console Deck */}
+          <View style={styles.deck}>
+            <TeleprompterDeck engineState={engineState} />
+
+            <TouchableOpacity
+              style={styles.presetBadgeContainer}
+              onPress={() => setSettingsVisible(true)}
+              disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+            >
+              <View style={styles.presetBadgeDot} />
+              <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.timer}>{formatTimer(durationMs)}</Text>
+
+            <AudioMeter
+              meteringDb={meteringDb}
+              isRecording={engineState === 'RECORDING'}
+            />
+
+            <View style={styles.controlsRow}>
+              <TouchableOpacity
+                style={[styles.button, engineState === 'RECORDING' ? styles.pauseBtn : styles.recordBtn]}
+                onPress={handleRecordPress}
+              >
+                <Text style={styles.buttonText}>
+                  {engineState === 'RECORDING' ? 'PAUSE' : engineState === 'PAUSED' ? 'RESUME' : 'RECORD'}
+                </Text>
+              </TouchableOpacity>
+
+              {(engineState === 'RECORDING' || engineState === 'PAUSED') && (
+                <TouchableOpacity style={[styles.button, styles.stopBtn]} onPress={handleStopPress}>
+                  <Text style={styles.buttonText}>STOP</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          <AudioSettingsModal
+            visible={settingsVisible}
+            onClose={() => setSettingsVisible(false)}
+            activePresetKey={activePreset.key}
+            onSelectPreset={setPresetKey}
+            engineState={engineState}
+          />
+
+          <RecordingLibraryModal
+            visible={libraryVisible}
+            onClose={() => setLibraryVisible(false)}
+            recordings={recordings}
+            onLibraryUpdate={setRecordings}
+          />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
+function getStatusColor(state: EngineState) {
+  switch (state) {
+    case 'RECORDING':
+      return '#FF5252';
+    case 'PAUSED':
+      return '#FFD600';
+    case 'STOPPED':
+      return '#00E676';
+    default:
+      return '#9E9E9E';
+  }
+}
+
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
     backgroundColor: '#121212',
+  },
+  container: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   header: {
     position: 'absolute',
-    top: 60,
+    top: 48,
+    width: '92%',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
   },
   title: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
     color: '#FFFFFF',
-    marginBottom: 8,
   },
   statusText: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#9E9E9E',
+    marginTop: 2,
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  headerBtn: {
+    backgroundColor: '#262626',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#3A3A3A',
+  },
+  headerBtnText: {
+    color: '#B0BEC5',
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.5,
+  },
+  takesBtn: {
+    borderColor: '#2E4C38',
+  },
+  takesBtnText: {
+    color: '#00E676',
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.5,
   },
   deck: {
-    width: '90%',
-    height: 200,
+    width: '92%',
+    padding: 16,
+    paddingBottom: 24,
     backgroundColor: '#1E1E1E',
     borderRadius: 16,
     borderWidth: 1,
     borderColor: '#333333',
     alignItems: 'center',
     justifyContent: 'center',
+    marginTop: 50,
   },
-  placeholderText: {
-    color: '#757575',
-    fontSize: 16,
-    fontWeight: '500',
-  }
+  presetBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#252525',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#383838',
+    marginTop: 4,
+  },
+  presetBadgeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#00E676',
+  },
+  presetBadgeText: {
+    color: '#E0E0E0',
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  timer: {
+    fontSize: 44,
+    fontWeight: '300',
+    color: '#FFFFFF',
+    fontVariant: ['tabular-nums'],
+    marginVertical: 4,
+  },
+  controlsRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginTop: 14,
+  },
+  button: {
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderRadius: 30,
+  },
+  recordBtn: {
+    backgroundColor: '#D50000',
+  },
+  pauseBtn: {
+    backgroundColor: '#FF6D00',
+  },
+  stopBtn: {
+    backgroundColor: '#424242',
+  },
+  buttonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
+    letterSpacing: 1,
+  },
 });
