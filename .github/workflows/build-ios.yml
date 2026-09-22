@@ -35,15 +35,40 @@ jobs:
       - name: Build Debug App (Dev Client)
         run: |
           cd ios
+
+          # 1. Warm up CoreSimulator daemon (required by actool in Xcode 16)
+          sudo killall -9 com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null || true
+          xcrun simctl list devices >/dev/null 2>&1 || true
+
+          # 2. Pre-create bundle directories so actool does not fail on missing paths
+          mkdir -p ../build/DerivedData/Build/Products/Debug-iphoneos/EXDevMenu.bundle
+          mkdir -p ../build/DerivedData/Build/Products/Debug-iphoneos/EXConstants.bundle
+
+          # 3. Build unsigned binary with explicit device destination and disabled entitlements injection
+          set +e
           xcodebuild build \
             -workspace AudioRecorder.xcworkspace \
             -scheme AudioRecorder \
             -configuration Debug \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath ../build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            CODE_SIGNING_INJECT_BASE_ENTITLEMENTS=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO > xcodebuild.log 2>&1
+
+          STATUS=$?
+          if [ $STATUS -ne 0 ]; then
+            echo "::error::xcodebuild failed with exit code $STATUS"
+            echo "=== FAILED BUILD COMMANDS / ERRORS ==="
+            grep -E "(error:|\*\* BUILD FAILED \*\*|The following build commands failed:)" -A 3 xcodebuild.log || true
+            echo "=== LAST 80 LINES OF BUILD LOG ==="
+            tail -n 80 xcodebuild.log
+            exit $STATUS
+          fi
+          echo "Xcode build completed successfully."
 
       - name: Package IPA for ESign
         run: |
