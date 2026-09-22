@@ -1,7 +1,7 @@
 // App.tsx
 import 'react-native-gesture-handler';
 import { useEffect, useState, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Alert } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Alert,PermissionsAndroid, Platform } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AudioModule } from 'expo-audio';
@@ -137,49 +137,66 @@ export default function App() {
     });
   }, []);
 
-  useEffect(() => {
-    async function bootstrap() {
-      try {
-        await ForegroundServiceManager.initialize();
+useEffect(() => {
+  async function bootstrap() {
+    try {
+      await ForegroundServiceManager.initialize();
 
-        const perms = await AudioModule.requestRecordingPermissionsAsync();
-        if (!perms.granted) {
-          Alert.alert('Permission Required', 'Microphone access is required to record master audio.');
-          return;
-        }
-
-        await AudioModule.setAudioModeAsync({
-          allowsRecording: true,
-          playsInSilentMode: true,
-          interruptionMode: 'doNotMix',
-          shouldRouteThroughEarpiece: false,
-        });
-
-        // Query hardware capsules immediately now that permissions are confirmed
-        refreshDevices();
-
-        setRecordings(RecordingLibrary.getAll());
-
-        const orphaned = SessionJournal.checkOrphanedSession();
-        if (orphaned) {
-          Alert.alert(
-            'Interrupted Recording Found',
-            `Session ${orphaned.sessionId} did not finalize properly.`,
-            [
-              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
-            ]
-          );
-        }
-      } catch (err) {
-        console.error('Bootstrap error:', err);
-      } finally {
-        setIsReady(true);
+      // 1. Request microphone permission
+      const micPerms = await AudioModule.requestRecordingPermissionsAsync();
+      if (!micPerms.granted) {
+        Alert.alert('Permission Required', 'Microphone access is required to record audio.');
+        return;
       }
-    }
 
-    bootstrap();
-  }, [refreshDevices]);
+      // 2. Request Bluetooth permission on Android 12+ (API 31+)
+      if (Platform.OS === 'android' && Platform.Version >= 31) {
+        try {
+          await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+            {
+              title: 'Bluetooth Audio Access',
+              message: 'Allow access to connect and record with Bluetooth earbuds and headsets.',
+              buttonPositive: 'Allow',
+            }
+          );
+        } catch (btErr) {
+          console.warn('[Bootstrap] Bluetooth permission error:', btErr);
+        }
+      }
+
+      await AudioModule.setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        interruptionMode: 'doNotMix',
+        shouldRouteThroughEarpiece: false,
+      });
+
+      // 3. Populate genuine hardware devices
+      refreshDevices();
+
+      setRecordings(RecordingLibrary.getAll());
+
+      const orphaned = SessionJournal.checkOrphanedSession();
+      if (orphaned) {
+        Alert.alert(
+          'Interrupted Recording Found',
+          `Session ${orphaned.sessionId} did not finalize properly.`,
+          [
+            { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+            { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+          ]
+        );
+      }
+    } catch (err) {
+      console.error('Bootstrap error:', err);
+    } finally {
+      setIsReady(true);
+    }
+  }
+
+  bootstrap();
+}, [refreshDevices]);
 
   useEffect(() => {
     if (engineState === 'RECORDING') {

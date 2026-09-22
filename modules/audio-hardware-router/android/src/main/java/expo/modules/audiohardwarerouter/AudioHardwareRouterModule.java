@@ -18,6 +18,11 @@ import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
     private final ReactApplicationContext reactContext;
     private final AudioManager audioManager;
@@ -85,10 +90,19 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
         }
     }
 
+    private boolean isBluetoothDevice(int typeCode) {
+        return typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            || typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+            || typeCode == 26 // AudioDeviceInfo.TYPE_BLE_HEADSET
+            || typeCode == 27 // AudioDeviceInfo.TYPE_BLE_SPEAKER
+            || typeCode == 23; // AudioDeviceInfo.TYPE_HEARING_AID
+    }
+
     private WritableMap mapDeviceInfo(AudioDeviceInfo info) {
         WritableMap map = Arguments.createMap();
         int typeCode = info.getType();
         String typeString;
+
         switch (typeCode) {
             case AudioDeviceInfo.TYPE_BUILTIN_MIC:
                 typeString = "builtin_mic";
@@ -106,31 +120,33 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
                 typeString = "usb_accessory";
                 break;
             case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case 26: // TYPE_BLE_HEADSET
                 typeString = "bluetooth_sco";
                 break;
             case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
                 typeString = "bluetooth_a2dp";
                 break;
             default:
-                typeString = "external_input";
+                typeString = isBluetoothDevice(typeCode) ? "bluetooth_sco" : "external_input";
                 break;
         }
 
         CharSequence productName = info.getProductName();
-        String rawName = productName != null ? productName.toString() : "";
+        String rawName = productName != null ? productName.toString().trim() : "";
         String displayName;
-        if (!rawName.trim().isEmpty()) {
+
+        if (!rawName.isEmpty()) {
             displayName = rawName;
         } else if (typeCode == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
             displayName = "Built-in Microphone";
         } else if (typeCode == AudioDeviceInfo.TYPE_WIRED_HEADSET) {
-            displayName = "Wired Headset Mic";
+            displayName = "Wired Headset";
         } else if (typeCode == AudioDeviceInfo.TYPE_USB_DEVICE || typeCode == AudioDeviceInfo.TYPE_USB_HEADSET) {
-            displayName = "USB Audio Interface";
-        } else if (typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
-            displayName = "Bluetooth Audio Input";
+            displayName = "USB Audio Device";
+        } else if (isBluetoothDevice(typeCode)) {
+            displayName = "Bluetooth Earpods / Headset";
         } else {
-            displayName = "Input #" + info.getId();
+            displayName = "Audio Device #" + info.getId();
         }
 
         map.putInt("id", info.getId());
@@ -164,12 +180,31 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
         WritableArray array = Arguments.createArray();
         if (audioManager == null) return array;
 
-        AudioDeviceInfo[] devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
-        for (AudioDeviceInfo d : devices) {
-            if (d.isSource()) {
-                array.pushMap(mapDeviceInfo(d));
+        List<AudioDeviceInfo> candidates = new ArrayList<>();
+        Set<Integer> seenIds = new HashSet<>();
+
+        // 1. Android 12+ Communication Devices (discovers Bluetooth earpods & wired headsets)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            List<AudioDeviceInfo> commDevices = audioManager.getAvailableCommunicationDevices();
+            for (AudioDeviceInfo d : commDevices) {
+                if (d.getType() != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && seenIds.add(d.getId())) {
+                    candidates.add(d);
+                }
             }
         }
+
+        // 2. Query standard inputs to catch any remaining hardware capsules
+        AudioDeviceInfo[] inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
+        for (AudioDeviceInfo d : inputDevices) {
+            if (seenIds.add(d.getId())) {
+                candidates.add(d);
+            }
+        }
+
+        for (AudioDeviceInfo d : candidates) {
+            array.pushMap(mapDeviceInfo(d));
+        }
+
         return array;
     }
 

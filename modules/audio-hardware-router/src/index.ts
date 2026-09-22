@@ -20,26 +20,19 @@ export interface AudioInputDevice {
   channelCounts: number[];
 }
 
-const DEFAULT_BUILTIN_DEVICE: AudioInputDevice = {
-  id: 1,
-  name: 'Built-in Microphone',
-  type: 'builtin_mic',
-  typeCode: 15,
-  sampleRates: [44100, 48000],
-  channelCounts: [1, 2],
-};
-
 export const AudioHardwareRouter = {
   getAvailableInputs(): AudioInputDevice[] {
     try {
-      const result = NativeModule?.getAvailableInputs?.();
-      if (Array.isArray(result) && result.length > 0) {
-        return result;
+      if (NativeModule && typeof NativeModule.getAvailableInputs === 'function') {
+        const result = NativeModule.getAvailableInputs();
+        if (Array.isArray(result)) {
+          return result;
+        }
       }
     } catch (e) {
-      console.warn('[AudioHardwareRouter] getAvailableInputs error:', e);
+      console.warn('[AudioHardwareRouter] getAvailableInputs native error:', e);
     }
-    return [DEFAULT_BUILTIN_DEVICE];
+    return [];
   },
 
   setPreferredInputDevice(deviceId: number): boolean {
