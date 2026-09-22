@@ -1,7 +1,7 @@
 // App.tsx
 import 'react-native-gesture-handler';
 import { useEffect, useState, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Alert,PermissionsAndroid, Platform } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Alert, Platform, PermissionsAndroid } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AudioModule } from 'expo-audio';
@@ -31,6 +31,8 @@ export default function App() {
     selectedDevice,
     selectDevice,
     refreshDevices,
+    activateHardwareRouting,
+    releaseHardwareRouting,
   } = useAudioInputDevices();
 
   const {
@@ -55,6 +57,12 @@ export default function App() {
   const resumeRecordingRef = useRef(resumeRecording);
   resumeRecordingRef.current = resumeRecording;
 
+  const activateHardwareRoutingRef = useRef(activateHardwareRouting);
+  activateHardwareRoutingRef.current = activateHardwareRouting;
+
+  const releaseHardwareRoutingRef = useRef(releaseHardwareRouting);
+  releaseHardwareRoutingRef.current = releaseHardwareRouting;
+
   const formatTimer = (ms: number) => {
     const totalSeconds = Math.floor(ms / 1000);
     const mins = Math.floor(totalSeconds / 60);
@@ -69,6 +77,9 @@ export default function App() {
       await ForegroundServiceManager.stopService();
 
       const outputUri = await stopRecording();
+
+      // Release communication mode to unblock media playback on the headset
+      releaseHardwareRoutingRef.current();
 
       if (outputUri) {
         let sizeBytes = 0;
@@ -104,6 +115,7 @@ export default function App() {
     } catch (e: any) {
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
       Alert.alert('Stop Error', e.message);
     }
   };
@@ -137,53 +149,51 @@ export default function App() {
     });
   }, []);
 
-useEffect(() => {
-  async function bootstrap() {
-    try {
-      await ForegroundServiceManager.initialize();
+  useEffect(() => {
+    async function bootstrap() {
+      try {
+        await ForegroundServiceManager.initialize();
 
-      if (Platform.OS === 'android' && Platform.Version >= 31) {
-        await PermissionsAndroid.requestMultiple([
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-        ]);
-      } else {
-        await AudioModule.requestRecordingPermissionsAsync();
+        if (Platform.OS === 'android' && Platform.Version >= 31) {
+          await PermissionsAndroid.requestMultiple([
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          ]);
+        } else {
+          await AudioModule.requestRecordingPermissionsAsync();
+        }
+
+        await AudioModule.setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: 'doNotMix',
+          shouldRouteThroughEarpiece: false,
+        });
+
+        refreshDevices();
+
+        setRecordings(RecordingLibrary.getAll());
+
+        const orphaned = SessionJournal.checkOrphanedSession();
+        if (orphaned) {
+          Alert.alert(
+            'Interrupted Recording Found',
+            `Session ${orphaned.sessionId} did not finalize properly.`,
+            [
+              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+            ]
+          );
+        }
+      } catch (err) {
+        console.error('Bootstrap error:', err);
+      } finally {
+        setIsReady(true);
       }
-
-      await AudioModule.setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-        interruptionMode: 'doNotMix',
-        shouldRouteThroughEarpiece: false,
-      });
-
-      refreshDevices();
-
-      
-      setRecordings(RecordingLibrary.getAll());
-
-      const orphaned = SessionJournal.checkOrphanedSession();
-      if (orphaned) {
-        Alert.alert(
-          'Interrupted Recording Found',
-          `Session ${orphaned.sessionId} did not finalize properly.`,
-          [
-            { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-            { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
-          ]
-        );
-      }
-    } catch (err) {
-      console.error('Bootstrap error:', err);
-    } finally {
-      setIsReady(true);
     }
-  }
 
-  bootstrap();
-}, [refreshDevices]);
+    bootstrap();
+  }, [refreshDevices]);
 
   useEffect(() => {
     if (engineState === 'RECORDING') {
@@ -208,6 +218,7 @@ useEffect(() => {
   const handleRecordPress = async () => {
     try {
       if (engineState === 'IDLE' || engineState === 'STOPPED' || engineState === 'ERROR') {
+        activateHardwareRoutingRef.current();
         await activateKeepAwakeAsync();
         await ForegroundServiceManager.startService(activePreset.badge);
         await startRecording();
@@ -219,6 +230,7 @@ useEffect(() => {
     } catch (e: any) {
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
       Alert.alert('Recording Error', e.message);
     }
   };
@@ -258,30 +270,31 @@ useEffect(() => {
             <TeleprompterDeck engineState={engineState} />
 
             {/* Badges: Format & Active Input Mic */}
-<View style={styles.badgesRow}>
-  <TouchableOpacity
-    style={styles.presetBadgeContainer}
-    onPress={() => setSettingsVisible(true)}
-    disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-  >
-    <View style={styles.presetBadgeDot} />
-    <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
-  </TouchableOpacity>
+            <View style={styles.badgesRow}>
+              <TouchableOpacity
+                style={styles.presetBadgeContainer}
+                onPress={() => setSettingsVisible(true)}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <View style={styles.presetBadgeDot} />
+                <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
+              </TouchableOpacity>
 
-  <TouchableOpacity
-    style={styles.inputBadgeContainer}
-    onPress={() => {
-      refreshDevices(); // Query hardware right before opening modal
-      setDeviceModalVisible(true);
-    }}
-    disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-  >
-    <Text style={styles.inputBadgeIcon}>🎙️</Text>
-    <Text style={styles.inputBadgeText} numberOfLines={1}>
-      {selectedDevice ? selectedDevice.name : 'Built-in Microphone'}
-    </Text>
-  </TouchableOpacity>
-</View>
+              <TouchableOpacity
+                style={styles.inputBadgeContainer}
+                onPress={() => {
+                  refreshDevices();
+                  setDeviceModalVisible(true);
+                }}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <Text style={styles.inputBadgeIcon}>🎙️</Text>
+                <Text style={styles.inputBadgeText} numberOfLines={1}>
+                  {selectedDevice ? selectedDevice.name : 'Built-in Microphone'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
             <Text style={styles.timer}>{formatTimer(durationMs)}</Text>
 
             <AudioMeter
