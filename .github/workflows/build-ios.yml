@@ -1,6 +1,9 @@
 name: Build iOS IPA (Unsigned)
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feat/ios-support
 
 jobs:
   build-ios:
