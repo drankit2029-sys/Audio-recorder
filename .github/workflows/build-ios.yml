@@ -1,49 +1,15 @@
-name: Build iOS Dev Client (ESign Ready)
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - feat/ios-support
-
-jobs:
-  build-ios-dev-client:
-    runs-on: macos-15
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Select Xcode 16.1
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Prebuild Native iOS Project
-        run: npx expo prebuild --platform ios --clean
-
-      - name: Install CocoaPods
-        run: |
-          cd ios
-          pod install
-
-      - name: Build Debug App (Dev Client)
+- name: Build Debug App (Dev Client)
         run: |
           cd ios
           xcodebuild build \
             -workspace AudioRecorder.xcworkspace \
             -scheme AudioRecorder \
             -configuration Debug \
-            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
             -derivedDataPath ../build/DerivedData \
-            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=YES
+            CODE_SIGN_IDENTITY=""
 
       - name: Package IPA for ESign
         run: |
