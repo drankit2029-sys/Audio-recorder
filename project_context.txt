@@ -1,0 +1,4074 @@
+# PROJECT CODEBASE CONTEXT DUMP
+# Total Files: 36
+
+================================================================================
+FILE: .gitignore
+================================================================================
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+# generated native folders
+/ios
+/android
+
+
+================================================================================
+FILE: AGENTS.md
+================================================================================
+# Expo HAS CHANGED
+
+Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before writing any code.
+
+
+================================================================================
+FILE: App.tsx
+================================================================================
+// App.tsx
+import 'react-native-gesture-handler';
+import { useEffect, useState, useRef } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, Alert, Platform, PermissionsAndroid } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { AudioModule } from 'expo-audio';
+import * as FileSystem from 'expo-file-system/legacy';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { SessionJournal } from './src/services/storage/sessionJournal';
+import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
+import { useAudioRecording, EngineState } from './src/services/audio/useAudioRecording';
+import { AudioMeter } from './src/components/meter/AudioMeter';
+import { RecordingLibraryModal } from './src/components/library/RecordingLibraryModal';
+import { TeleprompterDeck } from './src/components/prompter/TeleprompterDeck';
+import { AudioSettingsModal } from './src/components/settings/AudioSettingsModal';
+import { ForegroundServiceManager } from './src/services/audio/ForegroundServiceManager';
+import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices';
+import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
+
+export default function App() {
+  const [isReady, setIsReady] = useState(false);
+  const [libraryVisible, setLibraryVisible] = useState(false);
+  const [settingsVisible, setSettingsVisible] = useState(false);
+  const [deviceModalVisible, setDeviceModalVisible] = useState(false);
+  const [recordings, setRecordings] = useState<SavedRecording[]>([]);
+
+  const {
+    devices,
+    selectedDeviceId,
+    selectedDevice,
+    selectDevice,
+    refreshDevices,
+    activateHardwareRouting,
+    releaseHardwareRouting,
+  } = useAudioInputDevices();
+
+  const {
+    engineState,
+    durationMs,
+    meteringDb,
+    activePreset,
+    setPresetKey,
+    startRecording,
+    pauseRecording,
+    resumeRecording,
+    stopRecording,
+  } = useAudioRecording();
+
+  const lastNotificationUpdateRef = useRef<number>(0);
+  const durationMsRef = useRef<number>(durationMs);
+  durationMsRef.current = durationMs;
+
+  const pauseRecordingRef = useRef(pauseRecording);
+  pauseRecordingRef.current = pauseRecording;
+
+  const resumeRecordingRef = useRef(resumeRecording);
+  resumeRecordingRef.current = resumeRecording;
+
+  const activateHardwareRoutingRef = useRef(activateHardwareRouting);
+  activateHardwareRoutingRef.current = activateHardwareRouting;
+
+  const releaseHardwareRoutingRef = useRef(releaseHardwareRouting);
+  releaseHardwareRoutingRef.current = releaseHardwareRouting;
+
+  const formatTimer = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const handleStopPress = async () => {
+    try {
+      const finalDuration = durationMsRef.current;
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+
+      const outputUri = await stopRecording();
+
+      // Release communication mode to unblock media playback on the headset
+      releaseHardwareRoutingRef.current();
+
+      if (outputUri) {
+        let sizeBytes = 0;
+        try {
+          const info = await FileSystem.getInfoAsync(outputUri);
+          if (info.exists && !info.isDirectory) {
+            sizeBytes = info.size;
+          }
+        } catch {}
+
+        const now = new Date();
+        const newRecord: SavedRecording = {
+          id: `take_${Date.now()}`,
+          name: `Take ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`,
+          uri: outputUri,
+          sizeBytes,
+          durationMs: finalDuration,
+          createdAt: Date.now(),
+        };
+
+        const updated = RecordingLibrary.save(newRecord);
+        setRecordings(updated);
+
+        Alert.alert(
+          'Take Finalized',
+          `Saved ${newRecord.name} (${(sizeBytes / 1024).toFixed(1)} KB)`,
+          [
+            { text: 'OK' },
+            { text: 'View in Library', onPress: () => setLibraryVisible(true) },
+          ]
+        );
+      }
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
+      Alert.alert('Stop Error', e.message);
+    }
+  };
+
+  const handleStopPressRef = useRef(handleStopPress);
+  handleStopPressRef.current = handleStopPress;
+
+  useEffect(() => {
+    ForegroundServiceManager.registerHandlers({
+      onPause: async () => {
+        try {
+          await pauseRecordingRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onPause failed:', e);
+        }
+      },
+      onResume: async () => {
+        try {
+          await resumeRecordingRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onResume failed:', e);
+        }
+      },
+      onStop: async () => {
+        try {
+          await handleStopPressRef.current();
+        } catch (e) {
+          console.warn('[App] Notification onStop failed:', e);
+        }
+      },
+    });
+  }, []);
+
+  useEffect(() => {
+    async function bootstrap() {
+      try {
+        await ForegroundServiceManager.initialize();
+
+        if (Platform.OS === 'android' && Platform.Version >= 31) {
+          await PermissionsAndroid.requestMultiple([
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          ]);
+        } else {
+          await AudioModule.requestRecordingPermissionsAsync();
+        }
+
+        await AudioModule.setAudioModeAsync({
+          allowsRecording: true,
+          playsInSilentMode: true,
+          interruptionMode: 'doNotMix',
+          shouldRouteThroughEarpiece: false,
+        });
+
+        refreshDevices();
+
+        setRecordings(RecordingLibrary.getAll());
+
+        const orphaned = SessionJournal.checkOrphanedSession();
+        if (orphaned) {
+          Alert.alert(
+            'Interrupted Recording Found',
+            `Session ${orphaned.sessionId} did not finalize properly.`,
+            [
+              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+            ]
+          );
+        }
+      } catch (err) {
+        console.error('Bootstrap error:', err);
+      } finally {
+        setIsReady(true);
+      }
+    }
+
+    bootstrap();
+  }, [refreshDevices]);
+
+  useEffect(() => {
+    if (engineState === 'RECORDING') {
+      const now = Date.now();
+      if (now - lastNotificationUpdateRef.current >= 1000) {
+        lastNotificationUpdateRef.current = now;
+        ForegroundServiceManager.updateProgress(
+          formatTimer(durationMs),
+          activePreset.badge,
+          false
+        );
+      }
+    } else if (engineState === 'PAUSED') {
+      ForegroundServiceManager.updateProgress(
+        formatTimer(durationMs),
+        activePreset.badge,
+        true
+      );
+    }
+  }, [durationMs, engineState, activePreset]);
+
+  const handleRecordPress = async () => {
+    try {
+      if (engineState === 'IDLE' || engineState === 'STOPPED' || engineState === 'ERROR') {
+        activateHardwareRoutingRef.current();
+        await activateKeepAwakeAsync();
+        await ForegroundServiceManager.startService(activePreset.badge);
+        await startRecording();
+      } else if (engineState === 'RECORDING') {
+        await pauseRecording();
+      } else if (engineState === 'PAUSED') {
+        await resumeRecording();
+      }
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
+      Alert.alert('Recording Error', e.message);
+    }
+  };
+
+  return (
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.container}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View>
+              <Text style={styles.title}>Audio Recorder</Text>
+              <Text style={styles.statusText}>
+                State: <Text style={{ color: getStatusColor(engineState) }}>{engineState}</Text>
+              </Text>
+            </View>
+
+            <View style={styles.headerButtons}>
+              <TouchableOpacity
+                style={styles.headerBtn}
+                onPress={() => setSettingsVisible(true)}
+              >
+                <Text style={styles.headerBtnText}>FORMAT</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.headerBtn, styles.takesBtn]}
+                onPress={() => setLibraryVisible(true)}
+              >
+                <Text style={styles.takesBtnText}>TAKES ({recordings.length})</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* Console Deck */}
+          <View style={styles.deck}>
+            <TeleprompterDeck engineState={engineState} />
+
+            {/* Badges: Format & Active Input Mic */}
+            <View style={styles.badgesRow}>
+              <TouchableOpacity
+                style={styles.presetBadgeContainer}
+                onPress={() => setSettingsVisible(true)}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <View style={styles.presetBadgeDot} />
+                <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.inputBadgeContainer}
+                onPress={() => {
+                  refreshDevices();
+                  setDeviceModalVisible(true);
+                }}
+                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+              >
+                <Text style={styles.inputBadgeIcon}>🎙️</Text>
+                <Text style={styles.inputBadgeText} numberOfLines={1}>
+                  {selectedDevice ? selectedDevice.name : 'Built-in Microphone'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.timer}>{formatTimer(durationMs)}</Text>
+
+            <AudioMeter
+              meteringDb={meteringDb}
+              isRecording={engineState === 'RECORDING'}
+            />
+
+            <View style={styles.controlsRow}>
+              <TouchableOpacity
+                style={[styles.button, engineState === 'RECORDING' ? styles.pauseBtn : styles.recordBtn]}
+                onPress={handleRecordPress}
+              >
+                <Text style={styles.buttonText}>
+                  {engineState === 'RECORDING' ? 'PAUSE' : engineState === 'PAUSED' ? 'RESUME' : 'RECORD'}
+                </Text>
+              </TouchableOpacity>
+
+              {(engineState === 'RECORDING' || engineState === 'PAUSED') && (
+                <TouchableOpacity style={[styles.button, styles.stopBtn]} onPress={handleStopPress}>
+                  <Text style={styles.buttonText}>STOP</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+
+          {/* Hardware Input Device Modal */}
+          <InputDeviceModal
+            visible={deviceModalVisible}
+            onClose={() => setDeviceModalVisible(false)}
+            devices={devices}
+            selectedDeviceId={selectedDeviceId}
+            onSelectDevice={selectDevice}
+            engineState={engineState}
+          />
+
+          {/* Settings Modal */}
+          <AudioSettingsModal
+            visible={settingsVisible}
+            onClose={() => setSettingsVisible(false)}
+            activePresetKey={activePreset.key}
+            onSelectPreset={setPresetKey}
+            engineState={engineState}
+          />
+
+          {/* Library Modal */}
+          <RecordingLibraryModal
+            visible={libraryVisible}
+            onClose={() => setLibraryVisible(false)}
+            recordings={recordings}
+            onLibraryUpdate={setRecordings}
+          />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
+}
+
+function getStatusColor(state: EngineState) {
+  switch (state) {
+    case 'RECORDING':
+      return '#FF5252';
+    case 'PAUSED':
+      return '#FFD600';
+    case 'STOPPED':
+      return '#00E676';
+    default:
+      return '#9E9E9E';
+  }
+}
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  header: {
+    position: 'absolute',
+    top: 48,
+    width: '92%',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  statusText: {
+    fontSize: 13,
+    color: '#9E9E9E',
+    marginTop: 2,
+  },
+  headerButtons: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  headerBtn: {
+    backgroundColor: '#262626',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#3A3A3A',
+  },
+  headerBtnText: {
+    color: '#B0BEC5',
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.5,
+  },
+  takesBtn: {
+    borderColor: '#2E4C38',
+  },
+  takesBtnText: {
+    color: '#00E676',
+    fontWeight: '700',
+    fontSize: 11,
+    letterSpacing: 0.5,
+  },
+  deck: {
+    width: '92%',
+    padding: 16,
+    paddingBottom: 24,
+    backgroundColor: '#1E1E1E',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#333333',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 50,
+  },
+  badgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+    maxWidth: '96%',
+  },
+  presetBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#252525',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#383838',
+  },
+  presetBadgeDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#00E676',
+  },
+  presetBadgeText: {
+    color: '#E0E0E0',
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  inputBadgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#1C2620',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2E4C38',
+    maxWidth: 160,
+  },
+  inputBadgeIcon: {
+    fontSize: 11,
+  },
+  inputBadgeText: {
+    color: '#00E676',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  timer: {
+    fontSize: 44,
+    fontWeight: '300',
+    color: '#FFFFFF',
+    fontVariant: ['tabular-nums'],
+    marginVertical: 4,
+  },
+  controlsRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginTop: 14,
+  },
+  button: {
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderRadius: 30,
+  },
+  recordBtn: {
+    backgroundColor: '#D50000',
+  },
+  pauseBtn: {
+    backgroundColor: '#FF6D00',
+  },
+  stopBtn: {
+    backgroundColor: '#424242',
+  },
+  buttonText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 14,
+    letterSpacing: 1,
+  },
+});
+
+
+================================================================================
+FILE: CLAUDE.md
+================================================================================
+@AGENTS.md
+
+
+================================================================================
+FILE: LICENSE
+================================================================================
+The MIT License (MIT)
+
+Copyright (c) 2015-present 650 Industries, Inc. (aka Expo)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+================================================================================
+FILE: app.json
+================================================================================
+{
+  "expo": {
+    "name": "AudioRecorder",
+    "slug": "audio-recorder",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.audiorecorder.app",
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"],
+        "NSMicrophoneUsageDescription": "AudioRecorder requires microphone access to capture uncompressed master audio."
+      }
+    },
+    "android": {
+      "package": "com.audiorecorder.app",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH"
+        
+      ]
+    },
+    "plugins": [
+      "./plugins/withNotifeeForegroundService",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow AudioRecorder to access your microphone."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26,
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 34
+          },
+          "ios": {
+            "deploymentTarget": "16.4"
+          }
+        }
+      ],
+      "./plugins/withAndroidAudioForegroundService"
+    ]
+  }
+}
+
+
+================================================================================
+FILE: index.ts
+================================================================================
+import { registerRootComponent } from 'expo';
+
+import App from './App';
+
+// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
+// It also ensures that whether you load the app in Expo Go or in a native build,
+// the environment is set up appropriately
+registerRootComponent(App);
+
+
+================================================================================
+FILE: metro.config.js
+================================================================================
+const { getDefaultConfig } = require('expo/metro-config');
+
+const config = getDefaultConfig(__dirname);
+
+// Limit workers to 1 to prevent worker process crashes in PRoot/Alpine
+config.maxWorkers = 1;
+
+// Ensure Skia and native assets resolve correctly
+config.resolver.sourceExts = [...config.resolver.sourceExts, 'mjs', 'cjs'];
+
+module.exports = config;
+
+
+================================================================================
+FILE: mock-net.js
+================================================================================
+// mock-net.js
+const os = require('node:os');
+
+const MY_IP = '192.168.43.1';
+
+const interfaces = {
+  lo: [
+    {
+      address: '127.0.0.1',
+      netmask: '255.0.0.0',
+      family: 'IPv4',
+      mac: '00:00:00:00:00:00',
+      internal: true,
+      cidr: '127.0.0.1/8',
+    },
+    {
+      address: '::1',
+      netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+      family: 'IPv6',
+      mac: '00:00:00:00:00:00',
+      internal: true,
+      cidr: '::1/128',
+      scopeid: 0,
+    },
+  ],
+  wlan0: [
+    {
+      address: MY_IP,
+      netmask: '255.255.255.0',
+      family: 'IPv4',
+      mac: '00:00:00:00:00:00',
+      internal: false,
+      cidr: `${MY_IP}/24`,
+    },
+  ],
+};
+
+try {
+  os.networkInterfaces = () => interfaces;
+} catch {
+  Object.defineProperty(os, 'networkInterfaces', {
+    value: () => interfaces,
+    configurable: true,
+    writable: true,
+  });
+}
+
+
+================================================================================
+FILE: package.json
+================================================================================
+{
+  "name": "audio-recorder",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@expo/ngrok": "^4.1.3",
+    "@notifee/react-native": "^9.1.8",
+    "@shopify/react-native-skia": "2.6.2",
+    "expo": "~57.0.24",
+    "audio-hardware-router": "file:./modules/audio-hardware-router",
+    "expo-audio": "~57.0.5",
+    "expo-build-properties": "~57.0.21",
+    "expo-dev-client": "~57.0.19",
+    "expo-file-system": "~57.0.7",
+    "expo-keep-awake": "~57.0.2",
+    "expo-sharing": "~57.0.21",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-mmkv": "^4.3.2",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}
+
+
+================================================================================
+FILE: tsconfig.json
+================================================================================
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true
+  }
+}
+
+
+================================================================================
+FILE: .claude/settings.json
+================================================================================
+{
+  "enabledPlugins": {
+    "expo@claude-plugins-official": true
+  }
+}
+
+
+================================================================================
+FILE: plugins/withAndroidAudioForegroundService.js
+================================================================================
+const { withAndroidManifest } = require('@expo/config-plugins');
+
+module.exports = function withAndroidAudioForegroundService(config) {
+  return withAndroidManifest(config, (config) => {
+    const mainApplication = config.modResults.manifest.application[0];
+
+    // Ensure the service definition contains the microphone foregroundServiceType
+    if (!mainApplication.service) {
+      mainApplication.service = [];
+    }
+
+    const existingService = mainApplication.service.find(
+      (s) => s.$['android:name'] === 'expo.modules.audio.AudioRecordingService'
+    );
+
+    if (!existingService) {
+      mainApplication.service.push({
+        $: {
+          'android:name': 'expo.modules.audio.AudioRecordingService',
+          'android:enabled': 'true',
+          'android:exported': 'false',
+          'android:foregroundServiceType': 'microphone'
+        }
+      });
+    } else {
+      existingService.$['android:foregroundServiceType'] = 'microphone';
+    }
+
+    return config;
+  });
+};
+
+
+================================================================================
+FILE: plugins/withNotifeeForegroundService.js
+================================================================================
+// plugins/withNotifeeForegroundService.js
+const { withAndroidManifest } = require('@expo/config-plugins');
+
+module.exports = function withNotifeeForegroundService(config) {
+  return withAndroidManifest(config, (config) => {
+    const manifest = config.modResults.manifest;
+    const app = manifest.application[0];
+
+    // Ensure tools namespace is declared on the <manifest> root
+    if (!manifest.$['xmlns:tools']) {
+      manifest.$['xmlns:tools'] = 'http://schemas.android.com/tools';
+    }
+
+    if (!app.service) {
+      app.service = [];
+    }
+
+    // Locate Notifee's ForegroundService or declare it
+    let service = app.service.find(
+      (s) => s.$ && s.$['android:name'] === 'app.notifee.core.ForegroundService'
+    );
+
+    if (!service) {
+      service = {
+        $: {
+          'android:name': 'app.notifee.core.ForegroundService',
+        },
+      };
+      app.service.push(service);
+    }
+
+    // Override the default shortService (0x800) with microphone (0x80)
+    service.$['android:foregroundServiceType'] = 'microphone';
+    service.$['tools:replace'] = 'android:foregroundServiceType';
+
+    return config;
+  });
+};
+
+
+================================================================================
+FILE: src/services/storage/audioSettingsStorage.ts
+================================================================================
+// src/services/storage/audioSettingsStorage.ts
+import { createMMKV } from 'react-native-mmkv';
+import { PresetKey } from '../audio/types';
+
+const settingsStorage = createMMKV({
+  id: 'audio-recorder-settings',
+});
+
+const PRESET_STORAGE_KEY = 'active_audio_format_preset';
+
+export const AudioSettingsStorage = {
+  getPreset(): PresetKey {
+    const saved = settingsStorage.getString(PRESET_STORAGE_KEY) as PresetKey;
+    if (saved === 'broadcast_wav_48k' || saved === 'podcast_wav_44k' || saved === 'share_aac_48k') {
+      return saved;
+    }
+    return 'broadcast_wav_48k';
+  },
+
+  setPreset(key: PresetKey): void {
+    settingsStorage.set(PRESET_STORAGE_KEY, key);
+  },
+};
+
+
+================================================================================
+FILE: src/services/storage/prompterStorage.ts
+================================================================================
+// src/services/storage/prompterStorage.ts
+import { createMMKV } from 'react-native-mmkv';
+
+const prompterStorage = createMMKV({
+  id: 'audio-prompter-storage',
+});
+
+const SCRIPT_KEY = 'prompter_script_text';
+const SPEED_KEY = 'prompter_scroll_speed_px';
+const FONT_SIZE_KEY = 'prompter_font_size';
+const MIRROR_KEY = 'prompter_is_mirrored';
+
+const DEFAULT_SCRIPT = `Welcome to the studio. This is your synchronized teleprompter.
+
+Speak with a steady, natural cadence and maintain consistent distance from the microphone capsule.
+
+Watch the real-time Skia meter below to protect your dynamic range. Target your speech peaks between -18 dBFS and -6 dBFS for broadcast-ready master audio.
+
+Use the Mirror toggle if you are shooting through a beam-splitter glass rig, or adjust the speed stepper above to match your reading tempo.`;
+
+export const PrompterStorage = {
+  getScript(): string {
+    return prompterStorage.getString(SCRIPT_KEY) ?? DEFAULT_SCRIPT;
+  },
+
+  setScript(text: string): void {
+    prompterStorage.set(SCRIPT_KEY, text);
+  },
+
+  getSpeed(): number {
+    const val = prompterStorage.getNumber(SPEED_KEY);
+    return val && val >= 15 && val <= 150 ? val : 35; // Default 35 px/s
+  },
+
+  setSpeed(speed: number): void {
+    prompterStorage.set(SPEED_KEY, speed);
+  },
+
+  getFontSize(): number {
+    const val = prompterStorage.getNumber(FONT_SIZE_KEY);
+    return val && val >= 14 && val <= 36 ? val : 20;
+  },
+
+  setFontSize(size: number): void {
+    prompterStorage.set(FONT_SIZE_KEY, size);
+  },
+
+  getIsMirrored(): boolean {
+    return prompterStorage.getBoolean(MIRROR_KEY) ?? false;
+  },
+
+  setIsMirrored(mirrored: boolean): void {
+    prompterStorage.set(MIRROR_KEY, mirrored);
+  },
+};
+
+
+================================================================================
+FILE: src/services/storage/recordingLibrary.ts
+================================================================================
+// src/services/storage/recordingLibrary.ts
+import { createMMKV } from 'react-native-mmkv';
+import * as FileSystem from 'expo-file-system/legacy';
+
+export interface SavedRecording {
+  id: string;
+  name: string;
+  uri: string;
+  sizeBytes: number;
+  durationMs: number;
+  createdAt: number;
+}
+
+const libraryStorage = createMMKV({
+  id: 'audio-recordings-library',
+});
+
+const LIBRARY_STORAGE_KEY = 'saved_recordings_index';
+
+export const RecordingLibrary = {
+  getAll(): SavedRecording[] {
+    try {
+      const raw = libraryStorage.getString(LIBRARY_STORAGE_KEY);
+      if (!raw) return [];
+      return JSON.parse(raw) as SavedRecording[];
+    } catch {
+      return [];
+    }
+  },
+
+  save(recording: SavedRecording): SavedRecording[] {
+    const existing = this.getAll();
+    const updated = [recording, ...existing];
+    libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
+    return updated;
+  },
+
+  async delete(id: string): Promise<SavedRecording[]> {
+    const existing = this.getAll();
+    const target = existing.find((item) => item.id === id);
+
+    if (target?.uri) {
+      try {
+        await FileSystem.deleteAsync(target.uri, { idempotent: true });
+      } catch (err) {
+        console.warn('[RecordingLibrary] Failed to delete file on disk:', err);
+      }
+    }
+
+    const updated = existing.filter((item) => item.id !== id);
+    libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
+    return updated;
+  },
+
+  rename(id: string, newName: string): SavedRecording[] {
+    const existing = this.getAll();
+    const updated = existing.map((item) =>
+      item.id === id ? { ...item, name: newName } : item
+    );
+    libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
+    return updated;
+  },
+};
+
+
+================================================================================
+FILE: src/services/storage/sessionJournal.ts
+================================================================================
+// src/services/storage/sessionJournal.ts
+import { createMMKV } from 'react-native-mmkv';
+
+// Initialize using the v4 Nitro Modules factory function
+export const sessionStorage = createMMKV({
+  id: 'audio-session-journal',
+});
+
+export type RecordingStatus = 'RECORDING' | 'PAUSED' | 'FINALIZED' | 'INTERRUPTED';
+
+export interface ActiveSessionRecord {
+  sessionId: string;
+  fileUri: string;
+  formatPreset: 'broadcast_wav_48k' | 'podcast_wav_44k' | 'share_aac_48k';
+  sampleRate: number;
+  channels: 1 | 2;
+  startedAt: number;
+  lastHeartbeatTimestamp: number;
+  byteOffsetEstimate: number;
+  status: RecordingStatus;
+}
+
+const ACTIVE_SESSION_KEY = 'active_recording_session';
+
+export const SessionJournal = {
+  startSession(record: Omit<ActiveSessionRecord, 'lastHeartbeatTimestamp' | 'byteOffsetEstimate' | 'status'>): void {
+    const fullRecord: ActiveSessionRecord = {
+      ...record,
+      lastHeartbeatTimestamp: Date.now(),
+      byteOffsetEstimate: 0,
+      status: 'RECORDING',
+    };
+    sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
+  },
+
+  updateHeartbeat(byteOffset: number): void {
+    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
+    if (!raw) return;
+
+    try {
+      const record: ActiveSessionRecord = JSON.parse(raw);
+      record.lastHeartbeatTimestamp = Date.now();
+      record.byteOffsetEstimate = byteOffset;
+      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+    } catch {}
+  },
+
+  setStatus(status: RecordingStatus): void {
+    const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
+    if (!raw) return;
+
+    try {
+      const record: ActiveSessionRecord = JSON.parse(raw);
+      record.status = status;
+      sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
+    } catch {}
+  },
+
+  checkOrphanedSession(): ActiveSessionRecord | null {
+    try {
+      const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
+      if (!raw) return null;
+
+      const record: ActiveSessionRecord = JSON.parse(raw);
+      if (record.status !== 'FINALIZED') {
+        return record;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  },
+
+  clearSession(): void {
+    // .remove() replaced .delete() in v4
+    sessionStorage.remove(ACTIVE_SESSION_KEY);
+  }
+};
+
+
+================================================================================
+FILE: src/services/audio/ForegroundServiceManager.ts
+================================================================================
+// src/services/audio/ForegroundServiceManager.ts
+import notifee, {
+  AndroidImportance,
+  AndroidColor,
+  AndroidForegroundServiceType,
+  EventType,
+  NotificationAndroidAction,
+} from '@notifee/react-native';
+
+const CHANNEL_ID = 'audio_recording_service';
+const NOTIFICATION_ID = 'active_recording_notification';
+
+type ActionCallback = () => void | Promise<void>;
+
+let onPauseCallback: ActionCallback | null = null;
+let onResumeCallback: ActionCallback | null = null;
+let onStopCallback: ActionCallback | null = null;
+
+async function handleActionPress(actionId?: string) {
+  if (!actionId) return;
+
+  if (actionId === 'action_pause') {
+    if (onPauseCallback) await onPauseCallback();
+  } else if (actionId === 'action_start' || actionId === 'action_resume') {
+    if (onResumeCallback) await onResumeCallback();
+  } else if (actionId === 'action_stop') {
+    if (onStopCallback) await onStopCallback();
+  }
+}
+
+// 1. Keep background task worker alive while recording
+notifee.registerForegroundService(() => {
+  return new Promise(() => {
+    // Keeps service running until stopService() is invoked
+  });
+});
+
+// 2. Handle notification interactions when app is minimized or screen is locked
+notifee.onBackgroundEvent(async ({ type, detail }) => {
+  if (type === EventType.ACTION_PRESS) {
+    await handleActionPress(detail.pressAction?.id);
+  }
+});
+
+// 3. Handle notification interactions when app is visible
+notifee.onForegroundEvent(async ({ type, detail }) => {
+  if (type === EventType.ACTION_PRESS) {
+    await handleActionPress(detail.pressAction?.id);
+  }
+});
+
+function createNotificationPayload(durationStr: string, presetLabel: string, isPaused: boolean) {
+  const actions: NotificationAndroidAction[] = [
+    {
+      title: isPaused ? 'Start' : 'Pause',
+      pressAction: {
+        id: isPaused ? 'action_start' : 'action_pause',
+      },
+    },
+    {
+      title: 'Stop',
+      pressAction: {
+        id: 'action_stop',
+      },
+    },
+  ];
+
+  return {
+    id: NOTIFICATION_ID,
+    title: isPaused ? 'Recording Paused' : 'Recording in Progress...',
+    body: `${durationStr} • ${presetLabel}`,
+    android: {
+      channelId: CHANNEL_ID,
+      asForegroundService: true,
+      ongoing: true,
+      color: isPaused ? AndroidColor.YELLOW : AndroidColor.RED,
+      foregroundServiceTypes: [
+        AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+      ],
+      pressAction: {
+        id: 'default',
+      },
+      actions,
+    },
+  };
+}
+
+export const ForegroundServiceManager = {
+  registerHandlers(handlers: {
+    onPause: ActionCallback;
+    onResume: ActionCallback;
+    onStop: ActionCallback;
+  }) {
+    onPauseCallback = handlers.onPause;
+    onResumeCallback = handlers.onResume;
+    onStopCallback = handlers.onStop;
+  },
+
+  async initialize(): Promise<void> {
+    try {
+      await notifee.requestPermission();
+
+      await notifee.createChannel({
+        id: CHANNEL_ID,
+        name: 'Audio Recording Service',
+        lights: false,
+        vibration: false,
+        importance: AndroidImportance.LOW,
+      });
+    } catch (error) {
+      console.warn('[ForegroundServiceManager] Failed to init notification channel:', error);
+    }
+  },
+
+  async startService(presetLabel: string): Promise<void> {
+    try {
+      await notifee.displayNotification(
+        createNotificationPayload('00:00', presetLabel, false)
+      );
+    } catch (error) {
+      console.warn('[ForegroundServiceManager] Failed to start foreground service:', error);
+    }
+  },
+
+  async updateProgress(durationStr: string, presetLabel: string, isPaused: boolean = false): Promise<void> {
+    try {
+      await notifee.displayNotification(
+        createNotificationPayload(durationStr, presetLabel, isPaused)
+      );
+    } catch {}
+  },
+
+  async stopService(): Promise<void> {
+    try {
+      await notifee.stopForegroundService();
+      await notifee.cancelNotification(NOTIFICATION_ID);
+    } catch (error) {
+      console.warn('[ForegroundServiceManager] Failed to stop foreground service:', error);
+    }
+  },
+};
+
+
+================================================================================
+FILE: src/services/audio/types.ts
+================================================================================
+// src/services/audio/types.ts
+import { RecordingOptions } from 'expo-audio';
+
+export type PresetKey = 'broadcast_wav_48k' | 'podcast_wav_44k' | 'share_aac_48k';
+
+export interface AudioPresetConfig {
+  key: PresetKey;
+  label: string;
+  badge: string;
+  description: string;
+  extension: '.wav' | '.m4a';
+  mimeType: string;
+  sampleRate: number;
+  channels: 1 | 2;
+  bitDepth?: 16 | 24;
+  bitRate?: number;
+  options: RecordingOptions;
+}
+
+export const AUDIO_PRESETS: Record<PresetKey, AudioPresetConfig> = {
+  broadcast_wav_48k: {
+    key: 'broadcast_wav_48k',
+    label: 'Broadcast Master',
+    badge: 'WAV 48kHz 16-bit',
+    description: 'Uncompressed PCM Mono. Industry standard for studio recording, film, and post-production mastering.',
+    extension: '.wav',
+    mimeType: 'audio/wav',
+    sampleRate: 48000,
+    channels: 1,
+    bitDepth: 16,
+    options: {
+      extension: '.wav',
+      sampleRate: 48000,
+      numberOfChannels: 1,
+      bitDepth: 16,
+      isMeteringEnabled: true,
+      android: {
+        extension: '.wav',
+        outputFormat: 'default',
+        audioEncoder: 'default',
+        isMeteringEnabled: true,
+      },
+      ios: {
+        extension: '.wav',
+        audioQuality: 127,
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        bitDepth: 16,
+        linearPCM: true,
+        isMeteringEnabled: true,
+      },
+    },
+  },
+  podcast_wav_44k: {
+    key: 'podcast_wav_44k',
+    label: 'Standard Podcast',
+    badge: 'WAV 44.1kHz 16-bit',
+    description: 'Uncompressed CD-quality Mono. Optimized for spoken word, narrative podcasts, and speech synthesis.',
+    extension: '.wav',
+    mimeType: 'audio/wav',
+    sampleRate: 44100,
+    channels: 1,
+    bitDepth: 16,
+    options: {
+      extension: '.wav',
+      sampleRate: 44100,
+      numberOfChannels: 1,
+      bitDepth: 16,
+      isMeteringEnabled: true,
+      android: {
+        extension: '.wav',
+        outputFormat: 'default',
+        audioEncoder: 'default',
+        isMeteringEnabled: true,
+      },
+      ios: {
+        extension: '.wav',
+        audioQuality: 127,
+        sampleRate: 44100,
+        numberOfChannels: 1,
+        bitDepth: 16,
+        linearPCM: true,
+        isMeteringEnabled: true,
+      },
+    },
+  },
+  share_aac_48k: {
+    key: 'share_aac_48k',
+    label: 'Lightweight Proxy',
+    badge: 'AAC 256kbps 48kHz',
+    description: 'VBR MPEG-4 AAC. Compact file size for messaging apps, quick email previews, and scratch tracks.',
+    extension: '.m4a',
+    mimeType: 'audio/mp4a-latm',
+    sampleRate: 48000,
+    channels: 1,
+    bitRate: 256000,
+    options: {
+      extension: '.m4a',
+      sampleRate: 48000,
+      numberOfChannels: 1,
+      bitRate: 256000,
+      isMeteringEnabled: true,
+      android: {
+        extension: '.m4a',
+        outputFormat: 'mpeg4',
+        audioEncoder: 'aac',
+        bitRate: 256000,
+        isMeteringEnabled: true,
+      },
+      ios: {
+        extension: '.m4a',
+        audioQuality: 127,
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        bitRate: 256000,
+        isMeteringEnabled: true,
+      },
+    },
+  },
+};
+
+
+================================================================================
+FILE: src/services/audio/useAudioInputDevices.ts
+================================================================================
+// src/services/audio/useAudioInputDevices.ts
+import { useState, useEffect, useCallback } from 'react';
+import {
+  AudioHardwareRouter,
+  AudioHardwareRouterEmitter,
+  AudioInputDevice,
+} from '../../../modules/audio-hardware-router/src';
+
+export function useAudioInputDevices() {
+  const [devices, setDevices] = useState<AudioInputDevice[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<number | null>(null);
+
+  const refreshDevices = useCallback(() => {
+    try {
+      const inputs = AudioHardwareRouter.getAvailableInputs();
+      if (!inputs || inputs.length === 0) return;
+      setDevices(inputs);
+
+      setSelectedDeviceId((prev) => {
+        if (prev !== null && inputs.some((d) => d.id === prev)) {
+          return prev;
+        }
+        return inputs[0]?.id ?? null;
+      });
+    } catch (e) {
+      console.warn('[useAudioInputDevices] Query failed:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshDevices();
+
+    if (!AudioHardwareRouterEmitter) return;
+    const sub = AudioHardwareRouterEmitter.addListener(
+      'onAudioDevicesUpdated',
+      refreshDevices
+    );
+
+    return () => {
+      sub.remove();
+    };
+  }, [refreshDevices]);
+
+  const selectDevice = useCallback((deviceId: number) => {
+    setSelectedDeviceId(deviceId);
+  }, []);
+
+  const activateHardwareRouting = useCallback(() => {
+    if (selectedDeviceId !== null) {
+      AudioHardwareRouter.setPreferredInputDevice(selectedDeviceId);
+    }
+  }, [selectedDeviceId]);
+
+  const releaseHardwareRouting = useCallback(() => {
+    AudioHardwareRouter.clearPreferredInputDevice();
+  }, []);
+
+  return {
+    devices,
+    selectedDeviceId,
+    selectedDevice: devices.find((d) => d.id === selectedDeviceId) ?? devices[0] ?? null,
+    selectDevice,
+    refreshDevices,
+    activateHardwareRouting,
+    releaseHardwareRouting,
+  };
+}
+
+
+================================================================================
+FILE: src/services/audio/useAudioRecording.ts
+================================================================================
+// src/services/audio/useAudioRecording.ts
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { useAudioRecorder } from 'expo-audio';
+import { SessionJournal } from '../storage/sessionJournal';
+import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
+import { AUDIO_PRESETS, PresetKey, AudioPresetConfig } from './types';
+
+export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
+
+export function useAudioRecording() {
+  const [engineState, setEngineState] = useState<EngineState>('IDLE');
+  const [durationMs, setDurationMs] = useState(0);
+  const [meteringDb, setMeteringDb] = useState(-60);
+  const [presetKey, setPresetKeyState] = useState<PresetKey>(AudioSettingsStorage.getPreset());
+
+  const activePreset: AudioPresetConfig = AUDIO_PRESETS[presetKey] || AUDIO_PRESETS.broadcast_wav_48k;
+  const activePresetRef = useRef<AudioPresetConfig>(activePreset);
+  activePresetRef.current = activePreset;
+
+  const recorder = useAudioRecorder(activePreset.options);
+
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const meterPollingRef = useRef<NodeJS.Timeout | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const accumulatedMsRef = useRef<number>(0);
+  const fileUriRef = useRef<string | null>(null);
+
+  const changePreset = useCallback((key: PresetKey) => {
+    if (engineState === 'RECORDING' || engineState === 'PAUSED') {
+      throw new Error('Cannot change format preset while capture is in progress.');
+    }
+    setPresetKeyState(key);
+    AudioSettingsStorage.setPreset(key);
+  }, [engineState]);
+
+  // Poll native decibels at 30 Hz
+  const pollMetering = useCallback(async () => {
+    if (!recorder) return;
+    try {
+      let db: number | undefined;
+      if (typeof (recorder as any).getStatusAsync === 'function') {
+        const status = await (recorder as any).getStatusAsync();
+        db = status?.metering;
+      } else if (typeof (recorder as any).getStatus === 'function') {
+        const status = (recorder as any).getStatus();
+        db = status?.metering;
+      } else if (typeof (recorder as any).metering === 'number') {
+        db = (recorder as any).metering;
+      }
+
+      if (typeof db === 'number' && !isNaN(db)) {
+        setMeteringDb(Math.max(-60, Math.min(0, db)));
+      }
+    } catch {}
+  }, [recorder]);
+
+  // UI timer clock & MMKV crash heartbeat synchronizer
+  useEffect(() => {
+    if (engineState === 'RECORDING') {
+      startTimeRef.current = Date.now();
+      timerRef.current = setInterval(() => {
+        const currentSegment = Date.now() - startTimeRef.current;
+        const total = accumulatedMsRef.current + currentSegment;
+        setDurationMs(total);
+        SessionJournal.updateHeartbeat(total);
+      }, 200);
+
+      meterPollingRef.current = setInterval(pollMetering, 33);
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      if (meterPollingRef.current) {
+        clearInterval(meterPollingRef.current);
+        meterPollingRef.current = null;
+      }
+
+      setMeteringDb(-60);
+
+      if (engineState === 'PAUSED') {
+        accumulatedMsRef.current += Date.now() - startTimeRef.current;
+      } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
+        accumulatedMsRef.current = 0;
+      }
+    }
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (meterPollingRef.current) clearInterval(meterPollingRef.current);
+    };
+  }, [engineState, pollMetering]);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const currentConfig = activePresetRef.current;
+      const sessionId = `session_${Date.now()}`;
+      setDurationMs(0);
+      accumulatedMsRef.current = 0;
+
+      // Prepare native audio engine with the active preset options
+      await recorder.prepareToRecordAsync(currentConfig.options);
+      fileUriRef.current = recorder.uri;
+
+      SessionJournal.startSession({
+        sessionId,
+        fileUri: recorder.uri ?? '',
+        formatPreset: currentConfig.key,
+        sampleRate: currentConfig.sampleRate,
+        channels: currentConfig.channels,
+        startedAt: Date.now(),
+      });
+
+      await recorder.record();
+      setEngineState('RECORDING');
+    } catch (error) {
+      setEngineState('ERROR');
+      throw error;
+    }
+  }, [recorder]);
+
+  const pauseRecording = useCallback(async () => {
+    try {
+      await recorder.pause();
+      SessionJournal.setStatus('PAUSED');
+      setEngineState('PAUSED');
+    } catch (error) {
+      setEngineState('ERROR');
+      throw error;
+    }
+  }, [recorder]);
+
+  const resumeRecording = useCallback(async () => {
+    try {
+      await recorder.record();
+      SessionJournal.setStatus('RECORDING');
+      setEngineState('RECORDING');
+    } catch (error) {
+      setEngineState('ERROR');
+      throw error;
+    }
+  }, [recorder]);
+
+  const stopRecording = useCallback(async (): Promise<string | null> => {
+    try {
+      await recorder.stop();
+      const finalUri = recorder.uri || fileUriRef.current;
+
+      SessionJournal.setStatus('FINALIZED');
+      SessionJournal.clearSession();
+
+      setEngineState('STOPPED');
+      return finalUri;
+    } catch (error) {
+      setEngineState('ERROR');
+      throw error;
+    }
+  }, [recorder]);
+
+  return {
+    engineState,
+    durationMs,
+    meteringDb,
+    currentUri: recorder.uri ?? fileUriRef.current,
+    activePreset,
+    setPresetKey: changePreset,
+    startRecording,
+    pauseRecording,
+    resumeRecording,
+    stopRecording,
+  };
+}
+
+
+================================================================================
+FILE: src/components/meter/AudioMeter.tsx
+================================================================================
+// src/components/meter/AudioMeter.tsx
+import React, { useEffect, useState } from 'react';
+import { View, StyleSheet, Text, LayoutChangeEvent } from 'react-native';
+import {
+  Canvas,
+  Rect,
+  LinearGradient,
+  vec,
+  Line,
+  RoundedRect,
+} from '@shopify/react-native-skia';
+import {
+  useSharedValue,
+  useDerivedValue,
+  withTiming,
+  Easing,
+} from 'react-native-reanimated';
+
+interface AudioMeterProps {
+  meteringDb: number;
+  isRecording: boolean;
+}
+
+const MIN_DB = -60;
+const MAX_DB = 0;
+
+export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording }) => {
+  const [layoutWidth, setLayoutWidth] = useState(260);
+  const barHeight = 16;
+
+  // Reanimated Shared Values
+  const meterLevel = useSharedValue(0); // 0.0 to 1.0
+  const peakLevel = useSharedValue(0);  // 0.0 to 1.0
+
+  useEffect(() => {
+    if (!isRecording) {
+      meterLevel.value = withTiming(0, { duration: 250 });
+      peakLevel.value = withTiming(0, { duration: 400 });
+      return;
+    }
+
+    // Normalize dB to range [0, 1]
+    const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, meteringDb));
+    const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
+
+    // Ballistics: Instant attack, smooth exponential decay
+    if (targetNorm > meterLevel.value) {
+      meterLevel.value = targetNorm;
+    } else {
+      meterLevel.value = withTiming(targetNorm, {
+        duration: 320,
+        easing: Easing.out(Easing.quad),
+      });
+    }
+
+    // Peak-hold ballistics
+    if (targetNorm >= peakLevel.value) {
+      peakLevel.value = targetNorm;
+    } else {
+      peakLevel.value = withTiming(targetNorm, {
+        duration: 1200,
+        easing: Easing.linear,
+      });
+    }
+  }, [meteringDb, isRecording, meterLevel, peakLevel]);
+
+  const onLayout = (e: LayoutChangeEvent) => {
+    const w = e.nativeEvent.layout.width;
+    if (w > 0) setLayoutWidth(w);
+  };
+
+  // Shared scalar values consumed directly by Skia components
+  const activeWidth = useDerivedValue(() => {
+    return Math.max(0, meterLevel.value * layoutWidth);
+  });
+
+  const peakX = useDerivedValue(() => {
+    return Math.max(0, Math.min(layoutWidth - 2, peakLevel.value * layoutWidth));
+  });
+
+  return (
+    <View style={styles.wrapper}>
+      {/* Header labels */}
+      <View style={styles.labelRow}>
+        <Text style={styles.dbText}>-60</Text>
+        <Text style={styles.dbText}>-24</Text>
+        <Text style={styles.dbText}>-12</Text>
+        <Text style={styles.dbText}>-6</Text>
+        <Text style={styles.dbText}>-3</Text>
+        <Text style={[styles.dbText, styles.clipText]}>0 dBFS</Text>
+      </View>
+
+      {/* Skia Metering Canvas */}
+      <View style={[styles.canvasContainer, { height: barHeight }]} onLayout={onLayout}>
+        <Canvas style={{ width: layoutWidth, height: barHeight }}>
+          {/* Background trough */}
+          <RoundedRect
+            x={0}
+            y={0}
+            width={layoutWidth}
+            height={barHeight}
+            r={4}
+            color="#262626"
+          />
+
+          {/* Active audio level bar */}
+          <RoundedRect
+            x={0}
+            y={0}
+            width={activeWidth}
+            height={barHeight}
+            r={4}
+          >
+            <LinearGradient
+              start={vec(0, 0)}
+              end={vec(layoutWidth, 0)}
+              colors={['#00E676', '#76FF03', '#FFD600', '#FF1744']}
+              positions={[0, 0.65, 0.85, 1.0]}
+            />
+          </RoundedRect>
+
+          {/* Calibration ticks */}
+          <Line
+            p1={vec(layoutWidth * 0.60, 0)}
+            p2={vec(layoutWidth * 0.60, barHeight)}
+            color="#121212"
+            strokeWidth={1}
+          />
+          <Line
+            p1={vec(layoutWidth * 0.80, 0)}
+            p2={vec(layoutWidth * 0.80, barHeight)}
+            color="#121212"
+            strokeWidth={1}
+          />
+          <Line
+            p1={vec(layoutWidth * 0.90, 0)}
+            p2={vec(layoutWidth * 0.90, barHeight)}
+            color="#121212"
+            strokeWidth={1}
+          />
+
+          {/* Floating Peak Hold Line (rendered via scalar Rect) */}
+          <Rect
+            x={peakX}
+            y={0}
+            width={2}
+            height={barHeight}
+            color="#FFFFFF"
+          />
+        </Canvas>
+      </View>
+
+      {/* Live Readout */}
+      <View style={styles.readoutRow}>
+        <Text style={styles.readoutValue}>
+          {isRecording ? `${meteringDb.toFixed(1)} dBFS` : 'OFFLINE'}
+        </Text>
+        <Text style={[styles.clipIndicator, meteringDb >= -0.5 && styles.clipActive]}>
+          CLIP
+        </Text>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  wrapper: {
+    width: '100%',
+    paddingHorizontal: 16,
+    marginVertical: 12,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  dbText: {
+    color: '#757575',
+    fontSize: 10,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  clipText: {
+    color: '#FF5252',
+  },
+  canvasContainer: {
+    width: '100%',
+    borderRadius: 4,
+    overflow: 'hidden',
+    backgroundColor: '#262626',
+  },
+  readoutRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  readoutValue: {
+    color: '#B0BEC5',
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+  clipIndicator: {
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1,
+    color: '#424242',
+  },
+  clipActive: {
+    color: '#FF1744',
+  },
+});
+
+
+================================================================================
+FILE: src/components/library/RecordingLibraryModal.tsx
+================================================================================
+// src/components/library/RecordingLibraryModal.tsx
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  StyleSheet,
+  FlatList,
+  TouchableOpacity,
+  Alert,
+  PanResponder,
+} from 'react-native';
+import { useAudioPlayer } from 'expo-audio';
+import * as Sharing from 'expo-sharing';
+import { RecordingLibrary, SavedRecording } from '../../services/storage/recordingLibrary';
+
+interface RecordingLibraryModalProps {
+  visible: boolean;
+  onClose: () => void;
+  recordings: SavedRecording[];
+  onLibraryUpdate: (updated: SavedRecording[]) => void;
+}
+
+export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
+  visible,
+  onClose,
+  recordings,
+  onLibraryUpdate,
+}) => {
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  // Scrubber state
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubTime, setScrubTime] = useState(0);
+
+  const activeRecording = recordings.find((r) => r.id === activeId) ?? null;
+  const player = useAudioPlayer(activeRecording?.uri ?? null);
+
+  // Mutable refs to prevent stale closures inside PanResponder
+  const playerRef = useRef(player);
+  playerRef.current = player;
+
+  const totalSecs = duration > 0 ? duration : (activeRecording?.durationMs ?? 0) / 1000;
+  const totalSecsRef = useRef(totalSecs);
+  totalSecsRef.current = totalSecs;
+
+  const progressPollRef = useRef<NodeJS.Timeout | null>(null);
+  const trackWidthRef = useRef<number>(260);
+  const startXRef = useRef<number>(0);
+
+  // 1. Guaranteed first-tap playback synchronizer
+  useEffect(() => {
+    if (!isPlaying || !player || !activeRecording) return;
+
+    let cancelled = false;
+
+    const triggerPlay = () => {
+      if (cancelled) return;
+      try {
+        player.play();
+      } catch {}
+    };
+
+    triggerPlay();
+
+    const checkInterval = setInterval(() => {
+      if (cancelled || player.playing) {
+        clearInterval(checkInterval);
+      } else {
+        triggerPlay();
+      }
+    }, 50);
+
+    return () => {
+      cancelled = true;
+      clearInterval(checkInterval);
+    };
+  }, [isPlaying, player, activeId, activeRecording]);
+
+  // 2. High-frequency progress poller (20 Hz)
+  useEffect(() => {
+    if (isPlaying && player && !isScrubbing) {
+      progressPollRef.current = setInterval(() => {
+        try {
+          const cur = player.currentTime || 0;
+          const dur =
+            player.duration > 0
+              ? player.duration
+              : activeRecording?.durationMs
+              ? activeRecording.durationMs / 1000
+              : 0;
+
+          setCurrentTime(cur);
+          if (dur > 0) setDuration(dur);
+
+          // End of take reached
+          if (dur > 0 && cur >= dur) {
+            setIsPlaying(false);
+            setCurrentTime(0);
+            player.pause();
+            if (typeof player.seekTo === 'function') {
+              const res = player.seekTo(0);
+              if (res && typeof res.catch === 'function') res.catch(() => {});
+            }
+          }
+        } catch {}
+      }, 50);
+    } else {
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+    }
+
+    return () => {
+      if (progressPollRef.current) clearInterval(progressPollRef.current);
+    };
+  }, [isPlaying, player, isScrubbing, activeRecording]);
+
+  // 3. PanResponder with active refs and safe promise handling
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt) => {
+        setIsScrubbing(true);
+        startXRef.current = evt.nativeEvent.locationX;
+        const width = trackWidthRef.current || 260;
+        const maxSecs = totalSecsRef.current || 1;
+        const ratio = Math.max(0, Math.min(1, startXRef.current / width));
+        setScrubTime(ratio * maxSecs);
+      },
+      onPanResponderMove: (_, gesture) => {
+        const width = trackWidthRef.current || 260;
+        const maxSecs = totalSecsRef.current || 1;
+        const currentX = Math.max(0, Math.min(width, startXRef.current + gesture.dx));
+        const ratio = currentX / width;
+        setScrubTime(ratio * maxSecs);
+      },
+      onPanResponderRelease: (_, gesture) => {
+        const width = trackWidthRef.current || 260;
+        const maxSecs = totalSecsRef.current || 1;
+        const currentX = Math.max(0, Math.min(width, startXRef.current + gesture.dx));
+        const finalSec = (currentX / width) * maxSecs;
+
+        const activeNativePlayer = playerRef.current;
+        if (activeNativePlayer && typeof activeNativePlayer.seekTo === 'function') {
+          try {
+            const seekPromise = activeNativePlayer.seekTo(finalSec);
+            if (seekPromise && typeof seekPromise.catch === 'function') {
+              seekPromise.catch((err: any) => {
+                console.warn('[RecordingLibraryModal] Native seek rejected:', err);
+              });
+            }
+          } catch (err) {
+            console.warn('[RecordingLibraryModal] Synchronous seek error:', err);
+          }
+        }
+
+        setCurrentTime(finalSec);
+        setIsScrubbing(false);
+      },
+      onPanResponderTerminate: () => {
+        setIsScrubbing(false);
+      },
+    })
+  ).current;
+
+  const handlePlayToggle = (item: SavedRecording) => {
+    if (activeId === item.id) {
+      if (isPlaying) {
+        try {
+          player?.pause();
+        } catch {}
+        setIsPlaying(false);
+      } else {
+        setIsPlaying(true);
+      }
+    } else {
+      try {
+        player?.pause();
+      } catch {}
+      setActiveId(item.id);
+      setCurrentTime(0);
+      setDuration(item.durationMs ? item.durationMs / 1000 : 0);
+      setIsPlaying(true);
+    }
+  };
+
+  const handleClose = () => {
+    if (isPlaying) {
+      try {
+        player?.pause();
+      } catch {}
+      setIsPlaying(false);
+    }
+    onClose();
+  };
+
+  const handleShare = async (item: SavedRecording) => {
+    try {
+      const isAvailable = await Sharing.isAvailableAsync();
+      if (!isAvailable) {
+        Alert.alert('Sharing Unavailable', 'Native sharing is not supported on this device.');
+        return;
+      }
+      await Sharing.shareAsync(item.uri, {
+        dialogTitle: `Export ${item.name}`,
+        mimeType: item.uri.endsWith('.wav') ? 'audio/wav' : 'audio/m4a',
+      });
+    } catch (err: any) {
+      Alert.alert('Share Failed', err.message);
+    }
+  };
+
+  const handleDelete = (item: SavedRecording) => {
+    Alert.alert('Delete Take', `Permanently delete "${item.name}"?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          if (activeId === item.id) {
+            try {
+              player?.pause();
+            } catch {}
+            setIsPlaying(false);
+            setActiveId(null);
+          }
+          const updated = await RecordingLibrary.delete(item.id);
+          onLibraryUpdate(updated);
+        },
+      },
+    ]);
+  };
+
+  const formatFileSize = (bytes: number): string => {
+    if (bytes <= 0) return '0 KB';
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  };
+
+  const formatSecs = (seconds: number): string => {
+    const s = Math.floor(seconds || 0);
+    const mins = Math.floor(s / 60);
+    const secs = s % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const renderItem = ({ item }: { item: SavedRecording }) => {
+    const isThisActive = activeId === item.id;
+    const isThisPlaying = isThisActive && isPlaying;
+
+    const itemTotalSecs = isThisActive && duration > 0 ? duration : item.durationMs / 1000;
+    const displayTime = isThisActive ? (isScrubbing ? scrubTime : currentTime) : 0;
+    const progressPct =
+      isThisActive && itemTotalSecs > 0
+        ? Math.min(100, Math.max(0, (displayTime / itemTotalSecs) * 100))
+        : 0;
+
+    return (
+      <View style={[styles.card, isThisActive && styles.cardActive]}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.cardTitle} numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text style={styles.cardTimestamp}>
+            {new Date(item.createdAt).toLocaleDateString([], {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
+          </Text>
+        </View>
+
+        <View style={styles.metaRow}>
+          <Text style={styles.metaBadge}>
+            {item.uri.endsWith('.wav') ? 'WAV 48k' : 'AAC 256k'}
+          </Text>
+          <Text style={styles.metaText}>{formatSecs(item.durationMs / 1000)}</Text>
+          <Text style={styles.metaText}>•</Text>
+          <Text style={styles.metaText}>{formatFileSize(item.sizeBytes)}</Text>
+        </View>
+
+        {/* Dynamic Interactive Timeline with Scrubbing */}
+        {isThisActive && (
+          <View style={styles.progressSection}>
+            <View
+              style={styles.scrubTouchArea}
+              {...panResponder.panHandlers}
+              onLayout={(e) => {
+                trackWidthRef.current = e.nativeEvent.layout.width;
+              }}
+            >
+              {/* Background Track */}
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
+              </View>
+
+              {/* Scrub Thumb Knob */}
+              <View
+                style={[
+                  styles.scrubThumb,
+                  {
+                    left: `${progressPct}%`,
+                    transform: [{ scale: isScrubbing ? 1.3 : 1.0 }],
+                  },
+                ]}
+              />
+            </View>
+
+            <View style={styles.timeRow}>
+              <Text style={styles.timeText}>{formatSecs(displayTime)}</Text>
+              <Text style={styles.timeText}>{formatSecs(itemTotalSecs)}</Text>
+            </View>
+          </View>
+        )}
+
+        <View style={styles.actionsRow}>
+          <TouchableOpacity
+            style={[styles.playCircleBtn, isThisPlaying && styles.playCircleBtnActive]}
+            onPress={() => handlePlayToggle(item)}
+            activeOpacity={0.8}
+          >
+            {isThisPlaying ? (
+              <View style={styles.pauseBarsContainer}>
+                <View style={styles.pauseBar} />
+                <View style={styles.pauseBar} />
+              </View>
+            ) : (
+              <View style={styles.playTriangle} />
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.btnAction} onPress={() => handleShare(item)}>
+            <Text style={styles.btnActionText}>EXPORT</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.btnAction, styles.btnDelete]}
+            onPress={() => handleDelete(item)}
+          >
+            <Text style={[styles.btnActionText, styles.deleteText]}>DELETE</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={handleClose}
+    >
+      <View style={styles.container}>
+        <View style={styles.topBar}>
+          <View>
+            <Text style={styles.heading}>Session Library</Text>
+            <Text style={styles.subheading}>{recordings.length} Saved Takes</Text>
+          </View>
+          <TouchableOpacity style={styles.closeBtn} onPress={handleClose}>
+            <Text style={styles.closeText}>DONE</Text>
+          </TouchableOpacity>
+        </View>
+
+        {recordings.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyTitle}>No Recorded Takes</Text>
+            <Text style={styles.emptyText}>
+              Recordings saved from the main console will automatically appear here.
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={recordings}
+            keyExtractor={(item) => item.id}
+            renderItem={renderItem}
+            contentContainerStyle={styles.listContent}
+          />
+        )}
+      </View>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  topBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
+  },
+  heading: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  subheading: {
+    color: '#757575',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  closeBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#262626',
+    borderRadius: 16,
+  },
+  closeText: {
+    color: '#00E676',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  listContent: {
+    padding: 16,
+    gap: 12,
+  },
+  card: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+    padding: 16,
+  },
+  cardActive: {
+    borderColor: '#00E676',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 6,
+  },
+  cardTitle: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: 8,
+  },
+  cardTimestamp: {
+    color: '#757575',
+    fontSize: 11,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 14,
+  },
+  metaBadge: {
+    backgroundColor: '#2C3440',
+    color: '#64B5F6',
+    fontSize: 10,
+    fontWeight: '700',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  metaText: {
+    color: '#9E9E9E',
+    fontSize: 12,
+  },
+  progressSection: {
+    marginBottom: 14,
+  },
+  scrubTouchArea: {
+    height: 32,
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  progressTrack: {
+    height: 5,
+    backgroundColor: '#333333',
+    borderRadius: 2.5,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#00E676',
+  },
+  scrubThumb: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#FFFFFF',
+    marginLeft: -7,
+    elevation: 4,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 2,
+  },
+  timeText: {
+    color: '#9E9E9E',
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  playCircleBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#00E676',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playCircleBtnActive: {
+    backgroundColor: '#00E676',
+  },
+  playTriangle: {
+    width: 0,
+    height: 0,
+    backgroundColor: 'transparent',
+    borderStyle: 'solid',
+    borderLeftWidth: 14,
+    borderRightWidth: 0,
+    borderBottomWidth: 8,
+    borderTopWidth: 8,
+    borderLeftColor: '#121212',
+    borderRightColor: 'transparent',
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    marginLeft: 3,
+  },
+  pauseBarsContainer: {
+    flexDirection: 'row',
+    gap: 4.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pauseBar: {
+    width: 3.5,
+    height: 15,
+    backgroundColor: '#121212',
+    borderRadius: 1.5,
+  },
+  btnAction: {
+    backgroundColor: '#2A2A2A',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  btnActionText: {
+    color: '#B0BEC5',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  btnDelete: {
+    marginLeft: 'auto',
+    backgroundColor: '#2A1818',
+  },
+  deleteText: {
+    color: '#FF5252',
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  emptyTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  emptyText: {
+    color: '#757575',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+});
+
+
+================================================================================
+FILE: src/components/prompter/PrompterEditModal.tsx
+================================================================================
+// src/components/prompter/PrompterEditModal.tsx
+import React, { useState } from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+interface PrompterEditModalProps {
+  visible: boolean;
+  initialScript: string;
+  onSave: (newScript: string) => void;
+  onClose: () => void;
+}
+
+export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
+  visible,
+  initialScript,
+  onSave,
+  onClose,
+}) => {
+  const [text, setText] = useState(initialScript);
+
+  const handleSave = () => {
+    onSave(text);
+    onClose();
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.keyboardView}
+        >
+          <View style={styles.topBar}>
+            <TouchableOpacity style={styles.btnSecondary} onPress={onClose}>
+              <Text style={styles.btnSecondaryText}>CANCEL</Text>
+            </TouchableOpacity>
+            <Text style={styles.title}>Edit Teleprompter Script</Text>
+            <TouchableOpacity style={styles.btnPrimary} onPress={handleSave}>
+              <Text style={styles.btnPrimaryText}>SAVE</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TextInput
+            style={styles.textInput}
+            multiline
+            textAlignVertical="top"
+            value={text}
+            onChangeText={setText}
+            placeholder="Paste or type your recording script here..."
+            placeholderTextColor="#555555"
+            autoFocus
+          />
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  keyboardView: {
+    flex: 1,
+  },
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
+  },
+  title: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  btnSecondary: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  btnSecondaryText: {
+    color: '#9E9E9E',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  btnPrimary: {
+    backgroundColor: '#00E676',
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 14,
+  },
+  btnPrimaryText: {
+    color: '#121212',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  textInput: {
+    flex: 1,
+    color: '#E0E0E0',
+    fontSize: 16,
+    lineHeight: 24,
+    padding: 16,
+    backgroundColor: '#181818',
+  },
+});
+
+
+================================================================================
+FILE: src/components/prompter/TeleprompterDeck.tsx
+================================================================================
+// src/components/prompter/TeleprompterDeck.tsx
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  PanResponder,
+  LayoutChangeEvent,
+} from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  cancelAnimation,
+  Easing,
+} from 'react-native-reanimated';
+import { PrompterStorage } from '../../services/storage/prompterStorage';
+import { PrompterEditModal } from './PrompterEditModal';
+import { EngineState } from '../../services/audio/useAudioRecording';
+
+interface TeleprompterDeckProps {
+  engineState: EngineState;
+}
+
+export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({ engineState }) => {
+  const [script, setScript] = useState(PrompterStorage.getScript());
+  const [speed, setSpeed] = useState(PrompterStorage.getSpeed());
+  const [fontSize, setFontSize] = useState(PrompterStorage.getFontSize());
+  const [isMirrored, setIsMirrored] = useState(PrompterStorage.getIsMirrored());
+  const [editModalVisible, setEditModalVisible] = useState(false);
+
+  const containerHeightRef = useRef(150);
+  const contentHeightRef = useRef(300);
+
+  // Reanimated scroll offset
+  const translateY = useSharedValue(0);
+  const startDragYRef = useRef(0);
+
+  const maxScroll = Math.max(0, contentHeightRef.current - containerHeightRef.current + 80);
+
+  // Synchronize scrolling with engine state
+  useEffect(() => {
+    if (engineState === 'RECORDING') {
+      const remainingDistance = Math.abs(-maxScroll - translateY.value);
+      const durationMs = (remainingDistance / speed) * 1000;
+
+      if (durationMs > 0) {
+        translateY.value = withTiming(-maxScroll, {
+          duration: durationMs,
+          easing: Easing.linear,
+        });
+      }
+    } else if (engineState === 'PAUSED' || engineState === 'STOPPED' || engineState === 'IDLE') {
+      cancelAnimation(translateY);
+    }
+  }, [engineState, speed, maxScroll]);
+
+  // Pan gesture for manual repositioning
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_, gesture) => Math.abs(gesture.dy) > 4,
+      onPanResponderGrant: () => {
+        cancelAnimation(translateY);
+        startDragYRef.current = translateY.value;
+      },
+      onPanResponderMove: (_, gesture) => {
+        const nextY = startDragYRef.current + gesture.dy;
+        translateY.value = Math.max(-maxScroll, Math.min(0, nextY));
+      },
+      onPanResponderRelease: () => {
+        if (engineState === 'RECORDING') {
+          const remainingDistance = Math.abs(-maxScroll - translateY.value);
+          const durationMs = (remainingDistance / speed) * 1000;
+          if (durationMs > 0) {
+            translateY.value = withTiming(-maxScroll, {
+              duration: durationMs,
+              easing: Easing.linear,
+            });
+          }
+        }
+      },
+    })
+  ).current;
+
+  const handleReset = () => {
+    cancelAnimation(translateY);
+    translateY.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
+  };
+
+  const handleToggleMirror = () => {
+    const next = !isMirrored;
+    setIsMirrored(next);
+    PrompterStorage.setIsMirrored(next);
+  };
+
+  const changeSpeed = (delta: number) => {
+    const next = Math.max(15, Math.min(100, speed + delta));
+    setSpeed(next);
+    PrompterStorage.setSpeed(next);
+  };
+
+  const handleSaveScript = (newScript: string) => {
+    setScript(newScript);
+    PrompterStorage.setScript(newScript);
+    handleReset();
+  };
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: translateY.value },
+      { scaleX: isMirrored ? -1 : 1 },
+    ],
+  }));
+
+  return (
+    <View style={styles.deckContainer}>
+      {/* Top Toolbar */}
+      <View style={styles.toolbar}>
+        <View style={styles.toolGroup}>
+          <TouchableOpacity style={styles.toolBtn} onPress={() => setEditModalVisible(true)}>
+            <Text style={styles.toolBtnText}>SCRIPT</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.toolBtn, isMirrored && styles.toolBtnActive]}
+            onPress={handleToggleMirror}
+          >
+            <Text style={[styles.toolBtnText, isMirrored && styles.toolBtnTextActive]}>
+              MIRROR
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.toolBtn} onPress={handleReset}>
+            <Text style={styles.toolBtnText}>RESET</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Speed Stepper */}
+        <View style={styles.speedGroup}>
+          <Text style={styles.speedLabel}>SPEED</Text>
+          <TouchableOpacity style={styles.stepperBtn} onPress={() => changeSpeed(-5)}>
+            <Text style={styles.stepperText}>-</Text>
+          </TouchableOpacity>
+          <Text style={styles.speedValue}>{speed}</Text>
+          <TouchableOpacity style={styles.stepperBtn} onPress={() => changeSpeed(5)}>
+            <Text style={styles.stepperText}>+</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Prompter Viewing Window */}
+      <View
+        style={styles.viewport}
+        onLayout={(e: LayoutChangeEvent) => {
+          containerHeightRef.current = e.nativeEvent.layout.height;
+        }}
+        {...panResponder.panHandlers}
+      >
+        {/* Optical Reading Eye-line Cue */}
+        <View pointerEvents="none" style={styles.eyelineGuide}>
+          <View style={styles.eyelineArrowLeft} />
+          <View style={styles.eyelineLine} />
+          <View style={styles.eyelineArrowRight} />
+        </View>
+
+        {/* Animated Text Core */}
+        <Animated.View
+          style={[styles.textWrapper, animatedStyle]}
+          onLayout={(e: LayoutChangeEvent) => {
+            contentHeightRef.current = e.nativeEvent.layout.height;
+          }}
+        >
+          <Text style={[styles.prompterText, { fontSize, lineHeight: fontSize * 1.5 }]}>
+            {script}
+          </Text>
+        </Animated.View>
+      </View>
+
+      {/* Script Editor Modal */}
+      <PrompterEditModal
+        visible={editModalVisible}
+        initialScript={script}
+        onSave={handleSaveScript}
+        onClose={() => setEditModalVisible(false)}
+      />
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  deckContainer: {
+    width: '100%',
+    backgroundColor: '#181818',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  toolbar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#202020',
+    borderBottomWidth: 1,
+    borderBottomColor: '#2C2C2C',
+  },
+  toolGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  toolBtn: {
+    backgroundColor: '#2A2A2A',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  toolBtnActive: {
+    backgroundColor: '#00E676',
+  },
+  toolBtnText: {
+    color: '#B0BEC5',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  toolBtnTextActive: {
+    color: '#121212',
+  },
+  speedGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  speedLabel: {
+    color: '#757575',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  stepperBtn: {
+    width: 24,
+    height: 24,
+    backgroundColor: '#2A2A2A',
+    borderRadius: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 16,
+  },
+  speedValue: {
+    color: '#00E676',
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+    minWidth: 20,
+    textAlign: 'center',
+  },
+  viewport: {
+    height: 140,
+    backgroundColor: '#0E0E0E',
+    overflow: 'hidden',
+    position: 'relative',
+    justifyContent: 'flex-start',
+  },
+  eyelineGuide: {
+    position: 'absolute',
+    top: 36,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    opacity: 0.4,
+  },
+  eyelineArrowLeft: {
+    width: 0,
+    height: 0,
+    borderTopWidth: 5,
+    borderBottomWidth: 5,
+    borderLeftWidth: 8,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderLeftColor: '#00E676',
+  },
+  eyelineLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#00E676',
+  },
+  eyelineArrowRight: {
+    width: 0,
+    height: 0,
+    borderTopWidth: 5,
+    borderBottomWidth: 5,
+    borderRightWidth: 8,
+    borderTopColor: 'transparent',
+    borderBottomColor: 'transparent',
+    borderRightColor: '#00E676',
+  },
+  textWrapper: {
+    paddingHorizontal: 16,
+    paddingTop: 36, // Start text aligned directly on the reading cue
+    paddingBottom: 40,
+  },
+  prompterText: {
+    color: '#F5F5F5',
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+});
+
+
+================================================================================
+FILE: src/components/settings/AudioSettingsModal.tsx
+================================================================================
+// src/components/settings/AudioSettingsModal.tsx
+import React from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ScrollView,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { AUDIO_PRESETS, PresetKey, AudioPresetConfig } from '../../services/audio/types';
+import { EngineState } from '../../services/audio/useAudioRecording';
+
+interface AudioSettingsModalProps {
+  visible: boolean;
+  onClose: () => void;
+  activePresetKey: PresetKey;
+  onSelectPreset: (key: PresetKey) => void;
+  engineState: EngineState;
+}
+
+export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
+  visible,
+  onClose,
+  activePresetKey,
+  onSelectPreset,
+  engineState,
+}) => {
+  const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
+  const presetsList = Object.values(AUDIO_PRESETS);
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        {/* Header */}
+        <View style={styles.topBar}>
+          <View>
+            <Text style={styles.heading}>Format Settings</Text>
+            <Text style={styles.subheading}>Master Audio Encoding Profile</Text>
+          </View>
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+            <Text style={styles.closeText}>DONE</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.content}>
+          {isLocked && (
+            <View style={styles.lockNotice}>
+              <Text style={styles.lockNoticeTitle}>Settings Locked</Text>
+              <Text style={styles.lockNoticeText}>
+                Encoding presets cannot be altered during active recording. Stop capture to change formats.
+              </Text>
+            </View>
+          )}
+
+          <Text style={styles.sectionTitle}>ENCODING PRESETS</Text>
+
+          {presetsList.map((preset: AudioPresetConfig) => {
+            const isSelected = activePresetKey === preset.key;
+
+            return (
+              <TouchableOpacity
+                key={preset.key}
+                disabled={isLocked}
+                style={[
+                  styles.presetCard,
+                  isSelected && styles.presetCardActive,
+                  isLocked && styles.presetCardDisabled,
+                ]}
+                onPress={() => {
+                  onSelectPreset(preset.key);
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={styles.presetHeader}>
+                  <View style={styles.titleCol}>
+                    <Text style={styles.presetLabel}>{preset.label}</Text>
+                    <View style={styles.badgeRow}>
+                      <Text style={styles.badge}>{preset.badge}</Text>
+                      <Text style={styles.channelBadge}>Mono</Text>
+                    </View>
+                  </View>
+
+                  {/* Radio Indicator */}
+                  <View style={[styles.radioOuter, isSelected && styles.radioOuterSelected]}>
+                    {isSelected && <View style={styles.radioInner} />}
+                  </View>
+                </View>
+
+                <Text style={styles.presetDescription}>{preset.description}</Text>
+
+                <View style={styles.specsRow}>
+                  <Text style={styles.specItem}>Format: {preset.extension.toUpperCase()}</Text>
+                  <Text style={styles.specDot}>•</Text>
+                  <Text style={styles.specItem}>Rate: {(preset.sampleRate / 1000).toFixed(1)} kHz</Text>
+                  <Text style={styles.specDot}>•</Text>
+                  <Text style={styles.specItem}>
+                    {preset.bitRate ? `${preset.bitRate / 1000} kbps` : `${preset.bitDepth}-bit Linear`}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  topBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
+  },
+  heading: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  subheading: {
+    color: '#757575',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  closeBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#262626',
+    borderRadius: 16,
+  },
+  closeText: {
+    color: '#00E676',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  content: {
+    padding: 16,
+    gap: 12,
+  },
+  lockNotice: {
+    backgroundColor: '#261C0D',
+    borderWidth: 1,
+    borderColor: '#FFD600',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  lockNoticeTitle: {
+    color: '#FFD600',
+    fontWeight: '700',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  lockNoticeText: {
+    color: '#E0E0E0',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  sectionTitle: {
+    color: '#757575',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 4,
+    marginLeft: 4,
+  },
+  presetCard: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#2A2A2A',
+    padding: 16,
+  },
+  presetCardActive: {
+    borderColor: '#00E676',
+    backgroundColor: '#1C2620',
+  },
+  presetCardDisabled: {
+    opacity: 0.6,
+  },
+  presetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  titleCol: {
+    flex: 1,
+  },
+  presetLabel: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 4,
+  },
+  badge: {
+    backgroundColor: '#2C3440',
+    color: '#64B5F6',
+    fontSize: 10,
+    fontWeight: '700',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  channelBadge: {
+    backgroundColor: '#262626',
+    color: '#9E9E9E',
+    fontSize: 10,
+    fontWeight: '700',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  radioOuter: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#555555',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 12,
+    marginTop: 2,
+  },
+  radioOuterSelected: {
+    borderColor: '#00E676',
+  },
+  radioInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#00E676',
+  },
+  presetDescription: {
+    color: '#9E9E9E',
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 12,
+  },
+  specsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#262626',
+    paddingTop: 10,
+  },
+  specItem: {
+    color: '#757575',
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
+  },
+  specDot: {
+    color: '#424242',
+    fontSize: 10,
+  },
+});
+
+
+================================================================================
+FILE: src/components/audio/InputDeviceModal.tsx
+================================================================================
+// src/components/audio/InputDeviceModal.tsx
+import React from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ScrollView,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
+import { EngineState } from '../../services/audio/useAudioRecording';
+
+interface InputDeviceModalProps {
+  visible: boolean;
+  onClose: () => void;
+  devices: AudioInputDevice[];
+  selectedDeviceId: number | null;
+  onSelectDevice: (deviceId: number) => void;
+  engineState: EngineState;
+}
+
+export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
+  visible,
+  onClose,
+  devices,
+  selectedDeviceId,
+  onSelectDevice,
+  engineState,
+}) => {
+  const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
+
+  const getTypeLabel = (type: AudioInputDevice['type']) => {
+    switch (type) {
+      case 'usb_device':
+      case 'usb_headset':
+      case 'usb_accessory':
+        return { label: 'USB INTERFACE', bg: '#1A3326', text: '#00E676' };
+      case 'bluetooth_sco':
+      case 'bluetooth_a2dp':
+        return { label: 'BLUETOOTH', bg: '#1C2938', text: '#64B5F6' };
+      case 'wired_headset':
+        return { label: 'ANALOG HEADSET', bg: '#33261A', text: '#FFB74D' };
+      default:
+        return { label: 'INTERNAL MIC', bg: '#262626', text: '#B0BEC5' };
+    }
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <View style={styles.topBar}>
+          <View>
+            <Text style={styles.heading}>Hardware Routing</Text>
+            <Text style={styles.subheading}>{devices.length} Audio Inputs Detected</Text>
+          </View>
+          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
+            <Text style={styles.closeText}>DONE</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.content}>
+          {isLocked && (
+            <View style={styles.lockNotice}>
+              <Text style={styles.lockNoticeTitle}>Hardware Routing Locked</Text>
+              <Text style={styles.lockNoticeText}>
+                Microphone capsule routing cannot be changed while recording is active.
+              </Text>
+            </View>
+          )}
+
+          <Text style={styles.sectionTitle}>DETECTED INPUT CAPSULES</Text>
+
+          {devices.map((device) => {
+            const isSelected = selectedDeviceId === device.id;
+            const typeInfo = getTypeLabel(device.type);
+
+            return (
+              <TouchableOpacity
+                key={device.id}
+                disabled={isLocked}
+                style={[
+                  styles.deviceCard,
+                  isSelected && styles.deviceCardActive,
+                  isLocked && styles.deviceCardDisabled,
+                ]}
+                onPress={() => onSelectDevice(device.id)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.deviceHeader}>
+                  <View style={styles.titleCol}>
+                    <Text style={styles.deviceName}>{device.name}</Text>
+                    <View style={styles.badgeRow}>
+                      <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
+                        <Text style={[styles.badgeText, { color: typeInfo.text }]}>
+                          {typeInfo.label}
+                        </Text>
+                      </View>
+                      <Text style={styles.idBadge}>ID #{device.id}</Text>
+                    </View>
+                  </View>
+
+                  <View style={[styles.radioOuter, isSelected && styles.radioOuterSelected]}>
+                    {isSelected && <View style={styles.radioInner} />}
+                  </View>
+                </View>
+
+                <View style={styles.specsRow}>
+                  <Text style={styles.specItem}>
+                    Supported Rates:{' '}
+                    {device.sampleRates.length > 0
+                      ? device.sampleRates.map((r) => `${r / 1000}k`).join(', ')
+                      : 'Hardware Dynamic'}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#121212',
+  },
+  topBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
+  },
+  heading: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  subheading: {
+    color: '#757575',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  closeBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: '#262626',
+    borderRadius: 16,
+  },
+  closeText: {
+    color: '#00E676',
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  content: {
+    padding: 16,
+    gap: 12,
+  },
+  lockNotice: {
+    backgroundColor: '#261C0D',
+    borderWidth: 1,
+    borderColor: '#FFD600',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+  },
+  lockNoticeTitle: {
+    color: '#FFD600',
+    fontWeight: '700',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  lockNoticeText: {
+    color: '#E0E0E0',
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  sectionTitle: {
+    color: '#757575',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 4,
+    marginLeft: 4,
+  },
+  deviceCard: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#2A2A2A',
+    padding: 16,
+  },
+  deviceCardActive: {
+    borderColor: '#00E676',
+    backgroundColor: '#1C2620',
+  },
+  deviceCardDisabled: {
+    opacity: 0.6,
+  },
+  deviceHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  titleCol: {
+    flex: 1,
+  },
+  deviceName: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  badgeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 4,
+  },
+  badge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  badgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  idBadge: {
+    backgroundColor: '#262626',
+    color: '#757575',
+    fontSize: 10,
+    fontWeight: '600',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  radioOuter: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: '#555555',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 12,
+    marginTop: 2,
+  },
+  radioOuterSelected: {
+    borderColor: '#00E676',
+  },
+  radioInner: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#00E676',
+  },
+  specsRow: {
+    borderTopWidth: 1,
+    borderTopColor: '#262626',
+    paddingTop: 8,
+    marginTop: 4,
+  },
+  specItem: {
+    color: '#757575',
+    fontSize: 11,
+  },
+});
+
+
+================================================================================
+FILE: .github/workflows/build-android.yml
+================================================================================
+name: Build Android Dev Client
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prebuild Native Project
+        run: npx expo prebuild --platform android
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+
+================================================================================
+FILE: modules/audio-hardware-router/expo-module.config.json
+================================================================================
+{
+  "name": "audio-hardware-router",
+  "platforms": ["android"],
+  "android": {
+    "packageNames": [
+      "expo.modules.audiohardwarerouter.AudioHardwareRouterPackage"
+    ]
+  }
+}
+
+
+================================================================================
+FILE: modules/audio-hardware-router/package.json
+================================================================================
+{
+  "name": "audio-hardware-router",
+  "version": "1.0.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts"
+}
+
+
+================================================================================
+FILE: modules/audio-hardware-router/react-native.config.js
+================================================================================
+module.exports = {
+  dependency: {
+    platforms: {
+      android: {
+        sourceDir: './android',
+        packageImportPath: 'import expo.modules.audiohardwarerouter.AudioHardwareRouterPackage;',
+        packageInstance: 'new AudioHardwareRouterPackage()',
+      },
+    },
+  },
+};
+
+
+================================================================================
+FILE: modules/audio-hardware-router/android/build.gradle
+================================================================================
+apply plugin: 'com.android.library'
+
+android {
+    compileSdkVersion 34
+    namespace "expo.modules.audiohardwarerouter"
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 34
+    }
+    lintOptions {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation 'com.facebook.react:react-android'
+}
+
+
+================================================================================
+FILE: modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/AudioHardwareRouterModule.java
+================================================================================
+package expo.modules.audiohardwarerouter;
+
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothHeadset;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+
+import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.ReactContextBaseJavaModule;
+import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.WritableArray;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.DeviceEventManagerModule;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
+    private static final String TAG = "AudioHardwareRouter";
+    private final ReactApplicationContext reactContext;
+    private final AudioManager audioManager;
+    private final Handler mainHandler;
+    private AudioDeviceCallback deviceCallback;
+    private BroadcastReceiver bluetoothReceiver;
+    private boolean isListenerRegistered = false;
+
+    private final Runnable dispatchDebounceRunnable = this::doDispatchUpdate;
+
+    public AudioHardwareRouterModule(ReactApplicationContext reactContext) {
+        super(reactContext);
+        this.reactContext = reactContext;
+        this.audioManager = (AudioManager) reactContext.getSystemService(Context.AUDIO_SERVICE);
+        this.mainHandler = new Handler(Looper.getMainLooper());
+    }
+
+    @NonNull
+    @Override
+    public String getName() {
+        return "AudioHardwareRouter";
+    }
+
+    @Override
+    public void initialize() {
+        super.initialize();
+        registerListeners();
+    }
+
+    @Override
+    public void invalidate() {
+        unregisterListeners();
+        super.invalidate();
+    }
+
+    private synchronized void registerListeners() {
+        if (!isListenerRegistered && audioManager != null) {
+            deviceCallback = new AudioDeviceCallback() {
+                @Override
+                public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+                    scheduleDebouncedUpdate();
+                }
+
+                @Override
+                public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+                    scheduleDebouncedUpdate();
+                }
+            };
+            audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler);
+
+            bluetoothReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    scheduleDebouncedUpdate();
+                }
+            };
+
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+            filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+            filter.addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED);
+            filter.addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
+            filter.addAction(AudioManager.ACTION_HEADSET_PLUG);
+
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    reactContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED);
+                } else {
+                    reactContext.registerReceiver(bluetoothReceiver, filter);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to register broadcast receiver", e);
+            }
+
+            isListenerRegistered = true;
+        }
+    }
+
+    private synchronized void unregisterListeners() {
+        if (isListenerRegistered) {
+            mainHandler.removeCallbacks(dispatchDebounceRunnable);
+            if (audioManager != null && deviceCallback != null) {
+                try {
+                    audioManager.unregisterAudioDeviceCallback(deviceCallback);
+                } catch (Exception ignored) {}
+            }
+            if (bluetoothReceiver != null) {
+                try {
+                    reactContext.unregisterReceiver(bluetoothReceiver);
+                } catch (Exception ignored) {}
+            }
+            isListenerRegistered = false;
+        }
+    }
+
+    private void scheduleDebouncedUpdate() {
+        mainHandler.removeCallbacks(dispatchDebounceRunnable);
+        mainHandler.postDelayed(dispatchDebounceRunnable, 350);
+    }
+
+    private void doDispatchUpdate() {
+        if (reactContext.hasActiveReactInstance()) {
+            WritableMap params = Arguments.createMap();
+            params.putBoolean("hasUpdate", true);
+            reactContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                .emit("onAudioDevicesUpdated", params);
+        }
+    }
+
+    private boolean isBluetoothDevice(int typeCode) {
+        return typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            || typeCode == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+            || typeCode == 26 // AudioDeviceInfo.TYPE_BLE_HEADSET
+            || typeCode == 27 // AudioDeviceInfo.TYPE_BLE_SPEAKER
+            || typeCode == 23; // AudioDeviceInfo.TYPE_HEARING_AID
+    }
+
+    private WritableMap mapDeviceInfo(AudioDeviceInfo info) {
+        WritableMap map = Arguments.createMap();
+        int typeCode = info.getType();
+        String typeString;
+
+        switch (typeCode) {
+            case AudioDeviceInfo.TYPE_BUILTIN_MIC:
+                typeString = "builtin_mic";
+                break;
+            case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+                typeString = "wired_headset";
+                break;
+            case AudioDeviceInfo.TYPE_USB_DEVICE:
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
+            case AudioDeviceInfo.TYPE_USB_ACCESSORY:
+                typeString = "usb_device";
+                break;
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+            case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+            case 26:
+            case 27:
+            case 23:
+                typeString = "bluetooth_sco";
+                break;
+            default:
+                typeString = "external_input";
+                break;
+        }
+
+        String displayName = "";
+        try {
+            CharSequence productName = info.getProductName();
+            if (productName != null) {
+                displayName = productName.toString().trim();
+            }
+        } catch (SecurityException ignored) {}
+
+        if (displayName.isEmpty()) {
+            if (typeCode == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
+                displayName = "Built-in Microphone";
+            } else if (typeCode == AudioDeviceInfo.TYPE_WIRED_HEADSET) {
+                displayName = "Wired Headset Mic";
+            } else if (typeCode == AudioDeviceInfo.TYPE_USB_DEVICE || typeCode == AudioDeviceInfo.TYPE_USB_HEADSET) {
+                displayName = "USB Audio Interface";
+            } else if ("bluetooth_sco".equals(typeString)) {
+                displayName = "Bluetooth Earpods";
+            } else {
+                displayName = "Audio Capsule #" + info.getId();
+            }
+        }
+
+        map.putInt("id", info.getId());
+        map.putString("name", displayName);
+        map.putString("type", typeString);
+        map.putInt("typeCode", typeCode);
+
+        WritableArray rates = Arguments.createArray();
+        int[] sampleRates = info.getSampleRates();
+        if (sampleRates != null && sampleRates.length > 0) {
+            for (int r : sampleRates) {
+                rates.pushInt(r);
+            }
+        } else {
+            rates.pushInt(44100);
+            rates.pushInt(48000);
+        }
+        map.putArray("sampleRates", rates);
+
+        WritableArray channels = Arguments.createArray();
+        int[] channelCounts = info.getChannelCounts();
+        if (channelCounts != null && channelCounts.length > 0) {
+            for (int c : channelCounts) {
+                channels.pushInt(c);
+            }
+        } else {
+            channels.pushInt(1);
+        }
+        map.putArray("channelCounts", channels);
+
+        return map;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public WritableArray getAvailableInputs() {
+        WritableArray array = Arguments.createArray();
+        if (audioManager == null) return array;
+
+        List<AudioDeviceInfo> rawList = new ArrayList<>();
+        boolean foundBluetoothEndpoint = false;
+
+        // 1. Android 12+ Communication Endpoints (Primary targets for voice recording and playback)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                List<AudioDeviceInfo> comms = audioManager.getAvailableCommunicationDevices();
+                if (comms != null) {
+                    for (AudioDeviceInfo d : comms) {
+                        if (d != null && d.getType() != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && d.getType() != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE) {
+                            rawList.add(d);
+                            if (isBluetoothDevice(d.getType())) {
+                                foundBluetoothEndpoint = true;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. Physical internal microphones
+        try {
+            AudioDeviceInfo[] inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
+            if (inputs != null) {
+                for (AudioDeviceInfo d : inputs) {
+                    if (d != null && d.isSource()) {
+                        rawList.add(d);
+                        if (isBluetoothDevice(d.getType())) {
+                            foundBluetoothEndpoint = true;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // 3. Output sinks fallback: only inspect if no communication/input profile was detected
+        if (!foundBluetoothEndpoint) {
+            try {
+                AudioDeviceInfo[] outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+                if (outputs != null) {
+                    for (AudioDeviceInfo d : outputs) {
+                        if (d != null && isBluetoothDevice(d.getType())) {
+                            rawList.add(d);
+                        }
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 4. Deduplicate by product name so earpods only appear as a single entry
+        Set<String> seenNames = new HashSet<>();
+        for (AudioDeviceInfo d : rawList) {
+            try {
+                WritableMap map = mapDeviceInfo(d);
+                String name = map.getString("name");
+
+                if (seenNames.add(name)) {
+                    array.pushMap(map);
+                }
+            } catch (Exception ignored) {}
+        }
+
+        return array;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public boolean setPreferredInputDevice(int deviceId) {
+        if (audioManager == null) return false;
+
+        try {
+            AudioDeviceInfo target = null;
+            // Use bitwise mask to retrieve all devices cleanly
+            AudioDeviceInfo[] all = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS | AudioManager.GET_DEVICES_OUTPUTS);
+            if (all != null) {
+                for (AudioDeviceInfo d : all) {
+                    if (d != null && d.getId() == deviceId) {
+                        target = d;
+                        break;
+                    }
+                }
+            }
+
+            boolean isBluetooth = (target != null && isBluetoothDevice(target.getType()));
+
+            if (isBluetooth) {
+                audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    List<AudioDeviceInfo> comms = audioManager.getAvailableCommunicationDevices();
+                    if (comms != null) {
+                        for (AudioDeviceInfo comm : comms) {
+                            if (comm != null && (comm.getId() == deviceId || isBluetoothDevice(comm.getType()))) {
+                                return audioManager.setCommunicationDevice(comm);
+                            }
+                        }
+                    }
+                } else {
+                    audioManager.startBluetoothSco();
+                    audioManager.setBluetoothScoOn(true);
+                    return true;
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    audioManager.clearCommunicationDevice();
+                }
+                audioManager.stopBluetoothSco();
+                audioManager.setBluetoothScoOn(false);
+                audioManager.setMode(AudioManager.MODE_NORMAL);
+                return true;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to set input device: " + deviceId, e);
+        }
+        return false;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public boolean clearPreferredInputDevice() {
+        if (audioManager == null) return false;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice();
+            }
+            audioManager.stopBluetoothSco();
+            audioManager.setBluetoothScoOn(false);
+            audioManager.setMode(AudioManager.MODE_NORMAL);
+            return true;
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public WritableMap getActiveInputDevice() {
+        return null;
+    }
+
+    @ReactMethod
+    public void addListener(String eventName) {}
+
+    @ReactMethod
+    public void removeListeners(double count) {}
+}
+
+
+================================================================================
+FILE: modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/AudioHardwareRouterPackage.java
+================================================================================
+package expo.modules.audiohardwarerouter;
+
+import com.facebook.react.ReactPackage;
+import com.facebook.react.bridge.NativeModule;
+import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.uimanager.ViewManager;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+public class AudioHardwareRouterPackage implements ReactPackage {
+    @Override
+    public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
+        List<NativeModule> modules = new ArrayList<>();
+        modules.add(new AudioHardwareRouterModule(reactContext));
+        return modules;
+    }
+
+    @Override
+    public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
+        return Collections.emptyList();
+    }
+}
+
+
+================================================================================
+FILE: modules/audio-hardware-router/src/index.ts
+================================================================================
+// modules/audio-hardware-router/src/index.ts
+import { NativeModules, NativeEventEmitter } from 'react-native';
+
+const { AudioHardwareRouter: NativeModule } = NativeModules;
+
+export interface AudioInputDevice {
+  id: number;
+  name: string;
+  type:
+    | 'builtin_mic'
+    | 'wired_headset'
+    | 'usb_device'
+    | 'usb_headset'
+    | 'usb_accessory'
+    | 'bluetooth_sco'
+    | 'bluetooth_a2dp'
+    | 'external_input';
+  typeCode: number;
+  sampleRates: number[];
+  channelCounts: number[];
+}
+
+export const AudioHardwareRouter = {
+  getAvailableInputs(): AudioInputDevice[] {
+    try {
+      if (NativeModule && typeof NativeModule.getAvailableInputs === 'function') {
+        const result = NativeModule.getAvailableInputs();
+        if (Array.isArray(result) && result.length > 0) {
+          return result;
+        }
+      }
+    } catch (e) {
+      console.warn('[AudioHardwareRouter] native error:', e);
+    }
+    
+    // Diagnostic Fallback: If you see this exact string in the UI, Autolinking failed.
+    return [
+      {
+        id: 999,
+        name: '[JS Fallback] Built-in Mic',
+        type: 'builtin_mic',
+        typeCode: 15,
+        sampleRates: [48000],
+        channelCounts: [1],
+      },
+    ];
+  },
+
+  setPreferredInputDevice(deviceId: number): boolean {
+    try {
+      return NativeModule?.setPreferredInputDevice?.(deviceId) ?? false;
+    } catch {
+      return false;
+    }
+  },
+
+  clearPreferredInputDevice(): boolean {
+    try {
+      return NativeModule?.clearPreferredInputDevice?.() ?? false;
+    } catch {
+      return false;
+    }
+  },
+
+  getActiveInputDevice(): AudioInputDevice | null {
+    try {
+      return NativeModule?.getActiveInputDevice?.() ?? null;
+    } catch {
+      return null;
+    }
+  },
+};
+
+export const AudioHardwareRouterEmitter = NativeModule
+  ? new NativeEventEmitter(NativeModule)
+  : null;
+
+
