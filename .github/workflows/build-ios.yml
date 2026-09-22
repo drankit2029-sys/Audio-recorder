@@ -1,26 +1,26 @@
 - name: Build Debug App (Dev Client)
-        run: |
-          cd ios
-          xcodebuild build \
-            -workspace AudioRecorder.xcworkspace \
-            -scheme AudioRecorder \
-            -configuration Debug \
-            -sdk iphoneos \
-            -derivedDataPath ../build/DerivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY=""
+  run: |
+    cd ios
+    xcodebuild build \
+    -workspace AudioRecorder.xcworkspace \
+    -scheme AudioRecorder \
+    -configuration Debug \
+    -sdk iphoneos \
+    -derivedDataPath ../build/DerivedData \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY=""
 
-      - name: Package IPA for ESign
-        run: |
-          mkdir -p build/Payload
-          cp -r build/DerivedData/Build/Products/Debug-iphoneos/AudioRecorder.app build/Payload/
-          cd build
-          zip -r AudioRecorder-DevClient.ipa Payload
+- name: Package IPA for ESign
+  run: |
+    mkdir -p build/Payload
+    cp -r build/DerivedData/Build/Products/Debug-iphoneos/AudioRecorder.app build/Payload/
+    cd build
+    zip -r AudioRecorder-DevClient.ipa Payload
 
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: AudioRecorder-DevClient
-          path: build/AudioRecorder-DevClient.ipa
-          retention-days: 14
+- name: Upload IPA Artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: AudioRecorder-DevClient
+    path: build/AudioRecorder-DevClient.ipa
+    retention-days: 14
