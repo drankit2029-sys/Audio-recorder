@@ -18,13 +18,18 @@ export function useAudioInputDevices() {
       const active = AudioHardwareRouter.getActiveInputDevice();
       if (active) {
         setSelectedDeviceId(active.id);
-      } else if (inputs.length > 0 && selectedDeviceId === null) {
-        setSelectedDeviceId(inputs[0].id);
+      } else {
+        setSelectedDeviceId((prev) => {
+          if (prev !== null && inputs.some((d) => d.id === prev)) {
+            return prev;
+          }
+          return inputs[0]?.id ?? null;
+        });
       }
     } catch (e) {
       console.warn('[useAudioInputDevices] Query failed:', e);
     }
-  }, [selectedDeviceId]);
+  }, []); // Stable callback
 
   useEffect(() => {
     refreshDevices();
@@ -34,14 +39,7 @@ export function useAudioInputDevices() {
     const sub = AudioHardwareRouterEmitter.addListener(
       'onAudioDevicesUpdated',
       () => {
-        try {
-          const freshInputs = AudioHardwareRouter.getAvailableInputs();
-          setDevices(freshInputs);
-          setSelectedDeviceId((prevId) => {
-            const exists = freshInputs.some((d) => d.id === prevId);
-            return exists ? prevId : (freshInputs[0]?.id ?? null);
-          });
-        } catch {}
+        refreshDevices();
       }
     );
 
@@ -52,9 +50,13 @@ export function useAudioInputDevices() {
 
   const selectDevice = useCallback((deviceId: number) => {
     try {
+      // Optimistically select so radio button and border illuminate immediately
+      setSelectedDeviceId(deviceId);
+
       const success = AudioHardwareRouter.setPreferredInputDevice(deviceId);
-      if (success) {
-        setSelectedDeviceId(deviceId);
+      if (!success) {
+        const active = AudioHardwareRouter.getActiveInputDevice();
+        if (active) setSelectedDeviceId(active.id);
       }
       return success;
     } catch {
@@ -65,7 +67,8 @@ export function useAudioInputDevices() {
   const resetToDefault = useCallback(() => {
     try {
       AudioHardwareRouter.clearPreferredInputDevice();
-      setSelectedDeviceId(devices[0]?.id ?? null);
+      const active = AudioHardwareRouter.getActiveInputDevice();
+      setSelectedDeviceId(active?.id ?? devices[0]?.id ?? null);
     } catch {}
   }, [devices]);
 
