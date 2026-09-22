@@ -271,28 +271,30 @@ useEffect(() => {
             <TeleprompterDeck engineState={engineState} />
 
             {/* Badges: Format & Active Input Mic */}
-            <View style={styles.badgesRow}>
-              <TouchableOpacity
-                style={styles.presetBadgeContainer}
-                onPress={() => setSettingsVisible(true)}
-                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-              >
-                <View style={styles.presetBadgeDot} />
-                <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
-              </TouchableOpacity>
+<View style={styles.badgesRow}>
+  <TouchableOpacity
+    style={styles.presetBadgeContainer}
+    onPress={() => setSettingsVisible(true)}
+    disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+  >
+    <View style={styles.presetBadgeDot} />
+    <Text style={styles.presetBadgeText}>{activePreset.badge}</Text>
+  </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.inputBadgeContainer}
-                onPress={() => setDeviceModalVisible(true)}
-                disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-              >
-                <Text style={styles.inputBadgeIcon}>🎙️</Text>
-                <Text style={styles.inputBadgeText} numberOfLines={1}>
-                  {selectedDevice ? selectedDevice.name : 'Default Input'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
+  <TouchableOpacity
+    style={styles.inputBadgeContainer}
+    onPress={() => {
+      refreshDevices(); // Query hardware right before opening modal
+      setDeviceModalVisible(true);
+    }}
+    disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
+  >
+    <Text style={styles.inputBadgeIcon}>🎙️</Text>
+    <Text style={styles.inputBadgeText} numberOfLines={1}>
+      {selectedDevice ? selectedDevice.name : 'Built-in Microphone'}
+    </Text>
+  </TouchableOpacity>
+</View>
             <Text style={styles.timer}>{formatTimer(durationMs)}</Text>
 
             <AudioMeter
