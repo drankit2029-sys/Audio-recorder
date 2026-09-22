@@ -65,13 +65,11 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
 
     private void registerListeners() {
         if (!isListenerRegistered && audioManager != null) {
-            // 1. Android Audio Device Callback
             deviceCallback = new AudioDeviceCallback() {
                 @Override
                 public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
                     dispatchDevicesUpdate();
                 }
-
                 @Override
                 public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
                     dispatchDevicesUpdate();
@@ -79,42 +77,24 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             };
             audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler);
 
-            // 2. Bluetooth State BroadcastReceiver for instant earpod hotplug detection
             bluetoothReceiver = new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
                     dispatchDevicesUpdate();
                 }
             };
-
             IntentFilter filter = new IntentFilter();
             filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
             filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
             filter.addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED);
             filter.addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED);
-            filter.addAction(AudioManager.ACTION_HEADSET_PLUG);
-
+            
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 reactContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED);
             } else {
                 reactContext.registerReceiver(bluetoothReceiver, filter);
             }
-
             isListenerRegistered = true;
-        }
-    }
-
-    private void unregisterListeners() {
-        if (isListenerRegistered) {
-            if (audioManager != null && deviceCallback != null) {
-                audioManager.unregisterAudioDeviceCallback(deviceCallback);
-            }
-            if (bluetoothReceiver != null) {
-                try {
-                    reactContext.unregisterReceiver(bluetoothReceiver);
-                } catch (Exception ignored) {}
-            }
-            isListenerRegistered = false;
         }
     }
 
@@ -131,9 +111,9 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
     private boolean isBluetoothDevice(int type) {
         return type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
             || type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
-            || type == 26 // AudioDeviceInfo.TYPE_BLE_HEADSET
-            || type == 27 // AudioDeviceInfo.TYPE_BLE_SPEAKER
-            || type == 23; // AudioDeviceInfo.TYPE_HEARING_AID
+            || type == 26 // TYPE_BLE_HEADSET
+            || type == 27 // TYPE_BLE_SPEAKER
+            || type == 23; // TYPE_HEARING_AID
     }
 
     private WritableMap mapDeviceInfo(AudioDeviceInfo info) {
@@ -149,16 +129,11 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
                 typeString = "wired_headset";
                 break;
             case AudioDeviceInfo.TYPE_USB_DEVICE:
+            case AudioDeviceInfo.TYPE_USB_HEADSET:
                 typeString = "usb_device";
                 break;
-            case AudioDeviceInfo.TYPE_USB_HEADSET:
-                typeString = "usb_headset";
-                break;
-            case AudioDeviceInfo.TYPE_USB_ACCESSORY:
-                typeString = "usb_accessory";
-                break;
             case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
-            case 26: // TYPE_BLE_HEADSET
+            case 26: 
             case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
                 typeString = "bluetooth_sco";
                 break;
@@ -173,21 +148,15 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             if (productName != null) {
                 displayName = productName.toString().trim();
             }
-        } catch (SecurityException se) {
-            Log.w(TAG, "BLUETOOTH_CONNECT not granted when querying product name", se);
-        }
+        } catch (SecurityException ignored) {}
 
         if (displayName.isEmpty()) {
             if (typeCode == AudioDeviceInfo.TYPE_BUILTIN_MIC) {
                 displayName = "Built-in Microphone";
-            } else if (typeCode == AudioDeviceInfo.TYPE_WIRED_HEADSET) {
-                displayName = "Wired Headset Mic";
-            } else if (typeCode == AudioDeviceInfo.TYPE_USB_DEVICE || typeCode == AudioDeviceInfo.TYPE_USB_HEADSET) {
-                displayName = "USB Audio Interface";
-            } else if (isBluetoothDevice(typeCode)) {
+            } else if (typeString.equals("bluetooth_sco")) {
                 displayName = "Bluetooth Earpods";
             } else {
-                displayName = "Audio Input #" + info.getId();
+                displayName = "Hardware Input #" + info.getId();
             }
         }
 
@@ -199,21 +168,9 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
         WritableArray rates = Arguments.createArray();
         int[] sampleRates = info.getSampleRates();
         if (sampleRates != null) {
-            for (int r : sampleRates) {
-                rates.pushInt(r);
-            }
+            for (int r : sampleRates) { rates.pushInt(r); }
         }
         map.putArray("sampleRates", rates);
-
-        WritableArray channels = Arguments.createArray();
-        int[] channelCounts = info.getChannelCounts();
-        if (channelCounts != null) {
-            for (int c : channelCounts) {
-                channels.pushInt(c);
-            }
-        }
-        map.putArray("channelCounts", channels);
-
         return map;
     }
 
@@ -224,116 +181,70 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
 
         List<AudioDeviceInfo> candidates = new ArrayList<>();
         Set<Integer> seenIds = new HashSet<>();
-        Set<String> seenBluetoothNames = new HashSet<>();
+        boolean foundBluetooth = false;
 
-        // 1. Standard Input Microphones (Built-in mic, USB mic)
+        // 1. Android 12+ Communication Endpoints (Finds Wireless Earpods)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                for (AudioDeviceInfo d : audioManager.getAvailableCommunicationDevices()) {
+                    if (d.getType() != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && seenIds.add(d.getId())) {
+                        candidates.add(d);
+                        if (isBluetoothDevice(d.getType())) foundBluetooth = true;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. Standard Mic Capsules
         try {
-            AudioDeviceInfo[] inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
-            if (inputs != null) {
-                for (AudioDeviceInfo d : inputs) {
-                    if (d != null && d.isSource() && seenIds.add(d.getId())) {
+            for (AudioDeviceInfo d : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                if (d.isSource() && seenIds.add(d.getId())) {
+                    candidates.add(d);
+                    if (isBluetoothDevice(d.getType())) foundBluetooth = true;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // 3. Force catch connected Bluetooth headsets hiding as A2DP
+        if (!foundBluetooth) {
+            try {
+                for (AudioDeviceInfo d : audioManager.getDevices(AudioManager.GET_DEVICES_ALL)) {
+                    if (isBluetoothDevice(d.getType()) && seenIds.add(d.getId())) {
                         candidates.add(d);
                     }
                 }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Error querying standard inputs", e);
-        }
-
-        // 2. Communication Devices on Android 12+ (discovers Bluetooth SCO / BLE endpoints)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                List<AudioDeviceInfo> commDevices = audioManager.getAvailableCommunicationDevices();
-                if (commDevices != null) {
-                    for (AudioDeviceInfo d : commDevices) {
-                        if (d != null && isBluetoothDevice(d.getType()) && seenIds.add(d.getId())) {
-                            candidates.add(d);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Error querying communication devices", e);
-            }
-        }
-
-        // 3. Inspect ALL connected devices to discover Bluetooth Earpods connected as A2DP/Headsets
-        try {
-            AudioDeviceInfo[] allDevices = audioManager.getDevices(AudioManager.GET_DEVICES_ALL);
-            if (allDevices != null) {
-                for (AudioDeviceInfo d : allDevices) {
-                    if (d != null && isBluetoothDevice(d.getType())) {
-                        String name = "";
-                        try {
-                            CharSequence prod = d.getProductName();
-                            if (prod != null) name = prod.toString().trim();
-                        } catch (Exception ignored) {}
-
-                        // Deduplicate Bluetooth earpods that register both A2DP and SCO entries
-                        if (!name.isEmpty() && seenBluetoothNames.add(name)) {
-                            if (seenIds.add(d.getId())) {
-                                candidates.add(d);
-                            }
-                        } else if (name.isEmpty() && seenIds.add(d.getId())) {
-                            candidates.add(d);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Error querying all devices", e);
+            } catch (Exception ignored) {}
         }
 
         for (AudioDeviceInfo d : candidates) {
-            try {
-                array.pushMap(mapDeviceInfo(d));
-            } catch (Exception e) {
-                Log.w(TAG, "Error mapping device", e);
-            }
+            array.pushMap(mapDeviceInfo(d));
         }
-
         return array;
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
     public boolean setPreferredInputDevice(int deviceId) {
         if (audioManager == null) return false;
-
         try {
-            AudioDeviceInfo targetDevice = null;
-            AudioDeviceInfo[] all = audioManager.getDevices(AudioManager.GET_DEVICES_ALL);
-            if (all != null) {
-                for (AudioDeviceInfo d : all) {
-                    if (d.getId() == deviceId) {
-                        targetDevice = d;
-                        break;
-                    }
-                }
+            AudioDeviceInfo target = null;
+            for (AudioDeviceInfo d : audioManager.getDevices(AudioManager.GET_DEVICES_ALL)) {
+                if (d.getId() == deviceId) { target = d; break; }
             }
 
-            boolean isBluetooth = targetDevice != null && isBluetoothDevice(targetDevice.getType());
-
-            if (isBluetooth) {
-                // Activate communication audio mode to open the Bluetooth microphone link
+            if (target != null && isBluetoothDevice(target.getType())) {
                 audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
-
-                // Android 12+ communication routing
+                audioManager.startBluetoothSco();
+                audioManager.setBluetoothScoOn(true);
+                
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    List<AudioDeviceInfo> commDevices = audioManager.getAvailableCommunicationDevices();
-                    if (commDevices != null) {
-                        for (AudioDeviceInfo d : commDevices) {
-                            if (isBluetoothDevice(d.getType())) {
-                                return audioManager.setCommunicationDevice(d);
-                            }
+                    for (AudioDeviceInfo comm : audioManager.getAvailableCommunicationDevices()) {
+                        if (comm.getId() == deviceId || isBluetoothDevice(comm.getType())) {
+                            return audioManager.setCommunicationDevice(comm);
                         }
                     }
                 }
-
-                // SCO fallback for wide compatibility across OEM chipsets
-                audioManager.startBluetoothSco();
-                audioManager.setBluetoothScoOn(true);
                 return true;
             } else {
-                // Switching back to Built-in or USB microphone
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     audioManager.clearCommunicationDevice();
                 }
@@ -359,24 +270,18 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             audioManager.setBluetoothScoOn(false);
             audioManager.setMode(AudioManager.MODE_NORMAL);
             return true;
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to clear preferred device", e);
-        }
+        } catch (Exception ignored) {}
         return false;
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
     public WritableMap getActiveInputDevice() {
         if (audioManager == null) return null;
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                AudioDeviceInfo active = audioManager.getCommunicationDevice();
-                if (active != null) {
-                    return mapDeviceInfo(active);
-                }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceInfo active = audioManager.getCommunicationDevice();
+            if (active != null && active.getType() != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
+                return mapDeviceInfo(active);
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to get active device", e);
         }
         return null;
     }

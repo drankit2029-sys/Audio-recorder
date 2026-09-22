@@ -30,16 +30,18 @@ export const AudioHardwareRouter = {
         }
       }
     } catch (e) {
-      console.warn('[AudioHardwareRouter] getAvailableInputs error:', e);
+      console.warn('[AudioHardwareRouter] native error:', e);
     }
+    
+    // Diagnostic Fallback: If you see this exact string in the UI, Autolinking failed.
     return [
       {
-        id: 1,
-        name: 'Built-in Microphone',
+        id: 999,
+        name: '[JS Fallback] Built-in Mic',
         type: 'builtin_mic',
         typeCode: 15,
-        sampleRates: [44100, 48000],
-        channelCounts: [1, 2],
+        sampleRates: [48000],
+        channelCounts: [1],
       },
     ];
   },

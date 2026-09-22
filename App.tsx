@@ -142,27 +142,14 @@ useEffect(() => {
     try {
       await ForegroundServiceManager.initialize();
 
-      // 1. Request microphone permission
-      const micPerms = await AudioModule.requestRecordingPermissionsAsync();
-      if (!micPerms.granted) {
-        Alert.alert('Permission Required', 'Microphone access is required to record audio.');
-        return;
-      }
-
-      // 2. Request Bluetooth permission on Android 12+ (API 31+)
       if (Platform.OS === 'android' && Platform.Version >= 31) {
-        try {
-          await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-            {
-              title: 'Bluetooth Audio Access',
-              message: 'Allow access to connect and record with Bluetooth earbuds and headsets.',
-              buttonPositive: 'Allow',
-            }
-          );
-        } catch (btErr) {
-          console.warn('[Bootstrap] Bluetooth permission error:', btErr);
-        }
+        await PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+        ]);
+      } else {
+        await AudioModule.requestRecordingPermissionsAsync();
       }
 
       await AudioModule.setAudioModeAsync({
@@ -172,9 +159,9 @@ useEffect(() => {
         shouldRouteThroughEarpiece: false,
       });
 
-      // 3. Populate genuine hardware devices
       refreshDevices();
 
+      
       setRecordings(RecordingLibrary.getAll());
 
       const orphaned = SessionJournal.checkOrphanedSession();
