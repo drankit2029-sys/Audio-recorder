@@ -13,13 +13,10 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Select Xcode 16.1
+      - name: Select Default Xcode
         run: |
-          if [ -d "/Applications/Xcode_16.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
-          else
-            echo "NOTE: Xcode_16.1.app not found, falling back to default"
-          fi
+          # Reset to default Xcode on macOS 15 (guaranteed >= 16.1 with matching simulator runtimes)
+          sudo xcode-select -r
           xcodebuild -version
 
       - name: Setup Node.js
@@ -37,11 +34,6 @@ jobs:
       - name: Configure React Native Node Environment
         run: |
           echo "export NODE_BINARY=$(which node)" > ios/.xcode.env.local
-
-      - name: CocoaPods Install
-        run: |
-          cd ios
-          pod install
 
       - name: Compile iOS Dev Client (Debug)
         run: |
@@ -66,7 +58,7 @@ jobs:
       - name: Package Unsigned IPA for ESign
         run: |
           mkdir -p build/Payload
-          APP_PATH=$(find ios/build_output/Build/Products/Debug-iphoneos -name "*.app" -type d | head -n 1)
+          APP_PATH=$(find ios/build_output/Build/Products/Debug-iphoneos -name "*.app" -type d -maxdepth 1 | head -n 1)
           echo "Found compiled app at: $APP_PATH"
           test -n "$APP_PATH" || { echo "ERROR: no .app directory found"; exit 1; }
           cp -R "$APP_PATH" build/Payload/
@@ -82,7 +74,7 @@ jobs:
           path: build/AudioRecorder-DevClient.ipa
           retention-days: 14
 
-      - name: Upload full build log on failure
+      - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
