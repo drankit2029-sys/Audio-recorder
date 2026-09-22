@@ -3,10 +3,10 @@
     "name": "AudioRecorder",
     "slug": "audio-recorder",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": false,
+      "supportsTablet": true,
       "bundleIdentifier": "com.audiorecorder.app",
       "infoPlist": {
         "UIBackgroundModes": ["audio"],
@@ -24,7 +24,6 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.BLUETOOTH_CONNECT",
         "android.permission.BLUETOOTH"
-        
       ]
     },
     "plugins": [

@@ -1,4 +1,5 @@
 // src/services/audio/ForegroundServiceManager.ts
+import { Platform } from 'react-native';
 import notifee, {
   AndroidImportance,
   AndroidColor,
@@ -28,26 +29,26 @@ async function handleActionPress(actionId?: string) {
   }
 }
 
-// 1. Keep background task worker alive while recording
-notifee.registerForegroundService(() => {
-  return new Promise(() => {
-    // Keeps service running until stopService() is invoked
+if (Platform.OS === 'android') {
+  // 1. Keep background task worker alive while recording (Android only)
+  notifee.registerForegroundService(() => {
+    return new Promise(() => {});
   });
-});
 
-// 2. Handle notification interactions when app is minimized or screen is locked
-notifee.onBackgroundEvent(async ({ type, detail }) => {
-  if (type === EventType.ACTION_PRESS) {
-    await handleActionPress(detail.pressAction?.id);
-  }
-});
+  // 2. Handle notification interactions when app is minimized or screen is locked
+  notifee.onBackgroundEvent(async ({ type, detail }) => {
+    if (type === EventType.ACTION_PRESS) {
+      await handleActionPress(detail.pressAction?.id);
+    }
+  });
 
-// 3. Handle notification interactions when app is visible
-notifee.onForegroundEvent(async ({ type, detail }) => {
-  if (type === EventType.ACTION_PRESS) {
-    await handleActionPress(detail.pressAction?.id);
-  }
-});
+  // 3. Handle notification interactions when app is visible
+  notifee.onForegroundEvent(async ({ type, detail }) => {
+    if (type === EventType.ACTION_PRESS) {
+      await handleActionPress(detail.pressAction?.id);
+    }
+  });
+}
 
 function createNotificationPayload(durationStr: string, presetLabel: string, isPaused: boolean) {
   const actions: NotificationAndroidAction[] = [
@@ -97,6 +98,7 @@ export const ForegroundServiceManager = {
   },
 
   async initialize(): Promise<void> {
+    if (Platform.OS !== 'android') return;
     try {
       await notifee.requestPermission();
 
@@ -113,6 +115,7 @@ export const ForegroundServiceManager = {
   },
 
   async startService(presetLabel: string): Promise<void> {
+    if (Platform.OS !== 'android') return;
     try {
       await notifee.displayNotification(
         createNotificationPayload('00:00', presetLabel, false)
@@ -123,6 +126,7 @@ export const ForegroundServiceManager = {
   },
 
   async updateProgress(durationStr: string, presetLabel: string, isPaused: boolean = false): Promise<void> {
+    if (Platform.OS !== 'android') return;
     try {
       await notifee.displayNotification(
         createNotificationPayload(durationStr, presetLabel, isPaused)
@@ -131,6 +135,7 @@ export const ForegroundServiceManager = {
   },
 
   async stopService(): Promise<void> {
+    if (Platform.OS !== 'android') return;
     try {
       await notifee.stopForegroundService();
       await notifee.cancelNotification(NOTIFICATION_ID);

@@ -149,51 +149,59 @@ export default function App() {
     });
   }, []);
 
-  useEffect(() => {
-    async function bootstrap() {
-      try {
+  // App.tsx (inside the bootstrap useEffect)
+useEffect(() => {
+  async function bootstrap() {
+    try {
+      if (Platform.OS === 'android') {
         await ForegroundServiceManager.initialize();
 
-        if (Platform.OS === 'android' && Platform.Version >= 31) {
+        if (Platform.Version >= 31) {
           await PermissionsAndroid.requestMultiple([
             PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
             PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
           ]);
-        } else {
-          await AudioModule.requestRecordingPermissionsAsync();
         }
-
-        await AudioModule.setAudioModeAsync({
-          allowsRecording: true,
-          playsInSilentMode: true,
-          interruptionMode: 'doNotMix',
-          shouldRouteThroughEarpiece: false,
-        });
-
-        refreshDevices();
-
-        setRecordings(RecordingLibrary.getAll());
-
-        const orphaned = SessionJournal.checkOrphanedSession();
-        if (orphaned) {
+      } else {
+        const permissionStatus = await AudioModule.requestRecordingPermissionsAsync();
+        if (!permissionStatus.granted) {
           Alert.alert(
-            'Interrupted Recording Found',
-            `Session ${orphaned.sessionId} did not finalize properly.`,
-            [
-              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
-            ]
+            'Microphone Required',
+            'Permission to access the microphone is required to record audio.'
           );
         }
-      } catch (err) {
-        console.error('Bootstrap error:', err);
-      } finally {
-        setIsReady(true);
       }
-    }
 
-    bootstrap();
-  }, [refreshDevices]);
+      await AudioModule.setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true,
+        interruptionMode: 'doNotMix',
+        shouldRouteThroughEarpiece: false,
+      });
+
+      refreshDevices();
+      setRecordings(RecordingLibrary.getAll());
+
+      const orphaned = SessionJournal.checkOrphanedSession();
+      if (orphaned) {
+        Alert.alert(
+          'Interrupted Recording Found',
+          `Session ${orphaned.sessionId} did not finalize properly.`,
+          [
+            { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
+            { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
+          ]
+        );
+      }
+    } catch (err) {
+      console.error('Bootstrap error:', err);
+    } finally {
+      setIsReady(true);
+    }
+  }
+
+  bootstrap();
+}, [refreshDevices]);
 
   useEffect(() => {
     if (engineState === 'RECORDING') {

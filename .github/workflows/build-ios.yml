@@ -1,0 +1,82 @@
+name: Build iOS Dev Client (ESign Ready)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/ios-support
+
+jobs:
+  build-ios-dev-client:
+    runs-on: macos-15
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Default Xcode
+        run: |
+          # Reset to default Xcode on macOS 15 (guaranteed >= 16.1 with matching simulator runtimes)
+          sudo xcode-select -r
+          xcodebuild -version
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Prebuild Native iOS Project
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Configure React Native Node Environment
+        run: |
+          echo "export NODE_BINARY=$(which node)" > ios/.xcode.env.local
+
+      - name: Compile iOS Dev Client (Debug)
+        run: |
+          cd ios
+          xcodebuild build \
+            -workspace AudioRecorder.xcworkspace \
+            -scheme AudioRecorder \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ./build_output \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO > xcodebuild.log 2>&1 || {
+              echo "=== BUILD FAILED: COMPACT ERROR SUMMARY ==="
+              grep -E -B 4 -A 2 "(error:|fatal error:|The following build commands failed)" xcodebuild.log || tail -n 80 xcodebuild.log
+              exit 1
+            }
+          echo "BUILD SUCCEEDED"
+
+      - name: Package Unsigned IPA for ESign
+        run: |
+          mkdir -p build/Payload
+          APP_PATH=$(find ios/build_output/Build/Products/Debug-iphoneos -name "*.app" -type d -maxdepth 1 | head -n 1)
+          echo "Found compiled app at: $APP_PATH"
+          test -n "$APP_PATH" || { echo "ERROR: no .app directory found"; exit 1; }
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -qr AudioRecorder-DevClient.ipa Payload
+          echo "Successfully generated AudioRecorder-DevClient.ipa"
+          ls -lh AudioRecorder-DevClient.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioRecorder-DevClient
+          path: build/AudioRecorder-DevClient.ipa
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ios/xcodebuild.log
