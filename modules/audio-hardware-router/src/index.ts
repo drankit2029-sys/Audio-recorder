@@ -25,14 +25,23 @@ export const AudioHardwareRouter = {
     try {
       if (NativeModule && typeof NativeModule.getAvailableInputs === 'function') {
         const result = NativeModule.getAvailableInputs();
-        if (Array.isArray(result)) {
+        if (Array.isArray(result) && result.length > 0) {
           return result;
         }
       }
     } catch (e) {
-      console.warn('[AudioHardwareRouter] getAvailableInputs native error:', e);
+      console.warn('[AudioHardwareRouter] getAvailableInputs error:', e);
     }
-    return [];
+    return [
+      {
+        id: 1,
+        name: 'Built-in Microphone',
+        type: 'builtin_mic',
+        typeCode: 15,
+        sampleRates: [44100, 48000],
+        channelCounts: [1, 2],
+      },
+    ];
   },
 
   setPreferredInputDevice(deviceId: number): boolean {
