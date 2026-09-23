@@ -10,9 +10,13 @@ import {
   Alert,
   PanResponder,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAudioPlayer } from 'expo-audio';
 import * as Sharing from 'expo-sharing';
+import { Play, Pause, Share2, Trash2, X, Music } from 'lucide-react-native';
+
 import { RecordingLibrary, SavedRecording } from '../../services/storage/recordingLibrary';
+import { useResponsive } from '../../hooks/useResponsive';
 
 interface RecordingLibraryModalProps {
   visible: boolean;
@@ -27,19 +31,18 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
   recordings,
   onLibraryUpdate,
 }) => {
+  const { isTablet } = useResponsive();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  // Scrubber state
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [scrubTime, setScrubTime] = useState(0);
 
   const activeRecording = recordings.find((r) => r.id === activeId) ?? null;
   const player = useAudioPlayer(activeRecording?.uri ?? null);
 
-  // Mutable refs to prevent stale closures inside PanResponder
   const playerRef = useRef(player);
   playerRef.current = player;
 
@@ -51,12 +54,10 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
   const trackWidthRef = useRef<number>(260);
   const startXRef = useRef<number>(0);
 
-  // 1. Guaranteed first-tap playback synchronizer
   useEffect(() => {
     if (!isPlaying || !player || !activeRecording) return;
 
     let cancelled = false;
-
     const triggerPlay = () => {
       if (cancelled) return;
       try {
@@ -80,7 +81,6 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
     };
   }, [isPlaying, player, activeId, activeRecording]);
 
-  // 2. High-frequency progress poller (20 Hz)
   useEffect(() => {
     if (isPlaying && player && !isScrubbing) {
       progressPollRef.current = setInterval(() => {
@@ -96,7 +96,6 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
           setCurrentTime(cur);
           if (dur > 0) setDuration(dur);
 
-          // End of take reached
           if (dur > 0 && cur >= dur) {
             setIsPlaying(false);
             setCurrentTime(0);
@@ -120,7 +119,6 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
     };
   }, [isPlaying, player, isScrubbing, activeRecording]);
 
-  // 3. PanResponder with active refs and safe promise handling
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -278,15 +276,16 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
         </View>
 
         <View style={styles.metaRow}>
-          <Text style={styles.metaBadge}>
-            {item.uri.endsWith('.wav') ? 'WAV 48k' : 'AAC 256k'}
-          </Text>
+          <View style={styles.metaBadge}>
+            <Text style={styles.metaBadgeText}>
+              {item.uri.endsWith('.wav') ? 'WAV' : 'AAC'}
+            </Text>
+          </View>
           <Text style={styles.metaText}>{formatSecs(item.durationMs / 1000)}</Text>
-          <Text style={styles.metaText}>•</Text>
+          <Text style={styles.metaDivider}>•</Text>
           <Text style={styles.metaText}>{formatFileSize(item.sizeBytes)}</Text>
         </View>
 
-        {/* Dynamic Interactive Timeline with Scrubbing */}
         {isThisActive && (
           <View style={styles.progressSection}>
             <View
@@ -296,18 +295,16 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
                 trackWidthRef.current = e.nativeEvent.layout.width;
               }}
             >
-              {/* Background Track */}
               <View style={styles.progressTrack}>
                 <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
               </View>
 
-              {/* Scrub Thumb Knob */}
               <View
                 style={[
                   styles.scrubThumb,
                   {
                     left: `${progressPct}%`,
-                    transform: [{ scale: isScrubbing ? 1.3 : 1.0 }],
+                    transform: [{ scale: isScrubbing ? 1.25 : 1.0 }],
                   },
                 ]}
               />
@@ -327,64 +324,84 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
             activeOpacity={0.8}
           >
             {isThisPlaying ? (
-              <View style={styles.pauseBarsContainer}>
-                <View style={styles.pauseBar} />
-                <View style={styles.pauseBar} />
-              </View>
+              <Pause size={18} color="#000000" />
             ) : (
-              <View style={styles.playTriangle} />
+              <Play size={18} color="#000000" style={{ marginLeft: 2 }} />
             )}
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.btnAction} onPress={() => handleShare(item)}>
+          <TouchableOpacity
+            style={styles.btnAction}
+            onPress={() => handleShare(item)}
+            activeOpacity={0.7}
+          >
+            <Share2 size={13} color="#D1D1D6" />
             <Text style={styles.btnActionText}>EXPORT</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.btnAction, styles.btnDelete]}
             onPress={() => handleDelete(item)}
+            activeOpacity={0.7}
           >
-            <Text style={[styles.btnActionText, styles.deleteText]}>DELETE</Text>
+            <Trash2 size={13} color="#8E8E93" />
+            <Text style={styles.deleteText}>DELETE</Text>
           </TouchableOpacity>
         </View>
       </View>
     );
   };
 
+  const cardContent = (
+    <View style={[styles.dialogCard, isTablet && styles.dialogCardTablet]}>
+      <View style={styles.topBar}>
+        <View>
+          <Text style={styles.heading}>Library</Text>
+          <Text style={styles.subheading}>{recordings.length} Recorded Takes</Text>
+        </View>
+        <TouchableOpacity style={styles.closeBtn} onPress={handleClose} activeOpacity={0.7}>
+          <X size={16} color="#FFFFFF" />
+        </TouchableOpacity>
+      </View>
+
+      {recordings.length === 0 ? (
+        <View style={styles.emptyContainer}>
+          <Music size={40} color="#3A3A3C" style={{ marginBottom: 12 }} />
+          <Text style={styles.emptyTitle}>No Recorded Takes</Text>
+          <Text style={styles.emptyText}>
+            Audio sessions captured on the console will automatically appear here.
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          data={recordings}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
+    </View>
+  );
+
   return (
     <Modal
       visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
+      animationType={isTablet ? 'fade' : 'slide'}
+      presentationStyle={isTablet ? 'overFullScreen' : 'pageSheet'}
+      transparent={isTablet}
       onRequestClose={handleClose}
     >
-      <View style={styles.container}>
-        <View style={styles.topBar}>
-          <View>
-            <Text style={styles.heading}>Session Library</Text>
-            <Text style={styles.subheading}>{recordings.length} Saved Takes</Text>
-          </View>
-          <TouchableOpacity style={styles.closeBtn} onPress={handleClose}>
-            <Text style={styles.closeText}>DONE</Text>
-          </TouchableOpacity>
+      {isTablet ? (
+        <View style={styles.backdrop}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={handleClose} />
+          {cardContent}
         </View>
-
-        {recordings.length === 0 ? (
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyTitle}>No Recorded Takes</Text>
-            <Text style={styles.emptyText}>
-              Recordings saved from the main console will automatically appear here.
-            </Text>
-          </View>
-        ) : (
-          <FlatList
-            data={recordings}
-            keyExtractor={(item) => item.id}
-            renderItem={renderItem}
-            contentContainerStyle={styles.listContent}
-          />
-        )}
-      </View>
+      ) : (
+        <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+          {cardContent}
+        </SafeAreaView>
+      )}
     </Modal>
   );
 };
@@ -392,17 +409,38 @@ export const RecordingLibraryModal: React.FC<RecordingLibraryModalProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: '#000000',
+  },
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  dialogCard: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#0F0F0F',
+  },
+  dialogCardTablet: {
+    flex: 0,
+    maxWidth: 680,
+    maxHeight: '86%',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#242424',
+    overflow: 'hidden',
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 24,
+    paddingTop: 18,
     paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#262626',
+    borderBottomColor: '#1E1E1E',
   },
   heading: {
     color: '#FFFFFF',
@@ -410,34 +448,34 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   subheading: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 12,
     marginTop: 2,
   },
   closeBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: '#262626',
-    borderRadius: 16,
-  },
-  closeText: {
-    color: '#00E676',
-    fontWeight: '700',
-    fontSize: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#1C1C1E',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#2C2C2E',
   },
   listContent: {
     padding: 16,
     gap: 12,
   },
   card: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 14,
+    backgroundColor: '#141414',
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: '#2A2A2A',
+    borderColor: '#242424',
     padding: 16,
   },
   cardActive: {
-    borderColor: '#00E676',
+    borderColor: '#FFFFFF',
+    backgroundColor: '#181818',
   },
   cardHeader: {
     flexDirection: 'row',
@@ -453,8 +491,9 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   cardTimestamp: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 11,
+    fontVariant: ['tabular-nums'],
   },
   metaRow: {
     flexDirection: 'row',
@@ -463,35 +502,43 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   metaBadge: {
-    backgroundColor: '#2C3440',
-    color: '#64B5F6',
+    backgroundColor: '#242424',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  metaBadgeText: {
+    color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '700',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    letterSpacing: 0.5,
   },
   metaText: {
-    color: '#9E9E9E',
+    color: '#8E8E93',
     fontSize: 12,
+    fontVariant: ['tabular-nums'],
+  },
+  metaDivider: {
+    color: '#3A3A3C',
+    fontSize: 10,
   },
   progressSection: {
     marginBottom: 14,
   },
   scrubTouchArea: {
-    height: 32,
+    height: 30,
     justifyContent: 'center',
     position: 'relative',
   },
   progressTrack: {
-    height: 5,
-    backgroundColor: '#333333',
-    borderRadius: 2.5,
+    height: 4,
+    backgroundColor: '#2C2C2E',
+    borderRadius: 2,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#00E676',
+    backgroundColor: '#FFFFFF',
   },
   scrubThumb: {
     position: 'absolute',
@@ -500,7 +547,6 @@ const styles = StyleSheet.create({
     borderRadius: 7,
     backgroundColor: '#FFFFFF',
     marginLeft: -7,
-    elevation: 4,
   },
   timeRow: {
     flexDirection: 'row',
@@ -508,7 +554,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   timeText: {
-    color: '#9E9E9E',
+    color: '#8E8E93',
     fontSize: 11,
     fontVariant: ['tabular-nums'],
   },
@@ -518,77 +564,61 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   playCircleBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: '#00E676',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
   },
   playCircleBtnActive: {
-    backgroundColor: '#00E676',
-  },
-  playTriangle: {
-    width: 0,
-    height: 0,
-    backgroundColor: 'transparent',
-    borderStyle: 'solid',
-    borderLeftWidth: 14,
-    borderRightWidth: 0,
-    borderBottomWidth: 8,
-    borderTopWidth: 8,
-    borderLeftColor: '#121212',
-    borderRightColor: 'transparent',
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    marginLeft: 3,
-  },
-  pauseBarsContainer: {
-    flexDirection: 'row',
-    gap: 4.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pauseBar: {
-    width: 3.5,
-    height: 15,
-    backgroundColor: '#121212',
-    borderRadius: 1.5,
+    backgroundColor: '#FFFFFF',
   },
   btnAction: {
-    backgroundColor: '#2A2A2A',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#1F1F1F',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2A2A2A',
   },
   btnActionText: {
-    color: '#B0BEC5',
+    color: '#D1D1D6',
     fontWeight: '600',
-    fontSize: 12,
+    fontSize: 11,
+    letterSpacing: 0.5,
   },
   btnDelete: {
     marginLeft: 'auto',
-    backgroundColor: '#2A1818',
+    backgroundColor: '#181818',
+    borderColor: '#262626',
   },
   deleteText: {
-    color: '#FF5252',
+    color: '#8E8E93',
+    fontWeight: '600',
+    fontSize: 11,
+    letterSpacing: 0.5,
   },
   emptyContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 32,
+    minHeight: 220,
   },
   emptyTitle: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '600',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   emptyText: {
-    color: '#757575',
-    fontSize: 14,
+    color: '#8E8E93',
+    fontSize: 13,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 18,
   },
 });

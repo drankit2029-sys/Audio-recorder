@@ -26,11 +26,10 @@ const MAX_DB = 0;
 
 export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording }) => {
   const [layoutWidth, setLayoutWidth] = useState(260);
-  const barHeight = 16;
+  const barHeight = 14;
 
-  // Reanimated Shared Values
-  const meterLevel = useSharedValue(0); // 0.0 to 1.0
-  const peakLevel = useSharedValue(0);  // 0.0 to 1.0
+  const meterLevel = useSharedValue(0);
+  const peakLevel = useSharedValue(0);
 
   useEffect(() => {
     if (!isRecording) {
@@ -39,11 +38,9 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
       return;
     }
 
-    // Normalize dB to range [0, 1]
     const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, meteringDb));
     const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
 
-    // Ballistics: Instant attack, smooth exponential decay
     if (targetNorm > meterLevel.value) {
       meterLevel.value = targetNorm;
     } else {
@@ -53,7 +50,6 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
       });
     }
 
-    // Peak-hold ballistics
     if (targetNorm >= peakLevel.value) {
       peakLevel.value = targetNorm;
     } else {
@@ -69,7 +65,6 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
     if (w > 0) setLayoutWidth(w);
   };
 
-  // Shared scalar values consumed directly by Skia components
   const activeWidth = useDerivedValue(() => {
     return Math.max(0, meterLevel.value * layoutWidth);
   });
@@ -93,53 +88,49 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
       {/* Skia Metering Canvas */}
       <View style={[styles.canvasContainer, { height: barHeight }]} onLayout={onLayout}>
         <Canvas style={{ width: layoutWidth, height: barHeight }}>
-          {/* Background trough */}
           <RoundedRect
             x={0}
             y={0}
             width={layoutWidth}
             height={barHeight}
-            r={4}
-            color="#262626"
+            r={3}
+            color="#1C1C1E"
           />
 
-          {/* Active audio level bar */}
           <RoundedRect
             x={0}
             y={0}
             width={activeWidth}
             height={barHeight}
-            r={4}
+            r={3}
           >
             <LinearGradient
               start={vec(0, 0)}
               end={vec(layoutWidth, 0)}
-              colors={['#00E676', '#76FF03', '#FFD600', '#FF1744']}
-              positions={[0, 0.65, 0.85, 1.0]}
+              colors={['#30D158', '#FFD60A', '#FF453A']}
+              positions={[0, 0.75, 1.0]}
             />
           </RoundedRect>
 
-          {/* Calibration ticks */}
           <Line
             p1={vec(layoutWidth * 0.60, 0)}
             p2={vec(layoutWidth * 0.60, barHeight)}
-            color="#121212"
+            color="#000000"
             strokeWidth={1}
           />
           <Line
             p1={vec(layoutWidth * 0.80, 0)}
             p2={vec(layoutWidth * 0.80, barHeight)}
-            color="#121212"
+            color="#000000"
             strokeWidth={1}
           />
           <Line
             p1={vec(layoutWidth * 0.90, 0)}
             p2={vec(layoutWidth * 0.90, barHeight)}
-            color="#121212"
+            color="#000000"
             strokeWidth={1}
           />
 
-          {/* Floating Peak Hold Line (rendered via scalar Rect) */}
           <Rect
             x={peakX}
             y={0}
@@ -150,7 +141,7 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
         </Canvas>
       </View>
 
-      {/* Live Readout */}
+      {/* Live Readout in System Default Font */}
       <View style={styles.readoutRow}>
         <Text style={styles.readoutValue}>
           {isRecording ? `${meteringDb.toFixed(1)} dBFS` : 'OFFLINE'}
@@ -166,8 +157,8 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording 
 const styles = StyleSheet.create({
   wrapper: {
     width: '100%',
-    paddingHorizontal: 16,
-    marginVertical: 12,
+    paddingHorizontal: 8,
+    marginVertical: 10,
   },
   labelRow: {
     flexDirection: 'row',
@@ -175,19 +166,19 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   dbText: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 10,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },
   clipText: {
-    color: '#FF5252',
+    color: '#FF453A',
   },
   canvasContainer: {
     width: '100%',
-    borderRadius: 4,
+    borderRadius: 3,
     overflow: 'hidden',
-    backgroundColor: '#262626',
+    backgroundColor: '#1C1C1E',
   },
   readoutRow: {
     flexDirection: 'row',
@@ -196,17 +187,18 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   readoutValue: {
-    color: '#B0BEC5',
+    color: '#A1A1A1',
     fontSize: 12,
-    fontFamily: 'monospace',
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
   },
   clipIndicator: {
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 1,
-    color: '#424242',
+    color: '#3A3A3C',
   },
   clipActive: {
-    color: '#FF1744',
+    color: '#FF453A',
   },
 });

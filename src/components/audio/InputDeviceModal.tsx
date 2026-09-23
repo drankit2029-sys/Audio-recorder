@@ -9,8 +9,18 @@ import {
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  X,
+  Mic,
+  Bluetooth,
+  Usb,
+  Headphones,
+  Check,
+} from 'lucide-react-native';
+
 import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
 import { EngineState } from '../../services/audio/useAudioRecording';
+import { useResponsive } from '../../hooks/useResponsive';
 
 interface InputDeviceModalProps {
   visible: boolean;
@@ -29,101 +39,115 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
   onSelectDevice,
   engineState,
 }) => {
+  const { isTablet } = useResponsive();
   const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
 
-  const getTypeLabel = (type: AudioInputDevice['type']) => {
+  const getTypeMeta = (type: AudioInputDevice['type']) => {
     switch (type) {
       case 'usb_device':
       case 'usb_headset':
       case 'usb_accessory':
-        return { label: 'USB INTERFACE', bg: '#1A3326', text: '#00E676' };
+        return { label: 'USB INTERFACE', Icon: Usb };
       case 'bluetooth_sco':
       case 'bluetooth_a2dp':
-        return { label: 'BLUETOOTH', bg: '#1C2938', text: '#64B5F6' };
+        return { label: 'BLUETOOTH', Icon: Bluetooth };
       case 'wired_headset':
-        return { label: 'ANALOG HEADSET', bg: '#33261A', text: '#FFB74D' };
+        return { label: 'HEADSET MIC', Icon: Headphones };
       default:
-        return { label: 'INTERNAL MIC', bg: '#262626', text: '#B0BEC5' };
+        return { label: 'INTERNAL MIC', Icon: Mic };
     }
   };
+
+  const cardContent = (
+    <View style={[styles.dialogCard, isTablet && styles.dialogCardTablet]}>
+      <View style={styles.topBar}>
+        <View>
+          <Text style={styles.heading}>Input Hardware</Text>
+          <Text style={styles.subheading}>{devices.length} Detected Capsules</Text>
+        </View>
+        <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.7}>
+          <X size={16} color="#FFFFFF" />
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {isLocked && (
+          <View style={styles.lockNotice}>
+            <Text style={styles.lockNoticeTitle}>ROUTING LOCKED</Text>
+            <Text style={styles.lockNoticeText}>
+              Capsule selection is locked during active recording.
+            </Text>
+          </View>
+        )}
+
+        <Text style={styles.sectionTitle}>AUDIO INPUT CAPSULES</Text>
+
+        {devices.map((device) => {
+          const isSelected = selectedDeviceId === device.id;
+          const { label, Icon } = getTypeMeta(device.type);
+
+          return (
+            <TouchableOpacity
+              key={device.id}
+              disabled={isLocked}
+              style={[
+                styles.deviceCard,
+                isSelected && styles.deviceCardActive,
+                isLocked && styles.deviceCardDisabled,
+              ]}
+              onPress={() => onSelectDevice(device.id)}
+              activeOpacity={0.7}
+            >
+              <View style={styles.deviceHeader}>
+                <View style={styles.titleCol}>
+                  <Text style={styles.deviceName}>{device.name}</Text>
+                  <View style={styles.badgeRow}>
+                    <View style={styles.typeBadge}>
+                      <Icon size={11} color="#FFFFFF" />
+                      <Text style={styles.typeBadgeText}>{label}</Text>
+                    </View>
+                    <Text style={styles.idBadge}>PORT #{device.id}</Text>
+                  </View>
+                </View>
+
+                <View style={[styles.radioOuter, isSelected && styles.radioOuterSelected]}>
+                  {isSelected && <Check size={12} color="#000000" strokeWidth={3} />}
+                </View>
+              </View>
+
+              <View style={styles.specsRow}>
+                <Text style={styles.specItem}>
+                  Rates:{' '}
+                  {device.sampleRates.length > 0
+                    ? device.sampleRates.map((r) => `${r / 1000}k`).join(', ')
+                    : 'System Native'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
 
   return (
     <Modal
       visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
+      animationType={isTablet ? 'fade' : 'slide'}
+      presentationStyle={isTablet ? 'overFullScreen' : 'pageSheet'}
+      transparent={isTablet}
       onRequestClose={onClose}
     >
-      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-        <View style={styles.topBar}>
-          <View>
-            <Text style={styles.heading}>Hardware Routing</Text>
-            <Text style={styles.subheading}>{devices.length} Audio Inputs Detected</Text>
-          </View>
-          <TouchableOpacity style={styles.closeBtn} onPress={onClose}>
-            <Text style={styles.closeText}>DONE</Text>
-          </TouchableOpacity>
+      {isTablet ? (
+        <View style={styles.backdrop}>
+          <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={onClose} />
+          {cardContent}
         </View>
-
-        <ScrollView contentContainerStyle={styles.content}>
-          {isLocked && (
-            <View style={styles.lockNotice}>
-              <Text style={styles.lockNoticeTitle}>Hardware Routing Locked</Text>
-              <Text style={styles.lockNoticeText}>
-                Microphone capsule routing cannot be changed while recording is active.
-              </Text>
-            </View>
-          )}
-
-          <Text style={styles.sectionTitle}>DETECTED INPUT CAPSULES</Text>
-
-          {devices.map((device) => {
-            const isSelected = selectedDeviceId === device.id;
-            const typeInfo = getTypeLabel(device.type);
-
-            return (
-              <TouchableOpacity
-                key={device.id}
-                disabled={isLocked}
-                style={[
-                  styles.deviceCard,
-                  isSelected && styles.deviceCardActive,
-                  isLocked && styles.deviceCardDisabled,
-                ]}
-                onPress={() => onSelectDevice(device.id)}
-                activeOpacity={0.7}
-              >
-                <View style={styles.deviceHeader}>
-                  <View style={styles.titleCol}>
-                    <Text style={styles.deviceName}>{device.name}</Text>
-                    <View style={styles.badgeRow}>
-                      <View style={[styles.badge, { backgroundColor: typeInfo.bg }]}>
-                        <Text style={[styles.badgeText, { color: typeInfo.text }]}>
-                          {typeInfo.label}
-                        </Text>
-                      </View>
-                      <Text style={styles.idBadge}>ID #{device.id}</Text>
-                    </View>
-                  </View>
-
-                  <View style={[styles.radioOuter, isSelected && styles.radioOuterSelected]}>
-                    {isSelected && <View style={styles.radioInner} />}
-                  </View>
-                </View>
-
-                <View style={styles.specsRow}>
-                  <Text style={styles.specItem}>
-                    Supported Rates:{' '}
-                    {device.sampleRates.length > 0
-                      ? device.sampleRates.map((r) => `${r / 1000}k`).join(', ')
-                      : 'Hardware Dynamic'}
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      </SafeAreaView>
+      ) : (
+        <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+          {cardContent}
+        </SafeAreaView>
+      )}
     </Modal>
   );
 };
@@ -131,17 +155,38 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#121212',
+    backgroundColor: '#000000',
+  },
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  dialogCard: {
+    flex: 1,
+    width: '100%',
+    backgroundColor: '#0F0F0F',
+  },
+  dialogCardTablet: {
+    flex: 0,
+    maxWidth: 580,
+    maxHeight: '82%',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#242424',
+    overflow: 'hidden',
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: 16,
+    paddingTop: 18,
     paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#262626',
+    borderBottomColor: '#1E1E1E',
   },
   heading: {
     color: '#FFFFFF',
@@ -149,46 +194,46 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   subheading: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 12,
     marginTop: 2,
   },
   closeBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: '#262626',
-    borderRadius: 16,
-  },
-  closeText: {
-    color: '#00E676',
-    fontWeight: '700',
-    fontSize: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#1C1C1E',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#2C2C2E',
   },
   content: {
     padding: 16,
     gap: 12,
   },
   lockNotice: {
-    backgroundColor: '#261C0D',
+    backgroundColor: '#161616',
     borderWidth: 1,
-    borderColor: '#FFD600',
-    borderRadius: 10,
+    borderColor: '#2C2C2C',
+    borderRadius: 12,
     padding: 12,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   lockNoticeTitle: {
-    color: '#FFD600',
+    color: '#FFFFFF',
     fontWeight: '700',
-    fontSize: 12,
+    fontSize: 11,
+    letterSpacing: 0.5,
     marginBottom: 2,
   },
   lockNoticeText: {
-    color: '#E0E0E0',
-    fontSize: 11,
+    color: '#8E8E93',
+    fontSize: 12,
     lineHeight: 16,
   },
   sectionTitle: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 11,
     fontWeight: '700',
     letterSpacing: 1,
@@ -196,18 +241,18 @@ const styles = StyleSheet.create({
     marginLeft: 4,
   },
   deviceCard: {
-    backgroundColor: '#1E1E1E',
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: '#2A2A2A',
+    backgroundColor: '#141414',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#242424',
     padding: 16,
   },
   deviceCardActive: {
-    borderColor: '#00E676',
-    backgroundColor: '#1C2620',
+    borderColor: '#FFFFFF',
+    backgroundColor: '#181818',
   },
   deviceCardDisabled: {
-    opacity: 0.6,
+    opacity: 0.5,
   },
   deviceHeader: {
     flexDirection: 'row',
@@ -227,54 +272,53 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 4,
+    marginTop: 6,
   },
-  badge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+  typeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: '#242424',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
   },
-  badgeText: {
+  typeBadgeText: {
+    color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '700',
+    letterSpacing: 0.5,
   },
   idBadge: {
-    backgroundColor: '#262626',
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 10,
     fontWeight: '600',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    fontVariant: ['tabular-nums'],
   },
   radioOuter: {
     width: 20,
     height: 20,
     borderRadius: 10,
-    borderWidth: 2,
-    borderColor: '#555555',
+    borderWidth: 1.5,
+    borderColor: '#48484A',
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 12,
     marginTop: 2,
   },
   radioOuterSelected: {
-    borderColor: '#00E676',
-  },
-  radioInner: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#00E676',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
   },
   specsRow: {
     borderTopWidth: 1,
-    borderTopColor: '#262626',
+    borderTopColor: '#202020',
     paddingTop: 8,
     marginTop: 4,
   },
   specItem: {
-    color: '#757575',
+    color: '#8E8E93',
     fontSize: 11,
+    fontVariant: ['tabular-nums'],
   },
 });
