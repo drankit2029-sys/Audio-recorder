@@ -19,6 +19,9 @@ export function useAudioRecording() {
 
   const recorder = useAudioRecorder(activePreset.options);
 
+  // Synchronous operation mutex to block concurrent native invocations
+  const isBusyRef = useRef(false);
+
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const meterPollingRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -92,13 +95,22 @@ export function useAudioRecording() {
   }, [engineState, pollMetering]);
 
   const startRecording = useCallback(async () => {
+    // Drop re-entrant invocations immediately
+    if (isBusyRef.current) return;
+    isBusyRef.current = true;
+
     try {
+      // Self-heal: If recorder was left in a prepared or recording state, release it first
+      try {
+        await recorder.stop();
+      } catch {}
+
       const currentConfig = activePresetRef.current;
       const sessionId = `session_${Date.now()}`;
       setDurationMs(0);
       accumulatedMsRef.current = 0;
 
-      // Prepare native audio engine with the active preset options
+      // Prepare native audio engine with active preset
       await recorder.prepareToRecordAsync(currentConfig.options);
       fileUriRef.current = recorder.uri;
 
@@ -116,10 +128,15 @@ export function useAudioRecording() {
     } catch (error) {
       setEngineState('ERROR');
       throw error;
+    } finally {
+      isBusyRef.current = false;
     }
   }, [recorder]);
 
   const pauseRecording = useCallback(async () => {
+    if (isBusyRef.current || engineState !== 'RECORDING') return;
+    isBusyRef.current = true;
+
     try {
       await recorder.pause();
       SessionJournal.setStatus('PAUSED');
@@ -127,10 +144,15 @@ export function useAudioRecording() {
     } catch (error) {
       setEngineState('ERROR');
       throw error;
+    } finally {
+      isBusyRef.current = false;
     }
-  }, [recorder]);
+  }, [recorder, engineState]);
 
   const resumeRecording = useCallback(async () => {
+    if (isBusyRef.current || engineState !== 'PAUSED') return;
+    isBusyRef.current = true;
+
     try {
       await recorder.record();
       SessionJournal.setStatus('RECORDING');
@@ -138,10 +160,15 @@ export function useAudioRecording() {
     } catch (error) {
       setEngineState('ERROR');
       throw error;
+    } finally {
+      isBusyRef.current = false;
     }
-  }, [recorder]);
+  }, [recorder, engineState]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
+    if (isBusyRef.current) return null;
+    isBusyRef.current = true;
+
     try {
       await recorder.stop();
       const finalUri = recorder.uri || fileUriRef.current;
@@ -154,7 +181,22 @@ export function useAudioRecording() {
     } catch (error) {
       setEngineState('ERROR');
       throw error;
+    } finally {
+      isBusyRef.current = false;
     }
+  }, [recorder]);
+
+  // Clean error recovery resetting the native session to clean state
+  const resetEngine = useCallback(async () => {
+    try {
+      await recorder.stop();
+    } catch {}
+    SessionJournal.clearSession();
+    setEngineState('IDLE');
+    setDurationMs(0);
+    setMeteringDb(-60);
+    accumulatedMsRef.current = 0;
+    isBusyRef.current = false;
   }, [recorder]);
 
   return {
@@ -168,5 +210,6 @@ export function useAudioRecording() {
     pauseRecording,
     resumeRecording,
     stopRecording,
+    resetEngine,
   };
 }

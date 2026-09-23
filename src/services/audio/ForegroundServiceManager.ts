@@ -2,140 +2,196 @@
 import notifee, {
   AndroidImportance,
   AndroidColor,
-  AndroidForegroundServiceType,
   EventType,
-  NotificationAndroidAction,
+  Event,
+  AndroidForegroundServiceType,
 } from '@notifee/react-native';
 
-const CHANNEL_ID = 'audio_recording_service';
-const NOTIFICATION_ID = 'active_recording_notification';
+type ActionHandler = () => Promise<void> | void;
 
-type ActionCallback = () => void | Promise<void>;
-
-let onPauseCallback: ActionCallback | null = null;
-let onResumeCallback: ActionCallback | null = null;
-let onStopCallback: ActionCallback | null = null;
-
-async function handleActionPress(actionId?: string) {
-  if (!actionId) return;
-
-  if (actionId === 'action_pause') {
-    if (onPauseCallback) await onPauseCallback();
-  } else if (actionId === 'action_start' || actionId === 'action_resume') {
-    if (onResumeCallback) await onResumeCallback();
-  } else if (actionId === 'action_stop') {
-    if (onStopCallback) await onStopCallback();
-  }
+interface ServiceHandlers {
+  onPause?: ActionHandler;
+  onResume?: ActionHandler;
+  onStop?: ActionHandler;
 }
 
-// 1. Keep background task worker alive while recording
-notifee.registerForegroundService(() => {
-  return new Promise(() => {
-    // Keeps service running until stopService() is invoked
-  });
-});
+class ForegroundServiceManagerImpl {
+  private channelId = 'recording_service_channel';
+  private isInitialized = false;
+  private isRunning = false;
+  private isStarting = false;
+  private lastStartTime = 0;
+  private handlers: ServiceHandlers = {};
 
-// 2. Handle notification interactions when app is minimized or screen is locked
-notifee.onBackgroundEvent(async ({ type, detail }) => {
-  if (type === EventType.ACTION_PRESS) {
-    await handleActionPress(detail.pressAction?.id);
+  constructor() {
+    // Keep the task runner open for the lifetime of the recording
+    notifee.registerForegroundService(() => {
+      return new Promise(() => {});
+    });
+
+    notifee.onBackgroundEvent(async ({ type, detail }: Event) => {
+      await this.handleNotificationAction(type, detail);
+    });
+
+    notifee.onForegroundEvent(async ({ type, detail }: Event) => {
+      await this.handleNotificationAction(type, detail);
+    });
   }
-});
 
-// 3. Handle notification interactions when app is visible
-notifee.onForegroundEvent(async ({ type, detail }) => {
-  if (type === EventType.ACTION_PRESS) {
-    await handleActionPress(detail.pressAction?.id);
+  private async handleNotificationAction(type: EventType, detail: any) {
+    if (type === EventType.ACTION_PRESS && detail.pressAction) {
+      const actionId = detail.pressAction.id;
+      if (actionId === 'pause' && this.handlers.onPause) {
+        await this.handlers.onPause();
+      } else if (actionId === 'resume' && this.handlers.onResume) {
+        await this.handlers.onResume();
+      } else if (actionId === 'stop' && this.handlers.onStop) {
+        await this.handlers.onStop();
+      }
+    }
   }
-});
 
-function createNotificationPayload(durationStr: string, presetLabel: string, isPaused: boolean) {
-  const actions: NotificationAndroidAction[] = [
-    {
-      title: isPaused ? 'Start' : 'Pause',
-      pressAction: {
-        id: isPaused ? 'action_start' : 'action_pause',
-      },
-    },
-    {
-      title: 'Stop',
-      pressAction: {
-        id: 'action_stop',
-      },
-    },
-  ];
-
-  return {
-    id: NOTIFICATION_ID,
-    title: isPaused ? 'Recording Paused' : 'Recording in Progress...',
-    body: `${durationStr} • ${presetLabel}`,
-    android: {
-      channelId: CHANNEL_ID,
-      asForegroundService: true,
-      ongoing: true,
-      color: isPaused ? AndroidColor.YELLOW : AndroidColor.RED,
-      foregroundServiceTypes: [
-        AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-      ],
-      pressAction: {
-        id: 'default',
-      },
-      actions,
-    },
-  };
-}
-
-export const ForegroundServiceManager = {
-  registerHandlers(handlers: {
-    onPause: ActionCallback;
-    onResume: ActionCallback;
-    onStop: ActionCallback;
-  }) {
-    onPauseCallback = handlers.onPause;
-    onResumeCallback = handlers.onResume;
-    onStopCallback = handlers.onStop;
-  },
-
-  async initialize(): Promise<void> {
+  public async initialize(): Promise<void> {
+    if (this.isInitialized) return;
     try {
-      await notifee.requestPermission();
-
       await notifee.createChannel({
-        id: CHANNEL_ID,
+        id: this.channelId,
         name: 'Audio Recording Service',
         lights: false,
         vibration: false,
         importance: AndroidImportance.LOW,
       });
-    } catch (error) {
-      console.warn('[ForegroundServiceManager] Failed to init notification channel:', error);
+      this.isInitialized = true;
+    } catch (e) {
+      console.warn('[ForegroundServiceManager] Channel creation error:', e);
     }
-  },
+  }
 
-  async startService(presetLabel: string): Promise<void> {
+  public registerHandlers(handlers: ServiceHandlers) {
+    this.handlers = { ...this.handlers, ...handlers };
+  }
+
+  public async startService(presetBadge: string): Promise<void> {
+    if (this.isRunning || this.isStarting) return;
+    this.isStarting = true;
+
     try {
-      await notifee.displayNotification(
-        createNotificationPayload('00:00', presetLabel, false)
-      );
+      await this.initialize();
+
+      // Explicitly pass FOREGROUND_SERVICE_TYPE_MICROPHONE (128 / 0x80)
+      // to match android:foregroundServiceType="microphone" in the manifest
+      await notifee.displayNotification({
+        id: 'recording_ongoing',
+        title: 'Recording Active',
+        body: `00:00 • ${presetBadge}`,
+        android: {
+          channelId: this.channelId,
+          asForegroundService: true,
+          foregroundServiceTypes: [
+            AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+          ],
+          color: AndroidColor.RED,
+          ongoing: true,
+          pressAction: {
+            id: 'default',
+          },
+          actions: [
+            {
+              title: 'Pause',
+              pressAction: { id: 'pause' },
+            },
+            {
+              title: 'Stop',
+              pressAction: { id: 'stop' },
+            },
+          ],
+        },
+      });
+
+      this.isRunning = true;
+      this.lastStartTime = Date.now();
     } catch (error) {
-      console.warn('[ForegroundServiceManager] Failed to start foreground service:', error);
+      console.error('[ForegroundServiceManager] startService failed:', error);
+      this.isRunning = false;
+      throw error;
+    } finally {
+      this.isStarting = false;
     }
-  },
+  }
 
-  async updateProgress(durationStr: string, presetLabel: string, isPaused: boolean = false): Promise<void> {
-    try {
-      await notifee.displayNotification(
-        createNotificationPayload(durationStr, presetLabel, isPaused)
-      );
-    } catch {}
-  },
+  public async updateProgress(timerText: string, presetBadge: string, isPaused: boolean): Promise<void> {
+    if (!this.isRunning || this.isStarting) return;
 
-  async stopService(): Promise<void> {
     try {
+      await notifee.displayNotification({
+        id: 'recording_ongoing',
+        title: isPaused ? 'Recording Paused' : 'Recording Active',
+        body: `${timerText} • ${presetBadge}`,
+        android: {
+          channelId: this.channelId,
+          asForegroundService: true,
+          foregroundServiceTypes: [
+            AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+          ],
+          color: isPaused ? AndroidColor.ORANGE : AndroidColor.RED,
+          ongoing: true,
+          pressAction: {
+            id: 'default',
+          },
+          actions: isPaused
+            ? [
+                {
+                  title: 'Resume',
+                  pressAction: { id: 'resume' },
+                },
+                {
+                  title: 'Stop',
+                  pressAction: { id: 'stop' },
+                },
+              ]
+            : [
+                {
+                  title: 'Pause',
+                  pressAction: { id: 'pause' },
+                },
+                {
+                  title: 'Stop',
+                  pressAction: { id: 'stop' },
+                },
+              ],
+        },
+      });
+    } catch (e) {
+      // Ignore background UI update drops
+    }
+  }
+
+  public async stopService(): Promise<void> {
+    // 1. Wait if startService is currently in flight
+    if (this.isStarting) {
+      let attempts = 0;
+      while (this.isStarting && attempts < 20) {
+        await new Promise((res) => setTimeout(res, 50));
+        attempts++;
+      }
+    }
+
+    // 2. Ensure Android had at least 250ms to call Service.startForeground()
+    const elapsedSinceStart = Date.now() - this.lastStartTime;
+    if (elapsedSinceStart < 250) {
+      await new Promise((res) => setTimeout(res, 250 - elapsedSinceStart));
+    }
+
+    if (!this.isRunning) return;
+
+    try {
+      this.isRunning = false;
       await notifee.stopForegroundService();
-      await notifee.cancelNotification(NOTIFICATION_ID);
+      await notifee.cancelNotification('recording_ongoing');
     } catch (error) {
-      console.warn('[ForegroundServiceManager] Failed to stop foreground service:', error);
+      console.warn('[ForegroundServiceManager] stopService error:', error);
     }
-  },
-};
+  }
+}
+
+export const ForegroundServiceManager = new ForegroundServiceManagerImpl();
