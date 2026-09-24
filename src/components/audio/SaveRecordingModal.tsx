@@ -1,5 +1,5 @@
 // src/components/audio/SaveRecordingModal.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Modal,
   View,
@@ -9,9 +9,10 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  TouchableWithoutFeedback,
+  Keyboard,
 } from 'react-native';
-import { FileAudio, Check, X, Trash2 } from 'lucide-react-native';
-import { useResponsive } from '../../hooks/useResponsive';
+import { Trash2, Check, Music2 } from 'lucide-react-native';
 
 interface SaveRecordingModalProps {
   visible: boolean;
@@ -19,7 +20,7 @@ interface SaveRecordingModalProps {
   durationMs: number;
   sizeBytes: number;
   formatBadge: string;
-  onSubmit: (finalName: string) => void;
+  onSubmit: (chosenName: string) => void;
   onDiscard: () => void;
 }
 
@@ -32,31 +33,43 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   onSubmit,
   onDiscard,
 }) => {
-  const { isTablet } = useResponsive();
   const [name, setName] = useState(defaultName);
+  const inputRef = useRef<TextInput | null>(null);
 
   useEffect(() => {
     if (visible) {
       setName(defaultName);
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 120);
     }
   }, [visible, defaultName]);
 
-  const formatSecs = (ms: number): string => {
-    const totalSecs = Math.floor(ms / 1000);
-    const mins = Math.floor(totalSecs / 60);
-    const secs = totalSecs % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const formatDuration = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    const centis = Math.floor((ms % 1000) / 10);
+    return `${mins.toString().padStart(2, '0')}:${secs
+      .toString()
+      .padStart(2, '0')}.${centis.toString().padStart(2, '0')}`;
   };
 
-  const formatFileSize = (bytes: number): string => {
-    if (bytes <= 0) return '0 KB';
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
-  const handleSubmit = () => {
-    const trimmed = name.trim();
-    onSubmit(trimmed.length > 0 ? trimmed : defaultName);
+  const handleSave = () => {
+    Keyboard.dismiss();
+    onSubmit(name.trim().length > 0 ? name.trim() : defaultName);
+  };
+
+  const handleDiscard = () => {
+    Keyboard.dismiss();
+    onDiscard();
   };
 
   return (
@@ -64,74 +77,69 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onDiscard}
+      statusBarTranslucent
+      onRequestClose={handleDiscard}
     >
-      <View style={styles.backdrop}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.avoidingView}
-        >
-          <View style={[styles.card, isTablet && styles.cardTablet]}>
-            {/* Header Icon & Title */}
-            <View style={styles.headerRow}>
-              <View style={styles.iconCircle}>
-                <FileAudio size={20} color="#FFFFFF" />
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.backdrop}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.keyboardAvoid}
+          >
+            <View style={styles.card}>
+              {/* Header Icon & Title */}
+              <View style={styles.headerRow}>
+                <View style={styles.iconCircle}>
+                  <Music2 size={16} color="#FFFFFF" strokeWidth={2} />
+                </View>
+                <View style={styles.headerTextGroup}>
+                  <Text style={styles.title}>Save Take</Text>
+                  <Text style={styles.subtitle}>
+                    {formatDuration(durationMs)} • {formatSize(sizeBytes)} • {formatBadge}
+                  </Text>
+                </View>
               </View>
-              <View style={styles.headerTextCol}>
-                <Text style={styles.title}>Save Recording</Text>
-                <Text style={styles.metaText}>
-                  {formatBadge} • {formatSecs(durationMs)} • {formatFileSize(sizeBytes)}
-                </Text>
-              </View>
-            </View>
 
-            {/* Input Field with Clear Button */}
-            <View style={styles.inputWrapper}>
-              <TextInput
-                style={styles.input}
-                value={name}
-                onChangeText={setName}
-                placeholder="Name your take..."
-                placeholderTextColor="#636366"
-                autoFocus
-                selectTextOnFocus
-                returnKeyType="done"
-                onSubmitEditing={handleSubmit}
-              />
-              {name.length > 0 && (
+              {/* Name Input Field */}
+              <View style={styles.inputWrapper}>
+                <Text style={styles.inputLabel}>TAKE NAME</Text>
+                <TextInput
+                  ref={inputRef}
+                  style={styles.input}
+                  value={name}
+                  onChangeText={setName}
+                  placeholder={defaultName}
+                  placeholderTextColor="#52525B"
+                  selectTextOnFocus
+                  returnKeyType="done"
+                  onSubmitEditing={handleSave}
+                />
+              </View>
+
+              {/* Action Buttons Row: Discard on Left, Save on Right */}
+              <View style={styles.actionRow}>
                 <TouchableOpacity
-                  style={styles.clearBtn}
-                  onPress={() => setName('')}
+                  style={styles.discardBtn}
+                  onPress={handleDiscard}
                   activeOpacity={0.7}
                 >
-                  <X size={14} color="#8E8E93" />
+                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                  <Text style={styles.discardBtnText}>Discard</Text>
                 </TouchableOpacity>
-              )}
-            </View>
 
-            {/* Actions: Discard vs Save */}
-            <View style={styles.actionsRow}>
-              <TouchableOpacity
-                style={styles.discardBtn}
-                onPress={onDiscard}
-                activeOpacity={0.7}
-              >
-                <Trash2 size={14} color="#FF453A" />
-                <Text style={styles.discardBtnText}>DISCARD</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.primaryBtn}
-                onPress={handleSubmit}
-                activeOpacity={0.8}
-              >
-                <Check size={16} color="#000000" strokeWidth={2.5} />
-                <Text style={styles.primaryBtnText}>SAVE</Text>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.saveBtn}
+                  onPress={handleSave}
+                  activeOpacity={0.8}
+                >
+                  <Check size={14} color="#000000" strokeWidth={3} />
+                  <Text style={styles.saveBtnText}>Save</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-        </KeyboardAvoidingView>
-      </View>
+          </KeyboardAvoidingView>
+        </View>
+      </TouchableWithoutFeedback>
     </Modal>
   );
 };
@@ -139,128 +147,123 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    paddingHorizontal: 24,
   },
-  avoidingView: {
+  keyboardAvoid: {
     width: '100%',
     alignItems: 'center',
-    justifyContent: 'center',
   },
   card: {
     width: '100%',
-    maxWidth: 420,
-    backgroundColor: '#141416',
-    borderRadius: 24,
+    maxWidth: 380,
+    backgroundColor: '#121215',
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: '#262628',
-    padding: 22,
+    borderColor: '#222228',
+    padding: 20,
     shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 18,
-    elevation: 16,
-  },
-  cardTablet: {
-    maxWidth: 480,
-    padding: 26,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 12,
   },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
+    gap: 12,
     marginBottom: 18,
   },
   iconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#1E1E22',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#1C1C22',
     borderWidth: 1,
-    borderColor: '#2E2E34',
+    borderColor: '#2A2A32',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTextCol: {
+  headerTextGroup: {
     flex: 1,
   },
   title: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
-    letterSpacing: -0.3,
+    letterSpacing: -0.2,
   },
-  metaText: {
+  subtitle: {
     color: '#8E8E93',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '500',
     marginTop: 2,
+    letterSpacing: 0.2,
   },
   inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0C0C0E',
+    backgroundColor: '#09090B',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#26262A',
+    borderColor: '#1C1C22',
     paddingHorizontal: 14,
-    height: 52,
+    paddingTop: 8,
+    paddingBottom: 10,
     marginBottom: 20,
   },
+  inputLabel: {
+    color: '#71717A',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
   input: {
-    flex: 1,
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '500',
     padding: 0,
   },
-  clearBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#1E1E22',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 8,
-  },
-  actionsRow: {
+  /* Action Buttons Spaced to the Left & Right */
+  actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 10,
+    justifyContent: 'space-between',
+    gap: 12,
   },
   discardBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    backgroundColor: '#211212',
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
     borderWidth: 1,
-    borderColor: '#381C1C',
+    borderColor: 'rgba(239, 68, 68, 0.22)',
   },
   discardBtnText: {
-    color: '#FF453A',
+    color: '#EF4444',
     fontSize: 13,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
   },
-  primaryBtn: {
+  saveBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 22,
-    borderRadius: 14,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: '#FFFFFF',
   },
-  primaryBtnText: {
+  saveBtnText: {
     color: '#000000',
     fontSize: 13,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
   },
 });
