@@ -1,5 +1,5 @@
 # PROJECT CODEBASE CONTEXT DUMP
-# Total Files: 40
+# Total Files: 42
 
 ================================================================================
 FILE: .gitignore
@@ -71,6 +71,7 @@ import {
   Platform,
   PermissionsAndroid,
   ScrollView,
+  LayoutAnimation,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -88,12 +89,24 @@ import Animated, {
 import { AudioModule } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { Sliders, Mic, ChevronLeft, Check } from 'lucide-react-native';
+import {
+  Sliders,
+  Mic,
+  ChevronLeft,
+  Check,
+  Radio,
+  AlignLeft,
+  Usb,
+  Bluetooth,
+  Headphones,
+} from 'lucide-react-native';
 
 import { SessionJournal } from './src/services/storage/sessionJournal';
 import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
-import { useAudioRecording, EngineState } from './src/services/audio/useAudioRecording';
+import { useAudioRecording } from './src/services/audio/useAudioRecording';
+import { StudioTimer } from './src/components/studio/StudioTimer';
 import { AudioMeter } from './src/components/meter/AudioMeter';
+import { LiveWaveform } from './src/components/studio/LiveWaveform';
 import { TeleprompterDeck } from './src/components/prompter/TeleprompterDeck';
 import { AudioSettingsModal } from './src/components/settings/AudioSettingsModal';
 import { SaveRecordingModal } from './src/components/audio/SaveRecordingModal';
@@ -120,23 +133,23 @@ interface ToastData {
 }
 
 function AudioRecorderApp() {
-  const [isReady, setIsReady] = useState(false);
+  const [, setIsReady] = useState(false);
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('library');
+  const [showPrompter, setShowPrompter] = useState(false);
+
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [deviceModalVisible, setDeviceModalVisible] = useState(false);
   const [recordings, setRecordings] = useState<SavedRecording[]>([]);
   const [isLibraryEditMode, setIsLibraryEditMode] = useState(false);
 
-  // Take Naming & Toast State
   const [pendingTake, setPendingTake] = useState<PendingTake | null>(null);
   const [nameModalVisible, setNameModalVisible] = useState(false);
   const [warningModalVisible, setWarningModalVisible] = useState(false);
   const [toastData, setToastData] = useState<ToastData | null>(null);
 
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isActionLockedRef = useRef(false);
 
-  const { isTablet, isLandscape, maxContentWidth, prompterHeight } = useResponsive();
+  const { isTablet, maxContentWidth, prompterHeight } = useResponsive();
 
   const {
     devices,
@@ -150,8 +163,9 @@ function AudioRecorderApp() {
 
   const {
     engineState,
-    durationMs,
-    meteringDb,
+    engineStateRef,
+    telemetry,
+    getExactDurationMs,
     activePreset,
     setPresetKey,
     startRecording,
@@ -161,8 +175,6 @@ function AudioRecorderApp() {
     resetEngine,
   } = useAudioRecording();
 
-  const isStudio = currentScreen === 'studio';
-  const isRecording = engineState === 'RECORDING';
   const isSessionActive = engineState === 'RECORDING' || engineState === 'PAUSED';
 
   const slideProgress = useSharedValue(0);
@@ -172,7 +184,6 @@ function AudioRecorderApp() {
   const pauseOpacity = useSharedValue(0);
   const pauseScale = useSharedValue(0.7);
 
-  // Animate transport layout based on active take session
   useEffect(() => {
     slideProgress.value = withSpring(isSessionActive ? 1 : 0, {
       damping: 24,
@@ -181,7 +192,6 @@ function AudioRecorderApp() {
     });
 
     const cubicEase = Easing.out(Easing.cubic);
-
     if (engineState === 'RECORDING') {
       redCircleOpacity.value = withTiming(0, { duration: 160, easing: cubicEase });
       redCircleScale.value = withTiming(0.8, { duration: 160, easing: cubicEase });
@@ -195,95 +205,52 @@ function AudioRecorderApp() {
       pauseOpacity.value = withTiming(0, { duration: 140, easing: cubicEase });
       pauseScale.value = withTiming(0.7, { duration: 140, easing: cubicEase });
     } else {
-      // STOPPED / STANDBY: Red punch-in circle with mic glyph
       redCircleOpacity.value = withTiming(1, { duration: 180, easing: cubicEase });
       redCircleScale.value = withTiming(1, { duration: 180, easing: cubicEase });
       micOpacity.value = withTiming(1, { duration: 160, easing: cubicEase });
       pauseOpacity.value = withTiming(0, { duration: 140, easing: cubicEase });
       pauseScale.value = withTiming(0.7, { duration: 140, easing: cubicEase });
     }
-  }, [
-    isSessionActive,
-    engineState,
-    slideProgress,
-    redCircleOpacity,
-    redCircleScale,
-    micOpacity,
-    pauseOpacity,
-    pauseScale,
-  ]);
+  }, [isSessionActive, engineState, slideProgress, redCircleOpacity, redCircleScale, micOpacity, pauseOpacity, pauseScale]);
 
-  const mainBtnAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: -44 * slideProgress.value }],
-  }));
-
+  const mainBtnAnimatedStyle = useAnimatedStyle(() => ({ transform: [{ translateX: -46 * slideProgress.value }] }));
   const stopBtnAnimatedStyle = useAnimatedStyle(() => ({
     opacity: slideProgress.value,
-    transform: [
-      { translateX: 44 * slideProgress.value },
-      { scale: 0.5 + 0.5 * slideProgress.value },
-    ],
+    transform: [{ translateX: 46 * slideProgress.value }, { scale: 0.5 + 0.5 * slideProgress.value }],
   }));
-
-  const redCircleAnimStyle = useAnimatedStyle(() => ({
-    opacity: redCircleOpacity.value,
-    transform: [{ scale: redCircleScale.value }],
-  }));
-
-  const micIconAnimStyle = useAnimatedStyle(() => ({
-    opacity: micOpacity.value,
-  }));
-
-  const pauseBarsAnimStyle = useAnimatedStyle(() => ({
-    opacity: pauseOpacity.value,
-    transform: [{ scale: pauseScale.value }],
-  }));
-
-  const lastNotificationUpdateRef = useRef<number>(0);
-  const durationMsRef = useRef<number>(durationMs);
-  durationMsRef.current = durationMs;
+  const redCircleAnimStyle = useAnimatedStyle(() => ({ opacity: redCircleOpacity.value, transform: [{ scale: redCircleScale.value }] }));
+  const micIconAnimStyle = useAnimatedStyle(() => ({ opacity: micOpacity.value }));
+  const pauseBarsAnimStyle = useAnimatedStyle(() => ({ opacity: pauseOpacity.value, transform: [{ scale: pauseScale.value }] }));
 
   const pauseRecordingRef = useRef(pauseRecording);
   pauseRecordingRef.current = pauseRecording;
-
   const resumeRecordingRef = useRef(resumeRecording);
   resumeRecordingRef.current = resumeRecording;
-
   const activateHardwareRoutingRef = useRef(activateHardwareRouting);
   activateHardwareRoutingRef.current = activateHardwareRouting;
-
   const releaseHardwareRoutingRef = useRef(releaseHardwareRouting);
   releaseHardwareRoutingRef.current = releaseHardwareRouting;
 
-  const formatTimer = (ms: number) => {
-    const totalSeconds = Math.floor(ms / 1000);
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const togglePrompter = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setShowPrompter((prev) => !prev);
   };
 
   const handleStopPress = async () => {
-    if (isActionLockedRef.current) return;
-    isActionLockedRef.current = true;
-
     try {
-      const finalDuration = durationMsRef.current;
+      const finalDuration = getExactDurationMs();
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
 
       const outputUri = await stopRecording();
       releaseHardwareRoutingRef.current();
-
-      // Zero out the timer and reset metering to standby defaults
       await resetEngine();
 
       if (outputUri) {
         let sizeBytes = 0;
         try {
           const info = await FileSystem.getInfoAsync(outputUri);
-          if (info.exists && !info.isDirectory) {
-            sizeBytes = info.size;
-          }
+          if (info.exists && !info.isDirectory) sizeBytes = info.size;
         } catch {}
 
         const now = new Date();
@@ -296,8 +263,6 @@ function AudioRecorderApp() {
           defaultName,
           formatBadge: activePreset.badge,
         });
-
-        // Retain studio context in Standby mode and open name modal
         setNameModalVisible(true);
       }
     } catch (e: any) {
@@ -306,10 +271,6 @@ function AudioRecorderApp() {
       releaseHardwareRoutingRef.current();
       await resetEngine();
       Alert.alert('Stop Error', e.message);
-    } finally {
-      setTimeout(() => {
-        isActionLockedRef.current = false;
-      }, 400);
     }
   };
 
@@ -318,7 +279,6 @@ function AudioRecorderApp() {
 
   const handleFinalizeTake = (chosenName: string) => {
     if (!pendingTake) return;
-
     const finalName = chosenName.trim().length > 0 ? chosenName.trim() : pendingTake.defaultName;
 
     const newRecord: SavedRecording = {
@@ -335,64 +295,32 @@ function AudioRecorderApp() {
     setNameModalVisible(false);
 
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    const formattedSize =
-      pendingTake.sizeBytes < 1024 * 1024
-        ? `${(pendingTake.sizeBytes / 1024).toFixed(1)} KB`
-        : `${(pendingTake.sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
+    const formattedSize = pendingTake.sizeBytes < 1024 * 1024
+      ? `${(pendingTake.sizeBytes / 1024).toFixed(1)} KB`
+      : `${(pendingTake.sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
 
-    setToastData({
-      title: 'Recording saved',
-      subtitle: `${newRecord.name} • ${formattedSize}`,
-    });
-
-    toastTimeoutRef.current = setTimeout(() => {
-      setToastData(null);
-    }, 3000);
-
+    setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
+    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
     setPendingTake(null);
   };
 
   const handleDiscardTake = async () => {
     if (pendingTake?.uri) {
-      try {
-        await FileSystem.deleteAsync(pendingTake.uri, { idempotent: true });
-      } catch (err) {
-        console.warn('[App] Failed to delete discarded take file:', err);
-      }
+      try { await FileSystem.deleteAsync(pendingTake.uri, { idempotent: true }); } catch {}
     }
     setNameModalVisible(false);
     setPendingTake(null);
   };
 
   useEffect(() => {
-    return () => {
-      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    };
+    return () => { if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current); };
   }, []);
 
   useEffect(() => {
     ForegroundServiceManager.registerHandlers({
-      onPause: async () => {
-        try {
-          await pauseRecordingRef.current();
-        } catch (e) {
-          console.warn('[App] Notification onPause failed:', e);
-        }
-      },
-      onResume: async () => {
-        try {
-          await resumeRecordingRef.current();
-        } catch (e) {
-          console.warn('[App] Notification onResume failed:', e);
-        }
-      },
-      onStop: async () => {
-        try {
-          await handleStopPressRef.current();
-        } catch (e) {
-          console.warn('[App] Notification onStop failed:', e);
-        }
-      },
+      onPause: async () => { try { await pauseRecordingRef.current(); } catch {} },
+      onResume: async () => { try { await resumeRecordingRef.current(); } catch {} },
+      onStop: async () => { try { await handleStopPressRef.current(); } catch {} },
     });
   }, []);
 
@@ -400,19 +328,11 @@ function AudioRecorderApp() {
     async function bootstrap() {
       try {
         await ForegroundServiceManager.initialize();
-
         if (Platform.OS === 'android') {
-          const permissionsToRequest: any[] = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
-
-          if (Platform.Version >= 31) {
-            permissionsToRequest.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-          }
-
-          if (Platform.Version >= 33) {
-            permissionsToRequest.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-          }
-
-          await PermissionsAndroid.requestMultiple(permissionsToRequest);
+          const perms = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+          if (Platform.Version >= 31) perms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
+          if (Platform.Version >= 33) perms.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+          await PermissionsAndroid.requestMultiple(perms);
         } else {
           await AudioModule.requestRecordingPermissionsAsync();
         }
@@ -430,8 +350,8 @@ function AudioRecorderApp() {
         const orphaned = SessionJournal.checkOrphanedSession();
         if (orphaned) {
           Alert.alert(
-            'Interrupted Recording Found',
-            `Session ${orphaned.sessionId} did not finalize properly.`,
+            'Interrupted Take Detected',
+            `Session ${orphaned.sessionId} was not finalized.`,
             [
               { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
               { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
@@ -444,52 +364,34 @@ function AudioRecorderApp() {
         setIsReady(true);
       }
     }
-
     bootstrap();
   }, [refreshDevices]);
 
-  useEffect(() => {
-    if (engineState === 'RECORDING') {
-      const now = Date.now();
-      if (now - lastNotificationUpdateRef.current >= 1000) {
-        lastNotificationUpdateRef.current = now;
-        ForegroundServiceManager.updateProgress(formatTimer(durationMs), activePreset.badge, false);
-      }
-    } else if (engineState === 'PAUSED') {
-      ForegroundServiceManager.updateProgress(formatTimer(durationMs), activePreset.badge, true);
+  // Synchronous, non-blocking transport action dispatcher
+  const handleMainButtonPress = () => {
+    if (currentScreen === 'library') {
+      setCurrentScreen('studio');
+      return;
     }
-  }, [durationMs, engineState, activePreset]);
 
-  // Decoupled Main Button: Library -> Studio Standby -> Active Take
-  const handleMainButtonPress = async () => {
-    if (isActionLockedRef.current) return;
-    isActionLockedRef.current = true;
+    const currentState = engineStateRef.current;
 
     try {
-      // 1. Enter Studio Standby Mode without capturing audio
-      if (currentScreen === 'library') {
-        setCurrentScreen('studio');
-        return;
-      }
-
-      // 2. Control active session inside Studio
-      if (engineState === 'RECORDING') {
-        await pauseRecording();
-      } else if (engineState === 'PAUSED') {
-        await resumeRecording();
+      if (currentState === 'RECORDING') {
+        pauseRecording();
+      } else if (currentState === 'PAUSED') {
+        resumeRecording();
       } else {
-        // engineState === 'STOPPED' (Punch-in from Standby)
         activateHardwareRoutingRef.current();
-        await activateKeepAwakeAsync();
-        await ForegroundServiceManager.startService(activePreset.badge);
-        await startRecording();
+        activateKeepAwakeAsync();
+        ForegroundServiceManager.startService(activePreset.badge);
+        startRecording();
       }
     } catch (e: any) {
-      await deactivateKeepAwake();
-      await ForegroundServiceManager.stopService();
+      deactivateKeepAwake();
+      ForegroundServiceManager.stopService();
       releaseHardwareRoutingRef.current();
-
-      Alert.alert('Recording Error', e.message, [
+      Alert.alert('Capture Fault', e.message, [
         {
           text: 'OK',
           onPress: async () => {
@@ -498,141 +400,136 @@ function AudioRecorderApp() {
           },
         },
       ]);
-    } finally {
-      setTimeout(() => {
-        isActionLockedRef.current = false;
-      }, 400);
     }
   };
 
   const handleBackToLibrary = () => {
-    if (engineState === 'RECORDING' || engineState === 'PAUSED') {
+    if (isSessionActive) {
       setWarningModalVisible(true);
       return;
     }
     setCurrentScreen('library');
   };
 
-  const isDualPane = isTablet || isLandscape;
-  const statusColor = getStatusColor(engineState);
+  const handleOpenDeviceModal = () => {
+    if (isSessionActive) return;
+    refreshDevices();
+    setDeviceModalVisible(true);
+  };
+
+  const handleSelectDevice = (deviceId: number) => {
+    selectDevice(deviceId);
+    setDeviceModalVisible(false);
+  };
+
+  const getDeviceIcon = (type?: string) => {
+    switch (type) {
+      case 'usb_device':
+      case 'usb_headset':
+      case 'usb_accessory':
+        return Usb;
+      case 'bluetooth_sco':
+      case 'bluetooth_a2dp':
+        return Bluetooth;
+      case 'wired_headset':
+        return Headphones;
+      default:
+        return Mic;
+    }
+  };
+
+  const DeviceIcon = getDeviceIcon(selectedDevice?.type);
+
+  const micLabel = selectedDevice
+    ? selectedDevice.name.length > 7
+      ? selectedDevice.name.slice(0, 6) + '…'
+      : selectedDevice.name
+    : 'Mic';
+
+  const formatLabel = activePreset
+    ? activePreset.key === 'share_aac_48k'
+      ? 'AAC'
+      : activePreset.key === 'podcast_wav_44k'
+      ? '44.1k'
+      : '48k'
+    : 'WAV';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      {/* Screen Switcher */}
       <View style={styles.screensContainer}>
         {currentScreen === 'library' ? (
-          <Animated.View
-            key="screen-lib"
-            entering={FadeIn.duration(240)}
-            exiting={FadeOut.duration(180)}
-            style={StyleSheet.absoluteFill}
-          >
-            <LibraryScreen
-              recordings={recordings}
-              onLibraryUpdate={setRecordings}
-              onEditModeChange={setIsLibraryEditMode}
-            />
+          <Animated.View key="screen-lib" entering={FadeIn.duration(240)} exiting={FadeOut.duration(180)} style={StyleSheet.absoluteFill}>
+            <LibraryScreen recordings={recordings} onLibraryUpdate={setRecordings} onEditModeChange={setIsLibraryEditMode} />
           </Animated.View>
         ) : (
-          <Animated.View
-            key="screen-std"
-            entering={FadeIn.duration(240)}
-            exiting={FadeOut.duration(180)}
-            style={StyleSheet.absoluteFill}
-          >
+          <Animated.View key="screen-std" entering={FadeIn.duration(240)} exiting={FadeOut.duration(180)} style={StyleSheet.absoluteFill}>
             <View style={[styles.contentConstraint, { maxWidth: maxContentWidth }]}>
               {/* Minimal Studio Header */}
               <View style={styles.header}>
-                <TouchableOpacity
-                  style={styles.backTouch}
-                  onPress={handleBackToLibrary}
-                  activeOpacity={0.7}
-                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                >
-                  <ChevronLeft size={22} color="#FFFFFF" strokeWidth={2.4} />
+                <TouchableOpacity style={styles.headerBtn} onPress={handleBackToLibrary} activeOpacity={0.7} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                  <ChevronLeft size={24} color="#FFFFFF" strokeWidth={2} />
                 </TouchableOpacity>
 
-                {/* Status Indicator */}
-                <View style={styles.statusPill}>
-                  <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-                  <Text style={[styles.statusLabel, { color: statusColor }]}>
-                    {engineState}
-                  </Text>
-                </View>
-
-                {/* Minimal Settings Trigger */}
-                <TouchableOpacity
-                  style={styles.settingsTouch}
-                  onPress={() => setSettingsVisible(true)}
-                  activeOpacity={0.7}
-                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-                >
-                  <Sliders size={18} color="#8E8E93" />
+                <TouchableOpacity style={styles.headerBtn} onPress={() => setSettingsVisible(true)} activeOpacity={0.7} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                  <Sliders size={19} color="#8E8E93" />
                 </TouchableOpacity>
               </View>
 
-              {/* Main Studio Workspace */}
-              <ScrollView
-                contentContainerStyle={styles.scrollContent}
-                showsVerticalScrollIndicator={false}
-                bounces={false}
-              >
-                <View
-                  style={[
-                    styles.studioCanvas,
-                    isTablet && styles.studioCanvasTablet,
-                    isDualPane && styles.studioCanvasDualPane,
-                  ]}
-                >
-                  {/* Teleprompter Region */}
-                  <View style={[styles.prompterSection, isDualPane && styles.prompterDualPane]}>
+              <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} bounces={false}>
+                {/* 1. Teleprompter Region */}
+                {showPrompter ? (
+                  <View style={styles.prompterWrapper}>
                     <TeleprompterDeck engineState={engineState} customHeight={prompterHeight} />
                   </View>
+                ) : null}
 
-                  {/* Metering & Timer Console */}
-                  <View style={[styles.meteringSection, isDualPane && styles.meteringDualPane]}>
-                    {/* Unified Metadata Capsule */}
-                    <View style={styles.metaCapsule}>
+                {/* 2. Cockpit Row */}
+                <View style={styles.cockpitRow}>
+                  {/* Left Column: Vertical Audio Meter */}
+                  <View style={styles.cockpitLeft}>
+                    <AudioMeter telemetry={telemetry} engineState={engineState} />
+                  </View>
+
+                  {/* Center Column: Waveform, Centered Timer, & Horizontal Options */}
+                  <View style={styles.cockpitCenter}>
+                    <LiveWaveform telemetry={telemetry} engineState={engineState} height={54} />
+                    <StudioTimer telemetry={telemetry} engineState={engineState} isTablet={isTablet} />
+
+                    {/* Options Row strictly under timer; bounded to prevent meter collision */}
+                    <View style={styles.optionsHorizontalRow}>
                       <TouchableOpacity
-                        style={styles.metaSegment}
+                        style={[styles.cleanOptionBtn, isSessionActive ? styles.cleanOptionBtnDisabled : null]}
+                        onPress={handleOpenDeviceModal}
+                        disabled={isSessionActive}
+                        activeOpacity={0.6}
+                      >
+                        <DeviceIcon size={11} color={selectedDevice && selectedDevice.type !== 'builtin_mic' ? '#60A5FA' : '#8E8E93'} />
+                        <Text style={styles.cleanOptionText} numberOfLines={1}>{micLabel}</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.cleanOptionBtn, isSessionActive ? styles.cleanOptionBtnDisabled : null]}
                         onPress={() => setSettingsVisible(true)}
-                        disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-                        activeOpacity={0.7}
+                        disabled={isSessionActive}
+                        activeOpacity={0.6}
                       >
-                        <Text style={styles.metaSegmentText}>{activePreset.badge}</Text>
+                        <Radio size={11} color="#34D399" />
+                        <Text style={styles.cleanOptionText} numberOfLines={1}>{formatLabel}</Text>
                       </TouchableOpacity>
-
-                      <View style={styles.metaDivider} />
 
                       <TouchableOpacity
-                        style={styles.metaSegment}
-                        onPress={() => {
-                          refreshDevices();
-                          setDeviceModalVisible(true);
-                        }}
-                        disabled={engineState === 'RECORDING' || engineState === 'PAUSED'}
-                        activeOpacity={0.7}
+                        style={[styles.cleanOptionBtn, showPrompter ? styles.cleanOptionBtnActive : null]}
+                        onPress={togglePrompter}
+                        activeOpacity={0.6}
                       >
-                        <Mic size={11} color="#A1A1A6" />
-                        <Text style={styles.metaSegmentText} numberOfLines={1}>
-                          {selectedDevice ? selectedDevice.name : 'Built-in Mic'}
-                        </Text>
+                        <AlignLeft size={11} color={showPrompter ? '#FFFFFF' : '#8E8E93'} />
+                        <Text style={[styles.cleanOptionText, showPrompter ? styles.cleanOptionTextActive : null]}>{showPrompter ? 'Hide' : 'Script'}</Text>
                       </TouchableOpacity>
-                    </View>
-
-                    {/* Precision Studio Clock */}
-                    <Text style={[styles.timer, isTablet && styles.timerTablet]}>
-                      {formatTimer(durationMs)}
-                    </Text>
-
-                    {/* Sleek VU Meter */}
-                    <View style={styles.meterWrapper}>
-                      <AudioMeter
-                        meteringDb={meteringDb}
-                        isRecording={engineState === 'RECORDING'}
-                      />
                     </View>
                   </View>
+
+                  {/* Right Column: Symmetrical Counterweight */}
+                  <View style={styles.cockpitRight} pointerEvents="none" />
                 </View>
               </ScrollView>
             </View>
@@ -640,84 +537,46 @@ function AudioRecorderApp() {
         )}
       </View>
 
-      {/* Stylized Floating Toast */}
-      {toastData && (
+      {/* Floating Save Toast Notification */}
+      {toastData ? (
         <View style={styles.toastOverlay} pointerEvents="box-none">
-          <Animated.View
-            entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))}
-            exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))}
-            style={styles.toastCard}
-          >
-            <View style={styles.toastIconCircle}>
-              <Check size={14} color="#000000" strokeWidth={3} />
-            </View>
+          <Animated.View entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))} exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))} style={styles.toastCard}>
+            <View style={styles.toastIconCircle}><Check size={14} color="#000000" strokeWidth={3} /></View>
             <View style={styles.toastTextCol}>
               <Text style={styles.toastTitle}>{toastData.title}</Text>
-              <Text style={styles.toastSubtitle} numberOfLines={1}>
-                {toastData.subtitle}
-              </Text>
+              <Text style={styles.toastSubtitle} numberOfLines={1}>{toastData.subtitle}</Text>
             </View>
           </Animated.View>
         </View>
-      )}
+      ) : null}
 
-      {/* Unified Anchored Transport Layer */}
-      {!isLibraryEditMode && (
-        <View style={styles.transportBar} pointerEvents="box-none">
-          <View style={styles.transportCenter} pointerEvents="box-none">
-            {/* Sliding Stop Button (Only active during an active take) */}
-            <Animated.View
-              style={[styles.stopBtnWrapper, stopBtnAnimatedStyle]}
-              pointerEvents={isSessionActive ? 'auto' : 'none'}
-            >
-              <Pressable
-                onPress={handleStopPress}
-                disabled={!isSessionActive}
-                style={({ pressed }) => [
-                  styles.stopOuterBtn,
-                  pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] },
-                ]}
-                hitSlop={10}
-              >
+      {/* Tactile Hardware Transport Layer */}
+      {!isLibraryEditMode ? (
+        <View style={styles.transportChassis} pointerEvents="box-none">
+          <View style={styles.transportBezel} pointerEvents="box-none">
+            <Animated.View style={[styles.stopBtnWrapper, stopBtnAnimatedStyle]} pointerEvents={isSessionActive ? 'auto' : 'none'}>
+              <Pressable onPress={handleStopPress} disabled={!isSessionActive} style={({ pressed }) => [styles.stopOuterBtn, pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] }]} hitSlop={10}>
                 <View style={styles.stopInnerSquare} />
               </Pressable>
             </Animated.View>
 
-            {/* Main Action Button */}
             <Animated.View style={[styles.mainBtnWrapper, mainBtnAnimatedStyle]} pointerEvents="box-none">
-              <Pressable
-                onPress={handleMainButtonPress}
-                style={({ pressed }) => [
-                  styles.mainOuterRing,
-                  pressed && { opacity: 0.88, transform: [{ scale: 0.95 }] },
-                ]}
-                hitSlop={10}
-              >
+              <Pressable onPress={handleMainButtonPress} style={({ pressed }) => [styles.mainOuterRing, pressed && { opacity: 0.88, transform: [{ scale: 0.95 }] }]} hitSlop={10}>
                 <Animated.View style={[styles.redCircle, redCircleAnimStyle]} pointerEvents="none">
-                  <Animated.View style={[styles.micIconWrapper, micIconAnimStyle]}>
-                    <Mic size={24} color="#FFFFFF" />
-                  </Animated.View>
+                  <Animated.View style={[styles.micIconWrapper, micIconAnimStyle]}><Mic size={24} color="#FFFFFF" strokeWidth={2.4} /></Animated.View>
                 </Animated.View>
-
                 <Animated.View style={[styles.pauseBarsWrapper, pauseBarsAnimStyle]} pointerEvents="none">
-                  <View style={styles.pauseBar} />
-                  <View style={styles.pauseBar} />
+                  <View style={styles.pauseBar} /><View style={styles.pauseBar} />
                 </Animated.View>
               </Pressable>
             </Animated.View>
           </View>
         </View>
-      )}
+      ) : null}
 
-      {/* Warning Modal */}
-      <ActiveRecordingWarningModal
-        visible={warningModalVisible}
-        onClose={() => setWarningModalVisible(false)}
-        onStopAndExit={handleStopPress}
-      />
+      <ActiveRecordingWarningModal visible={warningModalVisible} onClose={() => setWarningModalVisible(false)} onStopAndExit={handleStopPress} />
 
-      {/* Naming Modal */}
-      {pendingTake && (
+      {pendingTake ? (
         <SaveRecordingModal
           visible={nameModalVisible}
           defaultName={pendingTake.defaultName}
@@ -727,25 +586,10 @@ function AudioRecorderApp() {
           onSubmit={handleFinalizeTake}
           onDiscard={handleDiscardTake}
         />
-      )}
+      ) : null}
 
-      {/* Input Devices & Settings Modals */}
-      <InputDeviceModal
-        visible={deviceModalVisible}
-        onClose={() => setDeviceModalVisible(false)}
-        devices={devices}
-        selectedDeviceId={selectedDeviceId}
-        onSelectDevice={selectDevice}
-        engineState={engineState}
-      />
-
-      <AudioSettingsModal
-        visible={settingsVisible}
-        onClose={() => setSettingsVisible(false)}
-        activePresetKey={activePreset.key}
-        onSelectPreset={setPresetKey}
-        engineState={engineState}
-      />
+      <InputDeviceModal visible={deviceModalVisible} onClose={() => setDeviceModalVisible(false)} devices={devices} selectedDeviceId={selectedDeviceId} onSelectDevice={handleSelectDevice} engineState={engineState} />
+      <AudioSettingsModal visible={settingsVisible} onClose={() => setSettingsVisible(false)} activePresetKey={activePreset.key} onSelectPreset={setPresetKey} engineState={engineState} />
     </SafeAreaView>
   );
 }
@@ -753,180 +597,105 @@ function AudioRecorderApp() {
 export default function App() {
   return (
     <GestureHandlerRootView style={styles.root}>
-      <SafeAreaProvider>
-        <AudioRecorderApp />
-      </SafeAreaProvider>
+      <SafeAreaProvider><AudioRecorderApp /></SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }
 
-function getStatusColor(state: EngineState) {
-  switch (state) {
-    case 'RECORDING':
-      return '#FF3B30';
-    case 'PAUSED':
-      return '#FF9500';
-    case 'STOPPED':
-      return '#FFFFFF';
-    default:
-      return '#636366';
-  }
-}
-
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  screensContainer: {
-    flex: 1,
-  },
-  contentConstraint: {
-    flex: 1,
-    width: '100%',
-    alignSelf: 'center',
-  },
+  root: { flex: 1, backgroundColor: '#000000' },
+  container: { flex: 1, backgroundColor: '#000000' },
+  screensContainer: { flex: 1 },
+  contentConstraint: { flex: 1, width: '100%', alignSelf: 'center' },
 
-  /* Minimal Header */
   header: {
     height: 52,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#161618',
+    paddingHorizontal: 20,
   },
-  backTouch: {
+  headerBtn: {
     width: 36,
     height: 36,
-    alignItems: 'flex-start',
-    justifyContent: 'center',
-  },
-  statusPill: {
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    backgroundColor: '#121214',
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  statusLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 1.0,
-  },
-  settingsTouch: {
-    width: 36,
-    height: 36,
-    alignItems: 'flex-end',
     justifyContent: 'center',
   },
 
-  /* Clean Studio Workspace */
   scrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 130,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 140,
   },
-  studioCanvas: {
+
+  prompterWrapper: {
     width: '100%',
-    alignItems: 'center',
-    gap: 16,
+    marginBottom: 16,
   },
-  studioCanvasTablet: {
-    paddingHorizontal: 20,
-  },
-  studioCanvasDualPane: {
+
+  cockpitRow: {
     flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: 24,
-  },
-  prompterSection: {
-    width: '100%',
-    alignItems: 'center',
-  },
-  prompterDualPane: {
-    flex: 1.25,
-  },
-  meteringSection: {
-    width: '100%',
-    alignItems: 'center',
-  },
-  meteringDualPane: {
-    flex: 1,
+    alignItems: 'flex-end',
     justifyContent: 'center',
-  },
-
-  /* Unified Metadata Capsule */
-  metaCapsule: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#121214',
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#1F1F24',
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    marginTop: 4,
-    maxWidth: '92%',
-  },
-  metaSegment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    maxWidth: 160,
-  },
-  metaSegmentText: {
-    color: '#D1D1D6',
-    fontSize: 11,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  metaDivider: {
-    width: 1,
-    height: 12,
-    backgroundColor: '#2C2C30',
-    marginHorizontal: 2,
-  },
-
-  /* Precision Studio Timer */
-  timer: {
-    fontSize: 56,
-    fontWeight: '200',
-    color: '#FFFFFF',
-    fontVariant: ['tabular-nums'],
-    letterSpacing: -1,
-    marginTop: 10,
-    marginBottom: 6,
-  },
-  timerTablet: {
-    fontSize: 68,
-  },
-  meterWrapper: {
     width: '100%',
+  },
+  cockpitLeft: {
+    width: 44,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-end',
+    paddingBottom: 2,
+  },
+  cockpitCenter: {
+    flex: 1,
     alignItems: 'center',
-    marginTop: 4,
+    justifyContent: 'flex-end',
+    paddingHorizontal: 4,
+  },
+  cockpitRight: {
+    width: 44,
   },
 
-  /* Floating Toast */
+  optionsHorizontalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    marginTop: 12,
+    maxWidth: 200,
+    width: '100%',
+  },
+  cleanOptionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 5,
+    paddingHorizontal: 7,
+    borderRadius: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  cleanOptionBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  cleanOptionBtnDisabled: {
+    opacity: 0.35,
+  },
+  cleanOptionText: {
+    color: '#8E8E93',
+    fontSize: 10,
+    fontWeight: '500',
+    letterSpacing: 0.2,
+    maxWidth: 56,
+  },
+  cleanOptionTextActive: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+
   toastOverlay: {
     position: 'absolute',
-    top: 18,
+    top: 20,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -936,25 +705,25 @@ const styles = StyleSheet.create({
   toastCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#1C1C1E',
+    backgroundColor: '#18181B',
     borderWidth: 1,
-    borderColor: '#2C2C2E',
+    borderColor: '#27272A',
     borderRadius: 30,
     paddingHorizontal: 16,
     paddingVertical: 10,
     maxWidth: 380,
     gap: 10,
     shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
     elevation: 8,
   },
   toastIconCircle: {
     width: 22,
     height: 22,
     borderRadius: 11,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#10B981',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -965,7 +734,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '700',
-    letterSpacing: -0.2,
   },
   toastSubtitle: {
     color: '#8E8E93',
@@ -974,56 +742,59 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
 
-  /* Fixed Bottom Transport Layer */
-  transportBar: {
+  transportChassis: {
     position: 'absolute',
-    bottom: 24,
+    bottom: 28,
     left: 0,
     right: 0,
-    height: 76,
+    height: 80,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 9999,
     elevation: 99,
   },
-  transportCenter: {
-    width: 200,
-    height: 76,
+  transportBezel: {
+    width: 220,
+    height: 80,
     alignItems: 'center',
     justifyContent: 'center',
   },
   mainBtnWrapper: {
     position: 'absolute',
-    width: 74,
-    height: 74,
+    width: 76,
+    height: 76,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 2,
   },
   stopBtnWrapper: {
     position: 'absolute',
-    width: 74,
-    height: 74,
+    width: 76,
+    height: 76,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 1,
   },
   mainOuterRing: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 2.5,
+    borderColor: '#27272A',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#000000',
+    backgroundColor: '#09090B',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
   },
   redCircle: {
     position: 'absolute',
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    backgroundColor: '#FF3B30',
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: '#EF4444',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1035,8 +806,8 @@ const styles = StyleSheet.create({
   },
   pauseBarsWrapper: {
     position: 'absolute',
-    width: 58,
-    height: 58,
+    width: 60,
+    height: 60,
     flexDirection: 'row',
     gap: 6,
     alignItems: 'center',
@@ -1049,20 +820,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
   },
   stopOuterBtn: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
-    borderWidth: 2,
-    borderColor: '#3A3A3C',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 1.5,
+    borderColor: '#18181B',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#1C1C1E',
+    backgroundColor: '#111113',
   },
   stopInnerSquare: {
     width: 22,
     height: 22,
     borderRadius: 4,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FAFAFA',
   },
 });
 
@@ -1253,6 +1024,7 @@ FILE: package.json
     "expo-audio": "~57.0.5",
     "expo-build-properties": "~57.0.21",
     "expo-dev-client": "~57.0.19",
+    "expo-document-picker": "~57.0.2",
     "expo-file-system": "~57.0.7",
     "expo-keep-awake": "~57.0.2",
     "expo-sharing": "~57.0.21",
@@ -2027,13 +1799,23 @@ import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
 import { AUDIO_PRESETS, PresetKey, AudioPresetConfig } from './types';
+import { ForegroundServiceManager } from './ForegroundServiceManager';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 
+const formatTimecode = (ms: number) => {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return hrs > 0
+    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
-  const [durationMs, setDurationMs] = useState(0);
-  const [meteringDb, setMeteringDb] = useState(-60);
+  const engineStateRef = useRef<EngineState>('IDLE');
   const [presetKey, setPresetKeyState] = useState<PresetKey>(AudioSettingsStorage.getPreset());
 
   const activePreset: AudioPresetConfig = AUDIO_PRESETS[presetKey] || AUDIO_PRESETS.broadcast_wav_48k;
@@ -2042,26 +1824,37 @@ export function useAudioRecording() {
 
   const recorder = useAudioRecorder(activePreset.options);
 
-  // Synchronous operation mutex to block concurrent native invocations
-  const isBusyRef = useRef(false);
+  const isPollingRef = useRef(false);
+  const isCapturingRef = useRef(false);
+  const nativeQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const smoothedDbRef = useRef(-60);
+  const lastNotifTimeRef = useRef(0);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const meterPollingRef = useRef<NodeJS.Timeout | null>(null);
-  const startTimeRef = useRef<number>(0);
-  const accumulatedMsRef = useRef<number>(0);
   const fileUriRef = useRef<string | null>(null);
 
+  const telemetry = useRef({
+    meteringDb: -60,
+    durationMs: 0,
+    startTime: 0,
+    accumulatedMs: 0,
+    isPaused: false,
+  });
+
   const changePreset = useCallback((key: PresetKey) => {
-    if (engineState === 'RECORDING' || engineState === 'PAUSED') {
+    if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
       throw new Error('Cannot change format preset while capture is in progress.');
     }
     setPresetKeyState(key);
     AudioSettingsStorage.setPreset(key);
-  }, [engineState]);
+  }, []);
 
-  // Poll native decibels at 30 Hz
   const pollMetering = useCallback(async () => {
-    if (!recorder) return;
+    if (!recorder || isPollingRef.current || !isCapturingRef.current) return;
+    isPollingRef.current = true;
+
     try {
       let db: number | undefined;
       if (typeof (recorder as any).getStatusAsync === 'function') {
@@ -2074,158 +1867,205 @@ export function useAudioRecording() {
         db = (recorder as any).metering;
       }
 
-      if (typeof db === 'number' && !isNaN(db)) {
-        setMeteringDb(Math.max(-60, Math.min(0, db)));
+      if (typeof db === 'number' && !isNaN(db) && isCapturingRef.current) {
+        const clamped = Math.max(-60, Math.min(0, db));
+        const delta = Math.abs(clamped - smoothedDbRef.current);
+
+        if (delta > 0.4) {
+          if (clamped > smoothedDbRef.current) {
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.60;
+          } else {
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.18;
+          }
+        }
+        telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 10) / 10;
       }
-    } catch {}
+    } catch {
+    } finally {
+      isPollingRef.current = false;
+    }
   }, [recorder]);
 
-  // UI timer clock & MMKV crash heartbeat synchronizer
   useEffect(() => {
     if (engineState === 'RECORDING') {
-      startTimeRef.current = Date.now();
       timerRef.current = setInterval(() => {
-        const currentSegment = Date.now() - startTimeRef.current;
-        const total = accumulatedMsRef.current + currentSegment;
-        setDurationMs(total);
+        const total = telemetry.current.durationMs;
         SessionJournal.updateHeartbeat(total);
+
+        const now = Date.now();
+        if (now - lastNotifTimeRef.current >= 1000) {
+          lastNotifTimeRef.current = now;
+          ForegroundServiceManager.updateProgress(
+            formatTimecode(total),
+            activePresetRef.current.badge,
+            false
+          );
+        }
       }, 200);
 
-      meterPollingRef.current = setInterval(pollMetering, 33);
+      const startPollingLoop = async () => {
+        if (!isCapturingRef.current) return;
+        await pollMetering();
+        if (isCapturingRef.current) {
+          meterPollingRef.current = setTimeout(startPollingLoop, 33);
+        }
+      };
+      startPollingLoop();
     } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      if (meterPollingRef.current) {
-        clearInterval(meterPollingRef.current);
-        meterPollingRef.current = null;
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
 
-      setMeteringDb(-60);
-
-      if (engineState === 'PAUSED') {
-        accumulatedMsRef.current += Date.now() - startTimeRef.current;
-      } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
-        accumulatedMsRef.current = 0;
+      if (engineState === 'IDLE' || engineState === 'STOPPED') {
+        smoothedDbRef.current = -60;
+        telemetry.current.meteringDb = -60;
+        telemetry.current.accumulatedMs = 0;
+        telemetry.current.durationMs = 0;
       }
     }
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (meterPollingRef.current) clearInterval(meterPollingRef.current);
+      if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
     };
   }, [engineState, pollMetering]);
 
+  const getExactDurationMs = useCallback(() => {
+    return telemetry.current.durationMs;
+  }, []);
+
   const startRecording = useCallback(async () => {
-    // Drop re-entrant invocations immediately
-    if (isBusyRef.current) return;
-    isBusyRef.current = true;
+    if (engineStateRef.current === 'RECORDING') return;
 
-    try {
-      // Self-heal: If recorder was left in a prepared or recording state, release it first
+    engineStateRef.current = 'RECORDING';
+    telemetry.current.isPaused = false;
+    telemetry.current.durationMs = 0;
+    telemetry.current.accumulatedMs = 0;
+    telemetry.current.startTime = Date.now();
+    isCapturingRef.current = true;
+    smoothedDbRef.current = -60;
+    telemetry.current.meteringDb = -60;
+
+    setEngineState('RECORDING');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
       try {
-        await recorder.stop();
-      } catch {}
+        try { await recorder.stop(); } catch {}
 
-      const currentConfig = activePresetRef.current;
-      const sessionId = `session_${Date.now()}`;
-      setDurationMs(0);
-      accumulatedMsRef.current = 0;
+        const currentConfig = activePresetRef.current;
+        const sessionId = `session_${Date.now()}`;
+        await recorder.prepareToRecordAsync(currentConfig.options);
+        fileUriRef.current = recorder.uri;
 
-      // Prepare native audio engine with active preset
-      await recorder.prepareToRecordAsync(currentConfig.options);
-      fileUriRef.current = recorder.uri;
+        SessionJournal.startSession({
+          sessionId,
+          fileUri: recorder.uri ?? '',
+          formatPreset: currentConfig.key,
+          sampleRate: currentConfig.sampleRate,
+          channels: currentConfig.channels,
+          startedAt: Date.now(),
+        });
 
-      SessionJournal.startSession({
-        sessionId,
-        fileUri: recorder.uri ?? '',
-        formatPreset: currentConfig.key,
-        sampleRate: currentConfig.sampleRate,
-        channels: currentConfig.channels,
-        startedAt: Date.now(),
-      });
+        await recorder.record();
+      } catch (error) {
+        setEngineState('ERROR');
+        engineStateRef.current = 'ERROR';
+        throw error;
+      }
+    });
 
-      await recorder.record();
-      setEngineState('RECORDING');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
+    await nativeQueueRef.current;
   }, [recorder]);
 
-  const pauseRecording = useCallback(async () => {
-    if (isBusyRef.current || engineState !== 'RECORDING') return;
-    isBusyRef.current = true;
+  const pauseRecording = useCallback(() => {
+    if (engineStateRef.current !== 'RECORDING') return;
 
-    try {
-      await recorder.pause();
-      SessionJournal.setStatus('PAUSED');
-      setEngineState('PAUSED');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
-  }, [recorder, engineState]);
+    // Frame 0: Immediately stop recording telemetry and freeze the millisecond on screen
+    isCapturingRef.current = false;
+    telemetry.current.isPaused = true;
 
-  const resumeRecording = useCallback(async () => {
-    if (isBusyRef.current || engineState !== 'PAUSED') return;
-    isBusyRef.current = true;
+    // Lock accumulatedMs directly to the exact millisecond currently visible on screen
+    telemetry.current.accumulatedMs = telemetry.current.durationMs;
+    telemetry.current.startTime = Date.now();
 
-    try {
-      await recorder.record();
-      SessionJournal.setStatus('RECORDING');
-      setEngineState('RECORDING');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
-  }, [recorder, engineState]);
+    engineStateRef.current = 'PAUSED';
+    setEngineState('PAUSED');
+    SessionJournal.setStatus('PAUSED');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+      try {
+        await recorder.pause();
+        ForegroundServiceManager.updateProgress(
+          formatTimecode(telemetry.current.durationMs),
+          activePresetRef.current.badge,
+          true
+        );
+      } catch (err) {
+        console.warn('[useAudioRecording] recorder.pause failed:', err);
+      }
+    });
+  }, [recorder]);
+
+  const resumeRecording = useCallback(() => {
+    if (engineStateRef.current !== 'PAUSED') return;
+
+    telemetry.current.isPaused = false;
+    telemetry.current.startTime = Date.now();
+    isCapturingRef.current = true;
+
+    engineStateRef.current = 'RECORDING';
+    setEngineState('RECORDING');
+    SessionJournal.setStatus('RECORDING');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+      try {
+        await recorder.record();
+      } catch (err) {
+        console.warn('[useAudioRecording] recorder.record failed:', err);
+      }
+    });
+  }, [recorder]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
-    if (isBusyRef.current) return null;
-    isBusyRef.current = true;
+    engineStateRef.current = 'STOPPED';
+    isCapturingRef.current = false;
+    telemetry.current.isPaused = true;
+    setEngineState('STOPPED');
 
-    try {
-      await recorder.stop();
-      const finalUri = recorder.uri || fileUriRef.current;
-
-      SessionJournal.setStatus('FINALIZED');
-      SessionJournal.clearSession();
-
-      setEngineState('STOPPED');
-      return finalUri;
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
+    return new Promise<string | null>((resolve, reject) => {
+      nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+        try {
+          await recorder.stop();
+          const finalUri = recorder.uri || fileUriRef.current;
+          SessionJournal.setStatus('FINALIZED');
+          SessionJournal.clearSession();
+          resolve(finalUri);
+        } catch (error) {
+          setEngineState('ERROR');
+          engineStateRef.current = 'ERROR';
+          reject(error);
+        }
+      });
+    });
   }, [recorder]);
 
-  // Clean error recovery resetting the native session to clean state
   const resetEngine = useCallback(async () => {
-    try {
-      await recorder.stop();
-    } catch {}
+    try { await recorder.stop(); } catch {}
     SessionJournal.clearSession();
     setEngineState('IDLE');
-    setDurationMs(0);
-    setMeteringDb(-60);
-    accumulatedMsRef.current = 0;
-    isBusyRef.current = false;
+    engineStateRef.current = 'IDLE';
+    telemetry.current.durationMs = 0;
+    telemetry.current.accumulatedMs = 0;
+    telemetry.current.startTime = 0;
+    telemetry.current.meteringDb = -60;
+    telemetry.current.isPaused = false;
+    smoothedDbRef.current = -60;
   }, [recorder]);
 
   return {
     engineState,
-    durationMs,
-    meteringDb,
+    engineStateRef,
+    telemetry,
+    getExactDurationMs,
     currentUri: recorder.uri ?? fileUriRef.current,
     activePreset,
     setPresetKey: changePreset,
@@ -2242,207 +2082,508 @@ export function useAudioRecording() {
 FILE: src/components/meter/AudioMeter.tsx
 ================================================================================
 // src/components/meter/AudioMeter.tsx
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Text, LayoutChangeEvent } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, Text } from 'react-native';
 import {
   Canvas,
-  Rect,
+  RoundedRect,
   LinearGradient,
   vec,
-  Line,
-  RoundedRect,
+  Rect,
 } from '@shopify/react-native-skia';
 import {
   useSharedValue,
   useDerivedValue,
   withTiming,
   Easing,
+  cancelAnimation,
 } from 'react-native-reanimated';
+import { EngineState } from '../../services/audio/useAudioRecording';
 
 interface AudioMeterProps {
-  meteringDb: number;
-  isRecording: boolean;
+  telemetry: React.MutableRefObject<{ meteringDb: number }>;
+  engineState: EngineState;
 }
 
 const MIN_DB = -60;
 const MAX_DB = 0;
+const DB_TICKS = [0, -6, -12, -18, -24, -36, -48, -60];
 
-export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording }) => {
-  const [layoutWidth, setLayoutWidth] = useState(260);
-  const barHeight = 14;
+export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }) => {
+  const barWidth = 9;
+  const layoutHeight = 140;
+
+  const [displayPeakDb, setDisplayPeakDb] = useState(-60);
+  const displayPeakDbRef = useRef(-60);
+  const lastTextUpdateRef = useRef(0);
 
   const meterLevel = useSharedValue(0);
-  const peakLevel = useSharedValue(0);
+  const peakHoldLevel = useSharedValue(0);
+  const peakDecayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!isRecording) {
-      meterLevel.value = withTiming(0, { duration: 250 });
-      peakLevel.value = withTiming(0, { duration: 400 });
+    if (engineState === 'IDLE' || engineState === 'STOPPED') {
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+      cancelAnimation(meterLevel);
+      cancelAnimation(peakHoldLevel);
+      meterLevel.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
+      peakHoldLevel.value = withTiming(0, { duration: 300, easing: Easing.out(Easing.quad) });
+      setDisplayPeakDb(-60);
+      displayPeakDbRef.current = -60;
       return;
     }
 
-    const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, meteringDb));
-    const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
-
-    if (targetNorm > meterLevel.value) {
-      meterLevel.value = targetNorm;
-    } else {
-      meterLevel.value = withTiming(targetNorm, {
-        duration: 320,
-        easing: Easing.out(Easing.quad),
-      });
+    if (engineState === 'PAUSED') {
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+      cancelAnimation(meterLevel);
+      cancelAnimation(peakHoldLevel);
+      return; 
     }
 
-    if (targetNorm >= peakLevel.value) {
-      peakLevel.value = targetNorm;
-    } else {
-      peakLevel.value = withTiming(targetNorm, {
-        duration: 1200,
-        easing: Easing.linear,
-      });
-    }
-  }, [meteringDb, isRecording, meterLevel, peakLevel]);
+    let frameId: number;
+    let lastDb = -999;
 
-  const onLayout = (e: LayoutChangeEvent) => {
-    const w = e.nativeEvent.layout.width;
-    if (w > 0) setLayoutWidth(w);
-  };
+    const tick = () => {
+      const rawDb = telemetry.current.meteringDb;
+      if (rawDb !== lastDb) {
+        lastDb = rawDb;
+        const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, rawDb));
+        const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
 
-  const activeWidth = useDerivedValue(() => {
-    return Math.max(0, meterLevel.value * layoutWidth);
-  });
+        meterLevel.value = withTiming(targetNorm, {
+          duration: 35,
+          easing: Easing.linear,
+        });
 
-  const peakX = useDerivedValue(() => {
-    return Math.max(0, Math.min(layoutWidth - 2, peakLevel.value * layoutWidth));
-  });
+        const now = Date.now();
+        if (now - lastTextUpdateRef.current > 120 || clampedDb > displayPeakDbRef.current) {
+          lastTextUpdateRef.current = now;
+          displayPeakDbRef.current = clampedDb;
+          setDisplayPeakDb(clampedDb);
+        }
+
+        if (targetNorm >= peakHoldLevel.value) {
+          if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+          peakHoldLevel.value = targetNorm;
+
+          peakDecayTimeoutRef.current = setTimeout(() => {
+            peakHoldLevel.value = withTiming(0, {
+              duration: 1800,
+              easing: Easing.linear,
+            });
+          }, 900);
+        }
+      }
+      frameId = requestAnimationFrame(tick);
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+    };
+  }, [engineState, telemetry, meterLevel, peakHoldLevel]);
+
+  const activeHeight = useDerivedValue(() => Math.max(0, meterLevel.value * layoutHeight));
+  const activeY = useDerivedValue(() => layoutHeight - activeHeight.value);
+  const peakY = useDerivedValue(() => Math.max(0, layoutHeight - peakHoldLevel.value * layoutHeight - 2));
 
   return (
-    <View style={styles.wrapper}>
-      {/* Header labels */}
-      <View style={styles.labelRow}>
-        <Text style={styles.dbText}>-60</Text>
-        <Text style={styles.dbText}>-24</Text>
-        <Text style={styles.dbText}>-12</Text>
-        <Text style={styles.dbText}>-6</Text>
-        <Text style={styles.dbText}>-3</Text>
-        <Text style={[styles.dbText, styles.clipText]}>0 dBFS</Text>
-      </View>
+    <View style={styles.container}>
+      <View style={[styles.canvasFrame, { width: barWidth, height: layoutHeight }]}>
+        <Canvas style={{ width: barWidth, height: layoutHeight }}>
+          <RoundedRect x={0} y={0} width={barWidth} height={layoutHeight} r={2.5} color="#0D0D10" />
 
-      {/* Skia Metering Canvas */}
-      <View style={[styles.canvasContainer, { height: barHeight }]} onLayout={onLayout}>
-        <Canvas style={{ width: layoutWidth, height: barHeight }}>
-          <RoundedRect
-            x={0}
-            y={0}
-            width={layoutWidth}
-            height={barHeight}
-            r={3}
-            color="#1C1C1E"
-          />
-
-          <RoundedRect
-            x={0}
-            y={0}
-            width={activeWidth}
-            height={barHeight}
-            r={3}
-          >
+          <RoundedRect x={0} y={activeY} width={barWidth} height={activeHeight} r={2.5}>
             <LinearGradient
-              start={vec(0, 0)}
-              end={vec(layoutWidth, 0)}
-              colors={['#30D158', '#FFD60A', '#FF453A']}
-              positions={[0, 0.75, 1.0]}
+              start={vec(0, layoutHeight)}
+              end={vec(0, 0)}
+              colors={['#10B981', '#34D399', '#FBBF24', '#F97316', '#EF4444']}
+              positions={[0, 0.65, 0.78, 0.90, 1.0]}
             />
           </RoundedRect>
 
-          <Line
-            p1={vec(layoutWidth * 0.60, 0)}
-            p2={vec(layoutWidth * 0.60, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-          <Line
-            p1={vec(layoutWidth * 0.80, 0)}
-            p2={vec(layoutWidth * 0.80, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-          <Line
-            p1={vec(layoutWidth * 0.90, 0)}
-            p2={vec(layoutWidth * 0.90, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-
-          <Rect
-            x={peakX}
-            y={0}
-            width={2}
-            height={barHeight}
-            color="#FFFFFF"
-          />
+          <Rect x={0} y={peakY} width={barWidth} height={2} color="#FFFFFF" />
         </Canvas>
       </View>
 
-      {/* Live Readout in System Default Font */}
-      <View style={styles.readoutRow}>
-        <Text style={styles.readoutValue}>
-          {isRecording ? `${meteringDb.toFixed(1)} dBFS` : 'OFFLINE'}
-        </Text>
-        <Text style={[styles.clipIndicator, meteringDb >= -0.5 && styles.clipActive]}>
-          CLIP
-        </Text>
+      <View style={[styles.legendColumn, { height: layoutHeight }]}>
+        {DB_TICKS.map((db) => {
+          const label = db === 0 ? '0' : String(db);
+          const isSweet = db === -18 || db === -12;
+          const isClip = db === 0;
+          return (
+            <Text
+              key={db}
+              style={[
+                styles.tickText,
+                isSweet ? styles.sweetSpotText : null,
+                isClip ? styles.clipTickText : null,
+              ]}
+            >{label}</Text>
+          );
+        })}
       </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  wrapper: {
-    width: '100%',
-    paddingHorizontal: 8,
-    marginVertical: 10,
-  },
-  labelRow: {
+  container: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 4,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    gap: 4,
   },
-  dbText: {
-    color: '#8E8E93',
-    fontSize: 10,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  clipText: {
-    color: '#FF453A',
-  },
-  canvasContainer: {
-    width: '100%',
-    borderRadius: 3,
+  canvasFrame: {
+    borderRadius: 2.5,
     overflow: 'hidden',
-    backgroundColor: '#1C1C1E',
+    backgroundColor: '#09090B',
+    borderWidth: 1,
+    borderColor: '#1E1E22',
   },
-  readoutRow: {
-    flexDirection: 'row',
+  legendColumn: {
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 6,
+    paddingVertical: 1,
   },
-  readoutValue: {
-    color: '#A1A1A1',
-    fontSize: 12,
-    fontWeight: '500',
+  tickText: {
+    color: '#636366',
+    fontSize: 8,
+    fontWeight: '700',
     fontVariant: ['tabular-nums'],
+    width: 16,
   },
-  clipIndicator: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1,
-    color: '#3A3A3C',
+  sweetSpotText: {
+    color: '#34D399',
   },
-  clipActive: {
-    color: '#FF453A',
+  clipTickText: {
+    color: '#EF4444',
+  },
+});
+
+
+================================================================================
+FILE: src/components/studio/LiveWaveform.tsx
+================================================================================
+// src/components/studio/LiveWaveform.tsx
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
+import { Canvas, Path, Skia, LinearGradient, vec, BlurMask } from '@shopify/react-native-skia';
+import { EngineState } from '../../services/audio/useAudioRecording';
+
+interface LiveWaveformProps {
+  telemetry: React.MutableRefObject<{
+    meteringDb: number;
+    isPaused: boolean;
+  }>;
+  engineState: EngineState;
+  height?: number;
+}
+
+const HISTORY_POINTS = 46;
+const BASELINE_AMPLITUDE = 0.04;
+const NOISE_FLOOR_DB = -52;
+const GLOW_PADDING = 36;
+
+export const LiveWaveform: React.FC<LiveWaveformProps> = ({
+  telemetry,
+  engineState,
+  height = 56,
+}) => {
+  const [canvasWidth, setCanvasWidth] = useState(200);
+  const historyRef = useRef<number[]>(new Array(HISTORY_POINTS).fill(BASELINE_AMPLITUDE));
+
+  const envelopeRef = useRef<number>(BASELINE_AMPLITUDE);
+  const glowEnvelopeRef = useRef<number>(0);
+
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (engineState === 'IDLE' || engineState === 'STOPPED') {
+      historyRef.current = new Array(HISTORY_POINTS).fill(BASELINE_AMPLITUDE);
+      envelopeRef.current = BASELINE_AMPLITUDE;
+      glowEnvelopeRef.current = 0;
+      setTick((t) => (t + 1) % 10000);
+      return;
+    }
+
+    if (engineState === 'PAUSED' || telemetry.current.isPaused) {
+      return;
+    }
+
+    let frameId: number;
+    let lastTime = Date.now();
+
+    const tick = () => {
+      // Instantly freezes waveform on Frame 0
+      if (telemetry.current.isPaused) {
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastTime >= 33) {
+        lastTime = now;
+        const rawDb = telemetry.current.meteringDb;
+        let targetAmp = BASELINE_AMPLITUDE;
+        let targetGlow = 0;
+
+        if (rawDb > NOISE_FLOOR_DB) {
+          const normalized = Math.max(0, Math.min(1.0, (rawDb - NOISE_FLOOR_DB) / (0 - NOISE_FLOOR_DB)));
+          targetAmp = Math.max(BASELINE_AMPLITUDE, Math.pow(normalized, 1.8));
+          targetGlow = Math.pow(normalized, 1.8);
+        }
+
+        if (targetAmp > envelopeRef.current) {
+          envelopeRef.current += (targetAmp - envelopeRef.current) * 0.60;
+        } else {
+          envelopeRef.current += (targetAmp - envelopeRef.current) * 0.15;
+        }
+
+        if (targetGlow > glowEnvelopeRef.current) {
+          glowEnvelopeRef.current += (targetGlow - glowEnvelopeRef.current) * 0.035;
+        } else {
+          glowEnvelopeRef.current += (targetGlow - glowEnvelopeRef.current) * 0.015;
+        }
+
+        historyRef.current.push(envelopeRef.current);
+        if (historyRef.current.length > HISTORY_POINTS) {
+          historyRef.current.shift();
+        }
+
+        setTick((t) => (t + 1) % 10000);
+      }
+
+      frameId = requestAnimationFrame(tick);
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [engineState, telemetry]);
+
+  const onLayout = (e: LayoutChangeEvent) => {
+    const w = Math.round(e.nativeEvent.layout.width);
+    if (w > 0 && Math.abs(w - canvasWidth) > 1) {
+      setCanvasWidth(w);
+    }
+  };
+
+  const centerY = GLOW_PADDING + height / 2;
+  const maxDeflection = height * 0.38;
+  const stepX = canvasWidth / HISTORY_POINTS;
+  const barWidth = Math.max(2.0, stepX * 0.40);
+
+  const path = Skia.Path.Make();
+  const data = historyRef.current;
+
+  for (let i = 0; i < data.length; i++) {
+    const x = GLOW_PADDING + i * stepX + stepX / 2;
+    const amp = Math.max(2, data[i] * maxDeflection);
+    path.moveTo(x, centerY - amp);
+    path.lineTo(x, centerY + amp);
+  }
+
+  const isActive = engineState === 'RECORDING' || engineState === 'PAUSED';
+  const glow = isActive ? glowEnvelopeRef.current : 0;
+
+  const neonPalette = ['#00F0FF', '#7000FF', '#FF0078', '#FF8A00'];
+  const hotCorePalette = ['#E0FFFF', '#F5E6FF', '#FFE6F0', '#FFF0E6'];
+  const idlePalette = ['#27272A', '#3F3F46', '#27272A'];
+
+  const baseColors = isActive ? neonPalette : idlePalette;
+
+  return (
+    <View style={[styles.container, { height }]} onLayout={onLayout} pointerEvents="none">
+      <View style={[styles.centerLine, { top: height / 2 }]} />
+
+      <Canvas
+        style={{
+          position: 'absolute',
+          top: -GLOW_PADDING,
+          left: -GLOW_PADDING,
+          width: canvasWidth + GLOW_PADDING * 2,
+          height: height + GLOW_PADDING * 2,
+        }}
+      >
+        {glow > 0.01 ? (
+          <Path
+            path={path}
+            style="stroke"
+            strokeWidth={barWidth + 14}
+            strokeCap="round"
+            opacity={glow * 0.55}
+          >
+            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={neonPalette} />
+            <BlurMask blur={24} style="normal" />
+          </Path>
+        ) : null}
+
+        {glow > 0.01 ? (
+          <Path
+            path={path}
+            style="stroke"
+            strokeWidth={barWidth + 6}
+            strokeCap="round"
+            opacity={glow * 0.85}
+          >
+            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={neonPalette} />
+            <BlurMask blur={10} style="normal" />
+          </Path>
+        ) : null}
+
+        <Path
+          path={path}
+          style="stroke"
+          strokeWidth={barWidth}
+          strokeCap="round"
+          opacity={isActive ? 0.35 + glow * 0.5 : 0.15}
+        >
+          <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={baseColors} />
+        </Path>
+
+        {glow > 0.05 ? (
+          <Path
+            path={path}
+            style="stroke"
+            strokeWidth={barWidth * 0.4}
+            strokeCap="round"
+            opacity={glow * 0.95}
+          >
+            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={hotCorePalette} />
+          </Path>
+        ) : null}
+      </Canvas>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    width: '100%',
+    position: 'relative',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 4,
+    overflow: 'visible',
+  },
+  centerLine: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    height: 1,
+    backgroundColor: '#16161A',
+    zIndex: -1,
+  },
+});
+
+
+================================================================================
+FILE: src/components/studio/StudioTimer.tsx
+================================================================================
+// src/components/studio/StudioTimer.tsx
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
+import { EngineState } from '../../services/audio/useAudioRecording';
+
+interface StudioTimerProps {
+  telemetry: React.MutableRefObject<{
+    durationMs: number;
+    startTime: number;
+    accumulatedMs: number;
+    isPaused: boolean;
+  }>;
+  engineState: EngineState;
+  isTablet?: boolean;
+}
+
+export const StudioTimer: React.FC<StudioTimerProps> = ({
+  telemetry,
+  engineState,
+  isTablet = false,
+}) => {
+  const [displayMs, setDisplayMs] = useState(0);
+
+  useEffect(() => {
+    let frameId: number;
+
+    const tick = () => {
+      if (telemetry.current.isPaused || engineState === 'PAUSED') {
+        return;
+      }
+
+      if (engineState === 'RECORDING') {
+        const currentSegment = Date.now() - telemetry.current.startTime;
+        const total = telemetry.current.accumulatedMs + Math.max(0, currentSegment);
+        telemetry.current.durationMs = total;
+        setDisplayMs(total);
+        frameId = requestAnimationFrame(tick);
+      }
+    };
+
+    if (engineState === 'RECORDING' && !telemetry.current.isPaused) {
+      frameId = requestAnimationFrame(tick);
+    } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
+      setDisplayMs(0);
+    }
+
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [engineState, telemetry]);
+
+  const totalSeconds = Math.floor(displayMs / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  const centis = Math.floor((displayMs % 1000) / 10);
+
+  const mainTime = hrs > 0
+    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+
+  const frameTime = '.' + centis.toString().padStart(2, '0');
+
+  return (
+    <View style={styles.container}>
+      <Text
+        style={[styles.timerMain, isTablet ? styles.timerMainTablet : null]}
+        adjustsFontSizeToFit
+        numberOfLines={1}
+      >{mainTime}</Text>
+      <Text style={[styles.timerFrames, isTablet ? styles.timerFramesTablet : null]}>{frameTime}</Text>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    marginTop: 4,
+    marginBottom: 2,
+    flexShrink: 1,
+  },
+  timerMain: {
+    fontSize: 44,
+    fontWeight: '200',
+    color: '#FFFFFF',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: -1.0,
+  },
+  timerMainTablet: {
+    fontSize: 64,
+  },
+  timerFrames: {
+    fontSize: 17,
+    fontWeight: '300',
+    color: '#71717A',
+    fontVariant: ['tabular-nums'],
+    marginLeft: 2,
+  },
+  timerFramesTablet: {
+    fontSize: 24,
   },
 });
 
@@ -2451,7 +2592,7 @@ const styles = StyleSheet.create({
 FILE: src/components/prompter/PrompterEditModal.tsx
 ================================================================================
 // src/components/prompter/PrompterEditModal.tsx
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Modal,
   View,
@@ -2459,11 +2600,27 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
+  ScrollView,
+  Keyboard,
+  GestureResponderEvent,
+  LayoutRectangle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { X, Check } from 'lucide-react-native';
+import Animated, {
+  FadeInDown,
+  FadeOutUp,
+  Easing,
+} from 'react-native-reanimated';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import {
+  X,
+  Check,
+  Pencil,
+  FileUp,
+  AlertCircle,
+} from 'lucide-react-native';
 
 import { useResponsive } from '../../hooks/useResponsive';
 
@@ -2474,6 +2631,11 @@ interface PrompterEditModalProps {
   onClose: () => void;
 }
 
+interface BannerToast {
+  type: 'error' | 'success';
+  message: string;
+}
+
 export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
   visible,
   initialScript,
@@ -2482,43 +2644,342 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
 }) => {
   const { isTablet } = useResponsive();
   const [text, setText] = useState(initialScript);
+  const [savedBaseline, setSavedBaseline] = useState(initialScript);
+  const [isEditing, setIsEditing] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [toast, setToast] = useState<BannerToast | null>(null);
+
+  const textRef = useRef(initialScript);
+  const prevVisibleRef = useRef(false);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const inputRef = useRef<TextInput | null>(null);
+  const isSavingRef = useRef(false);
+
+  // Layout rectangles for hit-testing touches outside the input
+  const headerRightLayoutRef = useRef<LayoutRectangle | null>(null);
+  const cancelBtnLayoutRef = useRef<LayoutRectangle | null>(null);
+  const saveBtnLayoutRef = useRef<LayoutRectangle | null>(null);
+
+  useEffect(() => {
+    if (visible && !prevVisibleRef.current) {
+      setText(initialScript);
+      textRef.current = initialScript;
+      setSavedBaseline(initialScript);
+      setIsEditing(false);
+      setToast(null);
+      setKeyboardHeight(0);
+    }
+    prevVisibleRef.current = visible;
+  }, [visible, initialScript]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates?.height || 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  const showToast = (type: 'error' | 'success', message: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ type, message });
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+    }, 3000);
+  };
+
+  const handleTextChange = (val: string) => {
+    textRef.current = val;
+    setText(val);
+  };
+
+  const handleStartEditing = () => {
+    setIsEditing(true);
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 80);
+  };
+
+  const handleCancelEditing = () => {
+    Keyboard.dismiss();
+    inputRef.current?.blur();
+    textRef.current = savedBaseline;
+    setText(savedBaseline);
+    setIsEditing(false);
+  };
 
   const handleSave = () => {
-    onSave(text);
-    onClose();
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+
+    const trimmed = textRef.current.trim();
+    if (trimmed.length === 0) {
+      showToast('error', 'Script cannot be blank');
+      isSavingRef.current = false;
+      return;
+    }
+
+    Keyboard.dismiss();
+    inputRef.current?.blur();
+
+    setText(trimmed);
+    setSavedBaseline(trimmed);
+    onSave(trimmed);
+    setIsEditing(false);
+    showToast('success', 'Changes saved');
+
+    setTimeout(() => {
+      isSavingRef.current = false;
+    }, 400);
   };
+
+  // Direct hit-test interceptor on the TopBar
+  const handleTopBarTouchStart = (e: GestureResponderEvent) => {
+    if (!isEditing) return;
+
+    const { locationX } = e.nativeEvent;
+    const headerRight = headerRightLayoutRef.current;
+    const saveLayout = saveBtnLayoutRef.current;
+    const cancelLayout = cancelBtnLayoutRef.current;
+
+    if (headerRight && saveLayout) {
+      const saveLeftInTopBar = headerRight.x + saveLayout.x;
+      const saveRightInTopBar = saveLeftInTopBar + saveLayout.width;
+
+      if (locationX >= saveLeftInTopBar - 10 && locationX <= saveRightInTopBar + 10) {
+        handleSave();
+        return;
+      }
+    }
+
+    if (headerRight && cancelLayout) {
+      const cancelLeftInTopBar = headerRight.x + cancelLayout.x;
+      const cancelRightInTopBar = cancelLeftInTopBar + cancelLayout.width;
+
+      if (locationX >= cancelLeftInTopBar - 10 && locationX <= cancelRightInTopBar + 10) {
+        handleCancelEditing();
+        return;
+      }
+    }
+  };
+
+  const handleImportFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['text/plain', 'text/*', 'application/octet-stream'],
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled || !result.assets || result.assets.length === 0) return;
+
+      const file = result.assets[0];
+      const fileName = file.name || 'document.txt';
+
+      const isTxt = fileName.toLowerCase().endsWith('.txt') || file.mimeType === 'text/plain';
+      if (!isTxt) {
+        showToast('error', 'Select a plain .txt file');
+        return;
+      }
+
+      const content = await FileSystem.readAsStringAsync(file.uri);
+      const cleanContent = content.trim();
+
+      if (cleanContent.length === 0) {
+        showToast('error', 'Selected file is empty');
+        return;
+      }
+
+      textRef.current = cleanContent;
+      setText(cleanContent);
+      setSavedBaseline(cleanContent);
+      onSave(cleanContent);
+      setIsEditing(false);
+      showToast('success', 'Changes saved');
+    } catch (err: any) {
+      showToast('error', err?.message || 'Failed to read file');
+    }
+  };
+
+  const words = text.trim().length > 0 ? text.trim().split(/\s+/).length : 0;
+  const chars = text.length;
+  const readTimeMinutes = Math.max(1, Math.round(words / 130));
 
   const cardContent = (
     <View style={[styles.dialogCard, isTablet && styles.dialogCardTablet]}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.keyboardView}
+      {/* 
+        Top Header Bar: 
+        Left-Aligned Title, Synchronous Touch-Interception for Save & Cancel 
+      */}
+      <View
+        style={styles.topBar}
+        onTouchStart={handleTopBarTouchStart}
       >
-        <View style={styles.topBar}>
-          <TouchableOpacity style={styles.btnSecondary} onPress={onClose} activeOpacity={0.7}>
-            <X size={15} color="#8E8E93" />
-            <Text style={styles.btnSecondaryText}>CANCEL</Text>
-          </TouchableOpacity>
-
-          <Text style={styles.title}>Teleprompter Script</Text>
-
-          <TouchableOpacity style={styles.btnPrimary} onPress={handleSave} activeOpacity={0.8}>
-            <Check size={14} color="#000000" />
-            <Text style={styles.btnPrimaryText}>SAVE</Text>
-          </TouchableOpacity>
+        <View style={styles.headerLeft}>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {isEditing ? 'Edit Script' : 'Script'}
+          </Text>
         </View>
 
-        <TextInput
-          style={styles.textInput}
-          multiline
-          textAlignVertical="top"
-          value={text}
-          onChangeText={setText}
-          placeholder="Paste or type your recording script here..."
-          placeholderTextColor="#48484A"
-          autoFocus
-        />
-      </KeyboardAvoidingView>
+        <View
+          style={styles.headerRight}
+          onLayout={(e) => {
+            headerRightLayoutRef.current = e.nativeEvent.layout;
+          }}
+        >
+          {isEditing ? (
+            <>
+              {/* Cancel Button with direct touch detection */}
+              <View
+                onLayout={(e) => {
+                  cancelBtnLayoutRef.current = e.nativeEvent.layout;
+                }}
+                onTouchStart={handleCancelEditing}
+              >
+                <TouchableOpacity
+                  style={styles.cancelBtn}
+                  onPress={handleCancelEditing}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 12, bottom: 12, left: 8, right: 8 }}
+                >
+                  <Text style={styles.cancelBtnText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Save Button with direct touch detection */}
+              <View
+                onLayout={(e) => {
+                  saveBtnLayoutRef.current = e.nativeEvent.layout;
+                }}
+                onTouchStart={handleSave}
+              >
+                <TouchableOpacity
+                  style={styles.saveBtn}
+                  onPress={handleSave}
+                  activeOpacity={0.8}
+                  hitSlop={{ top: 12, bottom: 12, left: 8, right: 8 }}
+                >
+                  <Check size={13} color="#000000" strokeWidth={3} />
+                  <Text style={styles.saveBtnText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <>
+              <TouchableOpacity
+                style={styles.importPill}
+                onPress={handleImportFile}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+              >
+                <FileUp size={12} color="#A1A1AA" />
+                <Text style={styles.importPillText}>Import .txt</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.editBtn}
+                onPress={handleStartEditing}
+                activeOpacity={0.8}
+                hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+              >
+                <Pencil size={11} color="#000000" strokeWidth={2.5} />
+                <Text style={styles.editBtnText}>Edit</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.closeBtn}
+                onPress={onClose}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <X size={15} color="#A1A1AA" />
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+      </View>
+
+      {/* Floating Save Toast Notification: Matching the Take Saved layout */}
+      {toast ? (
+        <View style={styles.toastOverlay} pointerEvents="none">
+          <Animated.View
+            entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))}
+            exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))}
+            style={styles.toastCard}
+          >
+            <View
+              style={[
+                styles.toastIconCircle,
+                toast.type === 'error' && styles.toastIconCircleError,
+              ]}
+            >
+              {toast.type === 'error' ? (
+                <AlertCircle size={14} color="#FFFFFF" strokeWidth={2.5} />
+              ) : (
+                <Check size={14} color="#000000" strokeWidth={3} />
+              )}
+            </View>
+            <Text style={styles.toastSingleText}>{toast.message}</Text>
+          </Animated.View>
+        </View>
+      ) : null}
+
+      {/* Workspace Area */}
+      {isEditing ? (
+        <ScrollView
+          style={styles.scrollArea}
+          contentContainerStyle={[
+            styles.editorScrollContent,
+            { paddingBottom: keyboardHeight > 0 ? keyboardHeight + 80 : 80 },
+          ]}
+          keyboardShouldPersistTaps="always"
+          showsVerticalScrollIndicator={true}
+        >
+          <TextInput
+            ref={inputRef}
+            style={styles.editorInput}
+            multiline={true}
+            scrollEnabled={false}
+            textAlignVertical="top"
+            value={text}
+            onChangeText={handleTextChange}
+            placeholder="Paste or type your script here..."
+            placeholderTextColor="#3F3F46"
+          />
+        </ScrollView>
+      ) : (
+        <View style={styles.viewerWrapper}>
+          <ScrollView
+            style={styles.scrollArea}
+            contentContainerStyle={styles.viewerScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <Text selectable={true} style={styles.viewerText}>
+              {text}
+            </Text>
+          </ScrollView>
+
+          <View style={styles.telemetryFooter}>
+            <Text style={styles.telemetryText}>
+              {words} {words === 1 ? 'word' : 'words'} • {chars} chars • ~{readTimeMinutes} min read
+            </Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 
@@ -2528,10 +2989,16 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
       animationType={isTablet ? 'fade' : 'slide'}
       presentationStyle={isTablet ? 'overFullScreen' : 'pageSheet'}
       transparent={isTablet}
-      onRequestClose={onClose}
+      statusBarTranslucent={true}
+      onRequestClose={isEditing ? handleCancelEditing : onClose}
     >
       {isTablet ? (
-        <View style={styles.backdrop}>
+        <View
+          style={[
+            styles.backdrop,
+            keyboardHeight > 0 && { justifyContent: 'flex-start', paddingTop: 36 },
+          ]}
+        >
           <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={onClose} />
           {cardContent}
         </View>
@@ -2554,75 +3021,225 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: 20,
   },
   dialogCard: {
     flex: 1,
     width: '100%',
-    backgroundColor: '#0F0F0F',
+    backgroundColor: '#09090C',
   },
   dialogCardTablet: {
     flex: 0,
     width: '100%',
-    maxWidth: 680,
-    height: '75%',
+    maxWidth: 620,
+    height: '80%',
     borderRadius: 24,
     borderWidth: 1,
-    borderColor: '#262626',
+    borderColor: '#1C1C22',
     overflow: 'hidden',
   },
-  keyboardView: {
-    flex: 1,
-  },
+
+  /* Fixed 54dp Header with Left-Aligned Title */
   topBar: {
+    height: 54,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1F1F1F',
+    paddingHorizontal: 18,
+    backgroundColor: '#09090C',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#18181D',
+    zIndex: 10,
   },
-  title: {
+  headerLeft: {
+    flex: 1,
+    height: 34,
+    justifyContent: 'center',
+    alignItems: 'flex-start',
+  },
+  headerTitle: {
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '700',
+    letterSpacing: -0.3,
+    includeFontPadding: false,
   },
-  btnSecondary: {
+  headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    gap: 8,
+    height: 34,
   },
-  btnSecondaryText: {
-    color: '#8E8E93',
+
+  /* Matched 34dp Height Controls (Zero Vertical Baseline Offset) */
+  closeBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#141418',
+    borderWidth: 1,
+    borderColor: '#202026',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelBtn: {
+    height: 34,
+    paddingHorizontal: 12,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  cancelBtnText: {
+    color: '#A1A1AA',
     fontSize: 12,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    includeFontPadding: false,
   },
-  btnPrimary: {
+  saveBtn: {
+    height: 34,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 5,
     backgroundColor: '#FFFFFF',
     paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: 14,
+    borderRadius: 17,
   },
-  btnPrimaryText: {
+  saveBtnText: {
     color: '#000000',
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.1,
+    includeFontPadding: false,
   },
-  textInput: {
+  importPill: {
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  importPillText: {
+    color: '#D4D4D8',
+    fontSize: 11,
+    fontWeight: '500',
+    letterSpacing: 0.1,
+    includeFontPadding: false,
+  },
+  editBtn: {
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 13,
+    borderRadius: 17,
+  },
+  editBtnText: {
+    color: '#000000',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.1,
+    includeFontPadding: false,
+  },
+
+  /* Floating Toast Notification (Take Saved Style) */
+  toastOverlay: {
+    position: 'absolute',
+    top: 68,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 9999,
+    elevation: 99,
+  },
+  toastCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#18181B',
+    borderWidth: 1,
+    borderColor: '#27272A',
+    borderRadius: 30,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    gap: 10,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  toastIconCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#10B981',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  toastIconCircleError: {
+    backgroundColor: '#EF4444',
+  },
+  toastSingleText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.1,
+  },
+
+  /* Content & Editor Regions */
+  scrollArea: {
     flex: 1,
-    color: '#F2F2F7',
+  },
+  editorScrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+  },
+  editorInput: {
+    color: '#FFFFFF',
     fontSize: 16,
-    lineHeight: 24,
-    padding: 20,
-    backgroundColor: '#121212',
+    lineHeight: 26,
+    letterSpacing: 0.2,
+    fontWeight: '400',
+    minHeight: 220,
+    padding: 0,
+  },
+  viewerWrapper: {
+    flex: 1,
+  },
+  viewerScrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 40,
+  },
+  viewerText: {
+    color: '#F4F4F5',
+    fontSize: 16,
+    lineHeight: 26,
+    letterSpacing: 0.2,
+    fontWeight: '400',
+  },
+
+  /* Telemetry Footer */
+  telemetryFooter: {
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#141418',
+    backgroundColor: '#070709',
+    alignItems: 'flex-end',
+  },
+  telemetryText: {
+    color: '#71717A',
+    fontSize: 10,
+    fontWeight: '500',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.2,
   },
 });
 
@@ -2666,7 +3283,7 @@ export interface TeleprompterDeckProps {
   customHeight?: number;
 }
 
-const EYELINE_OFFSET = 36;
+const EYELINE_OFFSET = 38;
 
 export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   engineState,
@@ -2786,88 +3403,83 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 
   return (
     <View style={styles.deckContainer}>
-      {/* Action Toolbar: Evenly Spaced Script, Mirror, Reset */}
-      <View style={styles.actionToolbar}>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => setEditModalVisible(true)}
-          activeOpacity={0.7}
-        >
-          <FileText size={13} color="#FFFFFF" />
-          <Text style={styles.actionBtnText}>SCRIPT</Text>
-        </TouchableOpacity>
+      {/* Sleek Minimalist Control Strip */}
+      <View style={styles.controlStrip}>
+        {/* Left Actions */}
+        <View style={styles.leftButtonGroup}>
+          <TouchableOpacity
+            style={styles.pillBtn}
+            onPress={() => setEditModalVisible(true)}
+            activeOpacity={0.6}
+          >
+            <FileText size={11} color="#8E8E93" />
+            <Text style={styles.pillBtnText}>Script</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.actionBtn, isMirrored && styles.actionBtnActive]}
-          onPress={handleToggleMirror}
-          activeOpacity={0.7}
-        >
-          <FlipHorizontal size={13} color={isMirrored ? '#000000' : '#FFFFFF'} />
-          <Text style={[styles.actionBtnText, isMirrored && styles.actionBtnTextActive]}>
-            MIRROR
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.pillBtn, isMirrored && styles.pillBtnActive]}
+            onPress={handleToggleMirror}
+            activeOpacity={0.6}
+          >
+            <FlipHorizontal size={11} color={isMirrored ? '#FFFFFF' : '#8E8E93'} />
+            <Text style={[styles.pillBtnText, isMirrored && styles.pillBtnTextActive]}>
+              Mirror
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={handleReset}
-          activeOpacity={0.7}
-        >
-          <RotateCcw size={13} color="#FFFFFF" />
-          <Text style={styles.actionBtnText}>RESET</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Adjusters Toolbar: Evenly Spaced Size & Speed Steppers */}
-      <View style={styles.stepperToolbar}>
-        {/* Size Stepper */}
-        <View style={styles.stepperItem}>
-          <View style={styles.stepperLabelGroup}>
-            <Type size={13} color="#8E8E93" />
-            <Text style={styles.stepperLabel}>SIZE</Text>
-          </View>
-          <View style={styles.stepperControls}>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeFontSize(-2)}
-              activeOpacity={0.7}
-            >
-              <Minus size={12} color="#FFFFFF" />
-            </TouchableOpacity>
-            <Text style={styles.stepperValue}>{fontSize}</Text>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeFontSize(2)}
-              activeOpacity={0.7}
-            >
-              <Plus size={12} color="#FFFFFF" />
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity
+            style={styles.iconOnlyBtn}
+            onPress={handleReset}
+            activeOpacity={0.6}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <RotateCcw size={12} color="#8E8E93" />
+          </TouchableOpacity>
         </View>
 
-        <View style={styles.stepperDivider} />
-
-        {/* Speed Stepper */}
-        <View style={styles.stepperItem}>
-          <View style={styles.stepperLabelGroup}>
-            <Gauge size={13} color="#8E8E93" />
-            <Text style={styles.stepperLabel}>SPEED</Text>
-          </View>
-          <View style={styles.stepperControls}>
+        {/* Right Steppers */}
+        <View style={styles.rightStepperGroup}>
+          {/* Font Size Stepper */}
+          <View style={styles.stepperPill}>
+            <Type size={11} color="#71717A" />
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeSpeed(-5)}
-              activeOpacity={0.7}
+              style={styles.stepperTouch}
+              onPress={() => changeFontSize(-2)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             >
-              <Minus size={12} color="#FFFFFF" />
+              <Minus size={9} color="#A1A1AA" />
             </TouchableOpacity>
-            <Text style={styles.stepperValue}>{speed}</Text>
+            <Text style={styles.stepperVal}>{fontSize}</Text>
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeSpeed(5)}
-              activeOpacity={0.7}
+              style={styles.stepperTouch}
+              onPress={() => changeFontSize(2)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             >
-              <Plus size={12} color="#FFFFFF" />
+              <Plus size={9} color="#A1A1AA" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Speed Stepper */}
+          <View style={styles.stepperPill}>
+            <Gauge size={11} color="#71717A" />
+            <TouchableOpacity
+              style={styles.stepperTouch}
+              onPress={() => changeSpeed(-5)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            >
+              <Minus size={9} color="#A1A1AA" />
+            </TouchableOpacity>
+            <Text style={styles.stepperVal}>{speed}</Text>
+            <TouchableOpacity
+              style={styles.stepperTouch}
+              onPress={() => changeSpeed(5)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            >
+              <Plus size={9} color="#A1A1AA" />
             </TouchableOpacity>
           </View>
         </View>
@@ -2881,14 +3493,14 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
         }}
         {...panResponder.panHandlers}
       >
-        {/* Optical Reading Eye-line Cue in Crisp White */}
+        {/* Subtle Studio Laser Reading Cue */}
         <View pointerEvents="none" style={styles.eyelineGuide}>
-          <View style={styles.eyelineArrowLeft} />
+          <View style={styles.eyelineDot} />
           <View style={styles.eyelineLine} />
-          <View style={styles.eyelineArrowRight} />
+          <View style={styles.eyelineDot} />
         </View>
 
-        {/* Animated Text Core */}
+        {/* Animated Text */}
         <Animated.View
           style={[styles.textWrapper, animatedStyle]}
           onLayout={(e: LayoutChangeEvent) => {
@@ -2898,7 +3510,7 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
           <Text
             style={[
               styles.prompterText,
-              { fontSize, lineHeight: Math.round(fontSize * 1.5) },
+              { fontSize, lineHeight: Math.round(fontSize * 1.55) },
             ]}
           >
             {script}
@@ -2906,7 +3518,6 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
         </Animated.View>
       </View>
 
-      {/* Script Editor Modal */}
       <PrompterEditModal
         visible={editModalVisible}
         initialScript={script}
@@ -2920,106 +3531,87 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 const styles = StyleSheet.create({
   deckContainer: {
     width: '100%',
-    backgroundColor: '#121212',
-    borderRadius: 16,
+    backgroundColor: '#09090B',
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#242424',
+    borderColor: '#18181B',
     overflow: 'hidden',
-    marginBottom: 8,
   },
-  actionToolbar: {
+  controlStrip: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#161616',
-    borderBottomWidth: 1,
-    borderBottomColor: '#242424',
-    gap: 8,
-  },
-  actionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#202020',
-    paddingVertical: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2C2C2C',
-  },
-  actionBtnActive: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#FFFFFF',
-  },
-  actionBtnText: {
-    color: '#F2F2F7',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  actionBtnTextActive: {
-    color: '#000000',
-  },
-  stepperToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
     paddingVertical: 8,
-    backgroundColor: '#141414',
-    borderBottomWidth: 1,
-    borderBottomColor: '#242424',
+    backgroundColor: '#0C0C0E',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#18181C',
   },
-  stepperItem: {
-    flex: 1,
+  leftButtonGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 6,
+    gap: 6,
   },
-  stepperDivider: {
-    width: 1,
-    height: 20,
-    backgroundColor: '#262626',
-    marginHorizontal: 8,
+  rightStepperGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
-  stepperLabelGroup: {
+  pillBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
   },
-  stepperLabel: {
+  pillBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  pillBtnText: {
     color: '#8E8E93',
-    fontSize: 11,
+    fontSize: 10,
+    fontWeight: '500',
+    letterSpacing: 0.2,
+  },
+  pillBtnTextActive: {
+    color: '#FFFFFF',
     fontWeight: '600',
-    letterSpacing: 0.5,
   },
-  stepperControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  stepperBtn: {
+  iconOnlyBtn: {
     width: 24,
     height: 24,
-    backgroundColor: '#242424',
-    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+  },
+  stepperPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    gap: 3,
+  },
+  stepperTouch: {
+    width: 18,
+    height: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepperValue: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
+  stepperVal: {
+    color: '#E4E4E7',
+    fontSize: 10,
+    fontWeight: '600',
     fontVariant: ['tabular-nums'],
-    minWidth: 20,
+    minWidth: 16,
     textAlign: 'center',
   },
   viewport: {
-    backgroundColor: '#080808',
+    backgroundColor: '#060608',
     overflow: 'hidden',
     position: 'relative',
     justifyContent: 'flex-start',
@@ -3032,42 +3624,31 @@ const styles = StyleSheet.create({
     zIndex: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    opacity: 0.5,
+    paddingHorizontal: 10,
+    gap: 4,
+    opacity: 0.35,
   },
-  eyelineArrowLeft: {
-    width: 0,
-    height: 0,
-    borderTopWidth: 5,
-    borderBottomWidth: 5,
-    borderLeftWidth: 8,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderLeftColor: '#FFFFFF',
+  eyelineDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#38BDF8',
   },
   eyelineLine: {
     flex: 1,
     height: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  eyelineArrowRight: {
-    width: 0,
-    height: 0,
-    borderTopWidth: 5,
-    borderBottomWidth: 5,
-    borderRightWidth: 8,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderRightColor: '#FFFFFF',
+    backgroundColor: '#38BDF8',
   },
   textWrapper: {
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingTop: EYELINE_OFFSET,
     paddingBottom: 48,
   },
   prompterText: {
-    color: '#F2F2F7',
+    color: '#E4E4E7',
     fontWeight: '400',
     textAlign: 'center',
+    letterSpacing: 0.2,
   },
 });
 
@@ -4075,7 +4656,7 @@ const styles = StyleSheet.create({
 FILE: src/components/audio/SaveRecordingModal.tsx
 ================================================================================
 // src/components/audio/SaveRecordingModal.tsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Modal,
   View,
@@ -4085,9 +4666,10 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  TouchableWithoutFeedback,
+  Keyboard,
 } from 'react-native';
-import { FileAudio, Check, X, Trash2 } from 'lucide-react-native';
-import { useResponsive } from '../../hooks/useResponsive';
+import { Trash2, Check, Music2 } from 'lucide-react-native';
 
 interface SaveRecordingModalProps {
   visible: boolean;
@@ -4095,7 +4677,7 @@ interface SaveRecordingModalProps {
   durationMs: number;
   sizeBytes: number;
   formatBadge: string;
-  onSubmit: (finalName: string) => void;
+  onSubmit: (chosenName: string) => void;
   onDiscard: () => void;
 }
 
@@ -4108,31 +4690,43 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   onSubmit,
   onDiscard,
 }) => {
-  const { isTablet } = useResponsive();
   const [name, setName] = useState(defaultName);
+  const inputRef = useRef<TextInput | null>(null);
 
   useEffect(() => {
     if (visible) {
       setName(defaultName);
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 120);
     }
   }, [visible, defaultName]);
 
-  const formatSecs = (ms: number): string => {
-    const totalSecs = Math.floor(ms / 1000);
-    const mins = Math.floor(totalSecs / 60);
-    const secs = totalSecs % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const formatDuration = (ms: number) => {
+    const totalSeconds = Math.floor(ms / 1000);
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    const centis = Math.floor((ms % 1000) / 10);
+    return `${mins.toString().padStart(2, '0')}:${secs
+      .toString()
+      .padStart(2, '0')}.${centis.toString().padStart(2, '0')}`;
   };
 
-  const formatFileSize = (bytes: number): string => {
-    if (bytes <= 0) return '0 KB';
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
-  const handleSubmit = () => {
-    const trimmed = name.trim();
-    onSubmit(trimmed.length > 0 ? trimmed : defaultName);
+  const handleSave = () => {
+    Keyboard.dismiss();
+    onSubmit(name.trim().length > 0 ? name.trim() : defaultName);
+  };
+
+  const handleDiscard = () => {
+    Keyboard.dismiss();
+    onDiscard();
   };
 
   return (
@@ -4140,74 +4734,69 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onDiscard}
+      statusBarTranslucent
+      onRequestClose={handleDiscard}
     >
-      <View style={styles.backdrop}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.avoidingView}
-        >
-          <View style={[styles.card, isTablet && styles.cardTablet]}>
-            {/* Header Icon & Title */}
-            <View style={styles.headerRow}>
-              <View style={styles.iconCircle}>
-                <FileAudio size={20} color="#FFFFFF" />
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.backdrop}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={styles.keyboardAvoid}
+          >
+            <View style={styles.card}>
+              {/* Header Icon & Title */}
+              <View style={styles.headerRow}>
+                <View style={styles.iconCircle}>
+                  <Music2 size={16} color="#FFFFFF" strokeWidth={2} />
+                </View>
+                <View style={styles.headerTextGroup}>
+                  <Text style={styles.title}>Save Take</Text>
+                  <Text style={styles.subtitle}>
+                    {formatDuration(durationMs)} • {formatSize(sizeBytes)} • {formatBadge}
+                  </Text>
+                </View>
               </View>
-              <View style={styles.headerTextCol}>
-                <Text style={styles.title}>Save Recording</Text>
-                <Text style={styles.metaText}>
-                  {formatBadge} • {formatSecs(durationMs)} • {formatFileSize(sizeBytes)}
-                </Text>
-              </View>
-            </View>
 
-            {/* Input Field with Clear Button */}
-            <View style={styles.inputWrapper}>
-              <TextInput
-                style={styles.input}
-                value={name}
-                onChangeText={setName}
-                placeholder="Name your take..."
-                placeholderTextColor="#636366"
-                autoFocus
-                selectTextOnFocus
-                returnKeyType="done"
-                onSubmitEditing={handleSubmit}
-              />
-              {name.length > 0 && (
+              {/* Name Input Field */}
+              <View style={styles.inputWrapper}>
+                <Text style={styles.inputLabel}>TAKE NAME</Text>
+                <TextInput
+                  ref={inputRef}
+                  style={styles.input}
+                  value={name}
+                  onChangeText={setName}
+                  placeholder={defaultName}
+                  placeholderTextColor="#52525B"
+                  selectTextOnFocus
+                  returnKeyType="done"
+                  onSubmitEditing={handleSave}
+                />
+              </View>
+
+              {/* Action Buttons Row: Discard on Left, Save on Right */}
+              <View style={styles.actionRow}>
                 <TouchableOpacity
-                  style={styles.clearBtn}
-                  onPress={() => setName('')}
+                  style={styles.discardBtn}
+                  onPress={handleDiscard}
                   activeOpacity={0.7}
                 >
-                  <X size={14} color="#8E8E93" />
+                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                  <Text style={styles.discardBtnText}>Discard</Text>
                 </TouchableOpacity>
-              )}
-            </View>
 
-            {/* Actions: Discard vs Save */}
-            <View style={styles.actionsRow}>
-              <TouchableOpacity
-                style={styles.discardBtn}
-                onPress={onDiscard}
-                activeOpacity={0.7}
-              >
-                <Trash2 size={14} color="#FF453A" />
-                <Text style={styles.discardBtnText}>DISCARD</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.primaryBtn}
-                onPress={handleSubmit}
-                activeOpacity={0.8}
-              >
-                <Check size={16} color="#000000" strokeWidth={2.5} />
-                <Text style={styles.primaryBtnText}>SAVE</Text>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.saveBtn}
+                  onPress={handleSave}
+                  activeOpacity={0.8}
+                >
+                  <Check size={14} color="#000000" strokeWidth={3} />
+                  <Text style={styles.saveBtnText}>Save</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-        </KeyboardAvoidingView>
-      </View>
+          </KeyboardAvoidingView>
+        </View>
+      </TouchableWithoutFeedback>
     </Modal>
   );
 };
@@ -4215,129 +4804,124 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    paddingHorizontal: 24,
   },
-  avoidingView: {
+  keyboardAvoid: {
     width: '100%',
     alignItems: 'center',
-    justifyContent: 'center',
   },
   card: {
     width: '100%',
-    maxWidth: 420,
-    backgroundColor: '#141416',
-    borderRadius: 24,
+    maxWidth: 380,
+    backgroundColor: '#121215',
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: '#262628',
-    padding: 22,
+    borderColor: '#222228',
+    padding: 20,
     shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 18,
-    elevation: 16,
-  },
-  cardTablet: {
-    maxWidth: 480,
-    padding: 26,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 12,
   },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
+    gap: 12,
     marginBottom: 18,
   },
   iconCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#1E1E22',
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#1C1C22',
     borderWidth: 1,
-    borderColor: '#2E2E34',
+    borderColor: '#2A2A32',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  headerTextCol: {
+  headerTextGroup: {
     flex: 1,
   },
   title: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
-    letterSpacing: -0.3,
+    letterSpacing: -0.2,
   },
-  metaText: {
+  subtitle: {
     color: '#8E8E93',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '500',
     marginTop: 2,
+    letterSpacing: 0.2,
   },
   inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0C0C0E',
+    backgroundColor: '#09090B',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#26262A',
+    borderColor: '#1C1C22',
     paddingHorizontal: 14,
-    height: 52,
+    paddingTop: 8,
+    paddingBottom: 10,
     marginBottom: 20,
   },
+  inputLabel: {
+    color: '#71717A',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    marginBottom: 4,
+  },
   input: {
-    flex: 1,
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '500',
     padding: 0,
   },
-  clearBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#1E1E22',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 8,
-  },
-  actionsRow: {
+  /* Action Buttons Spaced to the Left & Right */
+  actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 10,
+    justifyContent: 'space-between',
+    gap: 12,
   },
   discardBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    backgroundColor: '#211212',
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
     borderWidth: 1,
-    borderColor: '#381C1C',
+    borderColor: 'rgba(239, 68, 68, 0.22)',
   },
   discardBtnText: {
-    color: '#FF453A',
+    color: '#EF4444',
     fontSize: 13,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
   },
-  primaryBtn: {
+  saveBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 22,
-    borderRadius: 14,
+    height: 42,
+    borderRadius: 21,
     backgroundColor: '#FFFFFF',
   },
-  primaryBtnText: {
+  saveBtnText: {
     color: '#000000',
     fontSize: 13,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
   },
 });
 
