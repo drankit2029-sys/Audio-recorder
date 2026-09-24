@@ -34,7 +34,7 @@ export interface TeleprompterDeckProps {
   customHeight?: number;
 }
 
-const EYELINE_OFFSET = 36;
+const EYELINE_OFFSET = 38;
 
 export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   engineState,
@@ -154,88 +154,83 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 
   return (
     <View style={styles.deckContainer}>
-      {/* Action Toolbar: Evenly Spaced Script, Mirror, Reset */}
-      <View style={styles.actionToolbar}>
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={() => setEditModalVisible(true)}
-          activeOpacity={0.7}
-        >
-          <FileText size={13} color="#FFFFFF" />
-          <Text style={styles.actionBtnText}>SCRIPT</Text>
-        </TouchableOpacity>
+      {/* Sleek Minimalist Control Strip */}
+      <View style={styles.controlStrip}>
+        {/* Left Actions */}
+        <View style={styles.leftButtonGroup}>
+          <TouchableOpacity
+            style={styles.pillBtn}
+            onPress={() => setEditModalVisible(true)}
+            activeOpacity={0.6}
+          >
+            <FileText size={11} color="#8E8E93" />
+            <Text style={styles.pillBtnText}>Script</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={[styles.actionBtn, isMirrored && styles.actionBtnActive]}
-          onPress={handleToggleMirror}
-          activeOpacity={0.7}
-        >
-          <FlipHorizontal size={13} color={isMirrored ? '#000000' : '#FFFFFF'} />
-          <Text style={[styles.actionBtnText, isMirrored && styles.actionBtnTextActive]}>
-            MIRROR
-          </Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.pillBtn, isMirrored && styles.pillBtnActive]}
+            onPress={handleToggleMirror}
+            activeOpacity={0.6}
+          >
+            <FlipHorizontal size={11} color={isMirrored ? '#FFFFFF' : '#8E8E93'} />
+            <Text style={[styles.pillBtnText, isMirrored && styles.pillBtnTextActive]}>
+              Mirror
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.actionBtn}
-          onPress={handleReset}
-          activeOpacity={0.7}
-        >
-          <RotateCcw size={13} color="#FFFFFF" />
-          <Text style={styles.actionBtnText}>RESET</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Adjusters Toolbar: Evenly Spaced Size & Speed Steppers */}
-      <View style={styles.stepperToolbar}>
-        {/* Size Stepper */}
-        <View style={styles.stepperItem}>
-          <View style={styles.stepperLabelGroup}>
-            <Type size={13} color="#8E8E93" />
-            <Text style={styles.stepperLabel}>SIZE</Text>
-          </View>
-          <View style={styles.stepperControls}>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeFontSize(-2)}
-              activeOpacity={0.7}
-            >
-              <Minus size={12} color="#FFFFFF" />
-            </TouchableOpacity>
-            <Text style={styles.stepperValue}>{fontSize}</Text>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeFontSize(2)}
-              activeOpacity={0.7}
-            >
-              <Plus size={12} color="#FFFFFF" />
-            </TouchableOpacity>
-          </View>
+          <TouchableOpacity
+            style={styles.iconOnlyBtn}
+            onPress={handleReset}
+            activeOpacity={0.6}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <RotateCcw size={12} color="#8E8E93" />
+          </TouchableOpacity>
         </View>
 
-        <View style={styles.stepperDivider} />
-
-        {/* Speed Stepper */}
-        <View style={styles.stepperItem}>
-          <View style={styles.stepperLabelGroup}>
-            <Gauge size={13} color="#8E8E93" />
-            <Text style={styles.stepperLabel}>SPEED</Text>
-          </View>
-          <View style={styles.stepperControls}>
+        {/* Right Steppers */}
+        <View style={styles.rightStepperGroup}>
+          {/* Font Size Stepper */}
+          <View style={styles.stepperPill}>
+            <Type size={11} color="#71717A" />
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeSpeed(-5)}
-              activeOpacity={0.7}
+              style={styles.stepperTouch}
+              onPress={() => changeFontSize(-2)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             >
-              <Minus size={12} color="#FFFFFF" />
+              <Minus size={9} color="#A1A1AA" />
             </TouchableOpacity>
-            <Text style={styles.stepperValue}>{speed}</Text>
+            <Text style={styles.stepperVal}>{fontSize}</Text>
             <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={() => changeSpeed(5)}
-              activeOpacity={0.7}
+              style={styles.stepperTouch}
+              onPress={() => changeFontSize(2)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             >
-              <Plus size={12} color="#FFFFFF" />
+              <Plus size={9} color="#A1A1AA" />
+            </TouchableOpacity>
+          </View>
+
+          {/* Speed Stepper */}
+          <View style={styles.stepperPill}>
+            <Gauge size={11} color="#71717A" />
+            <TouchableOpacity
+              style={styles.stepperTouch}
+              onPress={() => changeSpeed(-5)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            >
+              <Minus size={9} color="#A1A1AA" />
+            </TouchableOpacity>
+            <Text style={styles.stepperVal}>{speed}</Text>
+            <TouchableOpacity
+              style={styles.stepperTouch}
+              onPress={() => changeSpeed(5)}
+              activeOpacity={0.5}
+              hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+            >
+              <Plus size={9} color="#A1A1AA" />
             </TouchableOpacity>
           </View>
         </View>
@@ -249,14 +244,14 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
         }}
         {...panResponder.panHandlers}
       >
-        {/* Optical Reading Eye-line Cue in Crisp White */}
+        {/* Subtle Studio Laser Reading Cue */}
         <View pointerEvents="none" style={styles.eyelineGuide}>
-          <View style={styles.eyelineArrowLeft} />
+          <View style={styles.eyelineDot} />
           <View style={styles.eyelineLine} />
-          <View style={styles.eyelineArrowRight} />
+          <View style={styles.eyelineDot} />
         </View>
 
-        {/* Animated Text Core */}
+        {/* Animated Text */}
         <Animated.View
           style={[styles.textWrapper, animatedStyle]}
           onLayout={(e: LayoutChangeEvent) => {
@@ -266,7 +261,7 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
           <Text
             style={[
               styles.prompterText,
-              { fontSize, lineHeight: Math.round(fontSize * 1.5) },
+              { fontSize, lineHeight: Math.round(fontSize * 1.55) },
             ]}
           >
             {script}
@@ -274,7 +269,6 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
         </Animated.View>
       </View>
 
-      {/* Script Editor Modal */}
       <PrompterEditModal
         visible={editModalVisible}
         initialScript={script}
@@ -288,106 +282,87 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 const styles = StyleSheet.create({
   deckContainer: {
     width: '100%',
-    backgroundColor: '#121212',
-    borderRadius: 16,
+    backgroundColor: '#09090B',
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: '#242424',
+    borderColor: '#18181B',
     overflow: 'hidden',
-    marginBottom: 8,
   },
-  actionToolbar: {
+  controlStrip: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#161616',
-    borderBottomWidth: 1,
-    borderBottomColor: '#242424',
-    gap: 8,
-  },
-  actionBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#202020',
-    paddingVertical: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2C2C2C',
-  },
-  actionBtnActive: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#FFFFFF',
-  },
-  actionBtnText: {
-    color: '#F2F2F7',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  actionBtnTextActive: {
-    color: '#000000',
-  },
-  stepperToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
     paddingVertical: 8,
-    backgroundColor: '#141414',
-    borderBottomWidth: 1,
-    borderBottomColor: '#242424',
+    backgroundColor: '#0C0C0E',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#18181C',
   },
-  stepperItem: {
-    flex: 1,
+  leftButtonGroup: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 6,
+    gap: 6,
   },
-  stepperDivider: {
-    width: 1,
-    height: 20,
-    backgroundColor: '#262626',
-    marginHorizontal: 8,
+  rightStepperGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
-  stepperLabelGroup: {
+  pillBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
   },
-  stepperLabel: {
+  pillBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  pillBtnText: {
     color: '#8E8E93',
-    fontSize: 11,
+    fontSize: 10,
+    fontWeight: '500',
+    letterSpacing: 0.2,
+  },
+  pillBtnTextActive: {
+    color: '#FFFFFF',
     fontWeight: '600',
-    letterSpacing: 0.5,
   },
-  stepperControls: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  stepperBtn: {
+  iconOnlyBtn: {
     width: 24,
     height: 24,
-    backgroundColor: '#242424',
-    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.035)',
+  },
+  stepperPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    gap: 3,
+  },
+  stepperTouch: {
+    width: 18,
+    height: 18,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  stepperValue: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
+  stepperVal: {
+    color: '#E4E4E7',
+    fontSize: 10,
+    fontWeight: '600',
     fontVariant: ['tabular-nums'],
-    minWidth: 20,
+    minWidth: 16,
     textAlign: 'center',
   },
   viewport: {
-    backgroundColor: '#080808',
+    backgroundColor: '#060608',
     overflow: 'hidden',
     position: 'relative',
     justifyContent: 'flex-start',
@@ -400,41 +375,30 @@ const styles = StyleSheet.create({
     zIndex: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    opacity: 0.5,
+    paddingHorizontal: 10,
+    gap: 4,
+    opacity: 0.35,
   },
-  eyelineArrowLeft: {
-    width: 0,
-    height: 0,
-    borderTopWidth: 5,
-    borderBottomWidth: 5,
-    borderLeftWidth: 8,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderLeftColor: '#FFFFFF',
+  eyelineDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#38BDF8',
   },
   eyelineLine: {
     flex: 1,
     height: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  eyelineArrowRight: {
-    width: 0,
-    height: 0,
-    borderTopWidth: 5,
-    borderBottomWidth: 5,
-    borderRightWidth: 8,
-    borderTopColor: 'transparent',
-    borderBottomColor: 'transparent',
-    borderRightColor: '#FFFFFF',
+    backgroundColor: '#38BDF8',
   },
   textWrapper: {
-    paddingHorizontal: 18,
+    paddingHorizontal: 20,
     paddingTop: EYELINE_OFFSET,
     paddingBottom: 48,
   },
   prompterText: {
-    color: '#F2F2F7',
+    color: '#E4E4E7',
     fontWeight: '400',
     textAlign: 'center',
+    letterSpacing: 0.2,
   },
 });

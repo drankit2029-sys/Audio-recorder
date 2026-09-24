@@ -1,204 +1,179 @@
 // src/components/meter/AudioMeter.tsx
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, Text, LayoutChangeEvent } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, StyleSheet, Text } from 'react-native';
 import {
   Canvas,
-  Rect,
+  RoundedRect,
   LinearGradient,
   vec,
-  Line,
-  RoundedRect,
+  Rect,
 } from '@shopify/react-native-skia';
 import {
   useSharedValue,
   useDerivedValue,
   withTiming,
   Easing,
+  cancelAnimation,
 } from 'react-native-reanimated';
+import { EngineState } from '../../services/audio/useAudioRecording';
 
 interface AudioMeterProps {
-  meteringDb: number;
-  isRecording: boolean;
+  telemetry: React.MutableRefObject<{ meteringDb: number }>;
+  engineState: EngineState;
 }
 
 const MIN_DB = -60;
 const MAX_DB = 0;
+const DB_TICKS = [0, -6, -12, -18, -24, -36, -48, -60];
 
-export const AudioMeter: React.FC<AudioMeterProps> = ({ meteringDb, isRecording }) => {
-  const [layoutWidth, setLayoutWidth] = useState(260);
-  const barHeight = 14;
+export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }) => {
+  const barWidth = 9;
+  const layoutHeight = 140;
+
+  const [displayPeakDb, setDisplayPeakDb] = useState(-60);
+  const displayPeakDbRef = useRef(-60);
+  const lastTextUpdateRef = useRef(0);
 
   const meterLevel = useSharedValue(0);
-  const peakLevel = useSharedValue(0);
+  const peakHoldLevel = useSharedValue(0);
+  const peakDecayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!isRecording) {
-      meterLevel.value = withTiming(0, { duration: 250 });
-      peakLevel.value = withTiming(0, { duration: 400 });
+    if (engineState === 'IDLE' || engineState === 'STOPPED') {
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+      cancelAnimation(meterLevel);
+      cancelAnimation(peakHoldLevel);
+      meterLevel.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
+      peakHoldLevel.value = withTiming(0, { duration: 300, easing: Easing.out(Easing.quad) });
+      setDisplayPeakDb(-60);
+      displayPeakDbRef.current = -60;
       return;
     }
 
-    const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, meteringDb));
-    const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
-
-    if (targetNorm > meterLevel.value) {
-      meterLevel.value = targetNorm;
-    } else {
-      meterLevel.value = withTiming(targetNorm, {
-        duration: 320,
-        easing: Easing.out(Easing.quad),
-      });
+    if (engineState === 'PAUSED') {
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+      cancelAnimation(meterLevel);
+      cancelAnimation(peakHoldLevel);
+      return; 
     }
 
-    if (targetNorm >= peakLevel.value) {
-      peakLevel.value = targetNorm;
-    } else {
-      peakLevel.value = withTiming(targetNorm, {
-        duration: 1200,
-        easing: Easing.linear,
-      });
-    }
-  }, [meteringDb, isRecording, meterLevel, peakLevel]);
+    let frameId: number;
+    let lastDb = -999;
 
-  const onLayout = (e: LayoutChangeEvent) => {
-    const w = e.nativeEvent.layout.width;
-    if (w > 0) setLayoutWidth(w);
-  };
+    const tick = () => {
+      const rawDb = telemetry.current.meteringDb;
+      if (rawDb !== lastDb) {
+        lastDb = rawDb;
+        const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, rawDb));
+        const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
 
-  const activeWidth = useDerivedValue(() => {
-    return Math.max(0, meterLevel.value * layoutWidth);
-  });
+        meterLevel.value = withTiming(targetNorm, {
+          duration: 35,
+          easing: Easing.linear,
+        });
 
-  const peakX = useDerivedValue(() => {
-    return Math.max(0, Math.min(layoutWidth - 2, peakLevel.value * layoutWidth));
-  });
+        const now = Date.now();
+        if (now - lastTextUpdateRef.current > 120 || clampedDb > displayPeakDbRef.current) {
+          lastTextUpdateRef.current = now;
+          displayPeakDbRef.current = clampedDb;
+          setDisplayPeakDb(clampedDb);
+        }
+
+        if (targetNorm >= peakHoldLevel.value) {
+          if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+          peakHoldLevel.value = targetNorm;
+
+          peakDecayTimeoutRef.current = setTimeout(() => {
+            peakHoldLevel.value = withTiming(0, {
+              duration: 1800,
+              easing: Easing.linear,
+            });
+          }, 900);
+        }
+      }
+      frameId = requestAnimationFrame(tick);
+    };
+
+    frameId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
+    };
+  }, [engineState, telemetry, meterLevel, peakHoldLevel]);
+
+  const activeHeight = useDerivedValue(() => Math.max(0, meterLevel.value * layoutHeight));
+  const activeY = useDerivedValue(() => layoutHeight - activeHeight.value);
+  const peakY = useDerivedValue(() => Math.max(0, layoutHeight - peakHoldLevel.value * layoutHeight - 2));
 
   return (
-    <View style={styles.wrapper}>
-      {/* Header labels */}
-      <View style={styles.labelRow}>
-        <Text style={styles.dbText}>-60</Text>
-        <Text style={styles.dbText}>-24</Text>
-        <Text style={styles.dbText}>-12</Text>
-        <Text style={styles.dbText}>-6</Text>
-        <Text style={styles.dbText}>-3</Text>
-        <Text style={[styles.dbText, styles.clipText]}>0 dBFS</Text>
-      </View>
+    <View style={styles.container}>
+      <View style={[styles.canvasFrame, { width: barWidth, height: layoutHeight }]}>
+        <Canvas style={{ width: barWidth, height: layoutHeight }}>
+          <RoundedRect x={0} y={0} width={barWidth} height={layoutHeight} r={2.5} color="#0D0D10" />
 
-      {/* Skia Metering Canvas */}
-      <View style={[styles.canvasContainer, { height: barHeight }]} onLayout={onLayout}>
-        <Canvas style={{ width: layoutWidth, height: barHeight }}>
-          <RoundedRect
-            x={0}
-            y={0}
-            width={layoutWidth}
-            height={barHeight}
-            r={3}
-            color="#1C1C1E"
-          />
-
-          <RoundedRect
-            x={0}
-            y={0}
-            width={activeWidth}
-            height={barHeight}
-            r={3}
-          >
+          <RoundedRect x={0} y={activeY} width={barWidth} height={activeHeight} r={2.5}>
             <LinearGradient
-              start={vec(0, 0)}
-              end={vec(layoutWidth, 0)}
-              colors={['#30D158', '#FFD60A', '#FF453A']}
-              positions={[0, 0.75, 1.0]}
+              start={vec(0, layoutHeight)}
+              end={vec(0, 0)}
+              colors={['#10B981', '#34D399', '#FBBF24', '#F97316', '#EF4444']}
+              positions={[0, 0.65, 0.78, 0.90, 1.0]}
             />
           </RoundedRect>
 
-          <Line
-            p1={vec(layoutWidth * 0.60, 0)}
-            p2={vec(layoutWidth * 0.60, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-          <Line
-            p1={vec(layoutWidth * 0.80, 0)}
-            p2={vec(layoutWidth * 0.80, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-          <Line
-            p1={vec(layoutWidth * 0.90, 0)}
-            p2={vec(layoutWidth * 0.90, barHeight)}
-            color="#000000"
-            strokeWidth={1}
-          />
-
-          <Rect
-            x={peakX}
-            y={0}
-            width={2}
-            height={barHeight}
-            color="#FFFFFF"
-          />
+          <Rect x={0} y={peakY} width={barWidth} height={2} color="#FFFFFF" />
         </Canvas>
       </View>
 
-      {/* Live Readout in System Default Font */}
-      <View style={styles.readoutRow}>
-        <Text style={styles.readoutValue}>
-          {isRecording ? `${meteringDb.toFixed(1)} dBFS` : 'OFFLINE'}
-        </Text>
-        <Text style={[styles.clipIndicator, meteringDb >= -0.5 && styles.clipActive]}>
-          CLIP
-        </Text>
+      <View style={[styles.legendColumn, { height: layoutHeight }]}>
+        {DB_TICKS.map((db) => {
+          const label = db === 0 ? '0' : String(db);
+          const isSweet = db === -18 || db === -12;
+          const isClip = db === 0;
+          return (
+            <Text
+              key={db}
+              style={[
+                styles.tickText,
+                isSweet ? styles.sweetSpotText : null,
+                isClip ? styles.clipTickText : null,
+              ]}
+            >{label}</Text>
+          );
+        })}
       </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  wrapper: {
-    width: '100%',
-    paddingHorizontal: 8,
-    marginVertical: 10,
-  },
-  labelRow: {
+  container: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 4,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    gap: 4,
   },
-  dbText: {
-    color: '#8E8E93',
-    fontSize: 10,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  clipText: {
-    color: '#FF453A',
-  },
-  canvasContainer: {
-    width: '100%',
-    borderRadius: 3,
+  canvasFrame: {
+    borderRadius: 2.5,
     overflow: 'hidden',
-    backgroundColor: '#1C1C1E',
+    backgroundColor: '#09090B',
+    borderWidth: 1,
+    borderColor: '#1E1E22',
   },
-  readoutRow: {
-    flexDirection: 'row',
+  legendColumn: {
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 6,
+    paddingVertical: 1,
   },
-  readoutValue: {
-    color: '#A1A1A1',
-    fontSize: 12,
-    fontWeight: '500',
+  tickText: {
+    color: '#636366',
+    fontSize: 8,
+    fontWeight: '700',
     fontVariant: ['tabular-nums'],
+    width: 16,
   },
-  clipIndicator: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 1,
-    color: '#3A3A3C',
+  sweetSpotText: {
+    color: '#34D399',
   },
-  clipActive: {
-    color: '#FF453A',
+  clipTickText: {
+    color: '#EF4444',
   },
 });

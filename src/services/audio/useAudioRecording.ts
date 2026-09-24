@@ -4,13 +4,23 @@ import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
 import { AUDIO_PRESETS, PresetKey, AudioPresetConfig } from './types';
+import { ForegroundServiceManager } from './ForegroundServiceManager';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 
+const formatTimecode = (ms: number) => {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return hrs > 0
+    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
-  const [durationMs, setDurationMs] = useState(0);
-  const [meteringDb, setMeteringDb] = useState(-60);
+  const engineStateRef = useRef<EngineState>('IDLE');
   const [presetKey, setPresetKeyState] = useState<PresetKey>(AudioSettingsStorage.getPreset());
 
   const activePreset: AudioPresetConfig = AUDIO_PRESETS[presetKey] || AUDIO_PRESETS.broadcast_wav_48k;
@@ -19,26 +29,37 @@ export function useAudioRecording() {
 
   const recorder = useAudioRecorder(activePreset.options);
 
-  // Synchronous operation mutex to block concurrent native invocations
-  const isBusyRef = useRef(false);
+  const isPollingRef = useRef(false);
+  const isCapturingRef = useRef(false);
+  const nativeQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const smoothedDbRef = useRef(-60);
+  const lastNotifTimeRef = useRef(0);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const meterPollingRef = useRef<NodeJS.Timeout | null>(null);
-  const startTimeRef = useRef<number>(0);
-  const accumulatedMsRef = useRef<number>(0);
   const fileUriRef = useRef<string | null>(null);
 
+  const telemetry = useRef({
+    meteringDb: -60,
+    durationMs: 0,
+    startTime: 0,
+    accumulatedMs: 0,
+    isPaused: false,
+  });
+
   const changePreset = useCallback((key: PresetKey) => {
-    if (engineState === 'RECORDING' || engineState === 'PAUSED') {
+    if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
       throw new Error('Cannot change format preset while capture is in progress.');
     }
     setPresetKeyState(key);
     AudioSettingsStorage.setPreset(key);
-  }, [engineState]);
+  }, []);
 
-  // Poll native decibels at 30 Hz
   const pollMetering = useCallback(async () => {
-    if (!recorder) return;
+    if (!recorder || isPollingRef.current || !isCapturingRef.current) return;
+    isPollingRef.current = true;
+
     try {
       let db: number | undefined;
       if (typeof (recorder as any).getStatusAsync === 'function') {
@@ -51,158 +72,205 @@ export function useAudioRecording() {
         db = (recorder as any).metering;
       }
 
-      if (typeof db === 'number' && !isNaN(db)) {
-        setMeteringDb(Math.max(-60, Math.min(0, db)));
+      if (typeof db === 'number' && !isNaN(db) && isCapturingRef.current) {
+        const clamped = Math.max(-60, Math.min(0, db));
+        const delta = Math.abs(clamped - smoothedDbRef.current);
+
+        if (delta > 0.4) {
+          if (clamped > smoothedDbRef.current) {
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.60;
+          } else {
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.18;
+          }
+        }
+        telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 10) / 10;
       }
-    } catch {}
+    } catch {
+    } finally {
+      isPollingRef.current = false;
+    }
   }, [recorder]);
 
-  // UI timer clock & MMKV crash heartbeat synchronizer
   useEffect(() => {
     if (engineState === 'RECORDING') {
-      startTimeRef.current = Date.now();
       timerRef.current = setInterval(() => {
-        const currentSegment = Date.now() - startTimeRef.current;
-        const total = accumulatedMsRef.current + currentSegment;
-        setDurationMs(total);
+        const total = telemetry.current.durationMs;
         SessionJournal.updateHeartbeat(total);
+
+        const now = Date.now();
+        if (now - lastNotifTimeRef.current >= 1000) {
+          lastNotifTimeRef.current = now;
+          ForegroundServiceManager.updateProgress(
+            formatTimecode(total),
+            activePresetRef.current.badge,
+            false
+          );
+        }
       }, 200);
 
-      meterPollingRef.current = setInterval(pollMetering, 33);
+      const startPollingLoop = async () => {
+        if (!isCapturingRef.current) return;
+        await pollMetering();
+        if (isCapturingRef.current) {
+          meterPollingRef.current = setTimeout(startPollingLoop, 33);
+        }
+      };
+      startPollingLoop();
     } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-      if (meterPollingRef.current) {
-        clearInterval(meterPollingRef.current);
-        meterPollingRef.current = null;
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
 
-      setMeteringDb(-60);
-
-      if (engineState === 'PAUSED') {
-        accumulatedMsRef.current += Date.now() - startTimeRef.current;
-      } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
-        accumulatedMsRef.current = 0;
+      if (engineState === 'IDLE' || engineState === 'STOPPED') {
+        smoothedDbRef.current = -60;
+        telemetry.current.meteringDb = -60;
+        telemetry.current.accumulatedMs = 0;
+        telemetry.current.durationMs = 0;
       }
     }
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
-      if (meterPollingRef.current) clearInterval(meterPollingRef.current);
+      if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
     };
   }, [engineState, pollMetering]);
 
+  const getExactDurationMs = useCallback(() => {
+    return telemetry.current.durationMs;
+  }, []);
+
   const startRecording = useCallback(async () => {
-    // Drop re-entrant invocations immediately
-    if (isBusyRef.current) return;
-    isBusyRef.current = true;
+    if (engineStateRef.current === 'RECORDING') return;
 
-    try {
-      // Self-heal: If recorder was left in a prepared or recording state, release it first
+    engineStateRef.current = 'RECORDING';
+    telemetry.current.isPaused = false;
+    telemetry.current.durationMs = 0;
+    telemetry.current.accumulatedMs = 0;
+    telemetry.current.startTime = Date.now();
+    isCapturingRef.current = true;
+    smoothedDbRef.current = -60;
+    telemetry.current.meteringDb = -60;
+
+    setEngineState('RECORDING');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
       try {
-        await recorder.stop();
-      } catch {}
+        try { await recorder.stop(); } catch {}
 
-      const currentConfig = activePresetRef.current;
-      const sessionId = `session_${Date.now()}`;
-      setDurationMs(0);
-      accumulatedMsRef.current = 0;
+        const currentConfig = activePresetRef.current;
+        const sessionId = `session_${Date.now()}`;
+        await recorder.prepareToRecordAsync(currentConfig.options);
+        fileUriRef.current = recorder.uri;
 
-      // Prepare native audio engine with active preset
-      await recorder.prepareToRecordAsync(currentConfig.options);
-      fileUriRef.current = recorder.uri;
+        SessionJournal.startSession({
+          sessionId,
+          fileUri: recorder.uri ?? '',
+          formatPreset: currentConfig.key,
+          sampleRate: currentConfig.sampleRate,
+          channels: currentConfig.channels,
+          startedAt: Date.now(),
+        });
 
-      SessionJournal.startSession({
-        sessionId,
-        fileUri: recorder.uri ?? '',
-        formatPreset: currentConfig.key,
-        sampleRate: currentConfig.sampleRate,
-        channels: currentConfig.channels,
-        startedAt: Date.now(),
-      });
+        await recorder.record();
+      } catch (error) {
+        setEngineState('ERROR');
+        engineStateRef.current = 'ERROR';
+        throw error;
+      }
+    });
 
-      await recorder.record();
-      setEngineState('RECORDING');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
+    await nativeQueueRef.current;
   }, [recorder]);
 
-  const pauseRecording = useCallback(async () => {
-    if (isBusyRef.current || engineState !== 'RECORDING') return;
-    isBusyRef.current = true;
+  const pauseRecording = useCallback(() => {
+    if (engineStateRef.current !== 'RECORDING') return;
 
-    try {
-      await recorder.pause();
-      SessionJournal.setStatus('PAUSED');
-      setEngineState('PAUSED');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
-  }, [recorder, engineState]);
+    // Frame 0: Immediately stop recording telemetry and freeze the millisecond on screen
+    isCapturingRef.current = false;
+    telemetry.current.isPaused = true;
 
-  const resumeRecording = useCallback(async () => {
-    if (isBusyRef.current || engineState !== 'PAUSED') return;
-    isBusyRef.current = true;
+    // Lock accumulatedMs directly to the exact millisecond currently visible on screen
+    telemetry.current.accumulatedMs = telemetry.current.durationMs;
+    telemetry.current.startTime = Date.now();
 
-    try {
-      await recorder.record();
-      SessionJournal.setStatus('RECORDING');
-      setEngineState('RECORDING');
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
-  }, [recorder, engineState]);
+    engineStateRef.current = 'PAUSED';
+    setEngineState('PAUSED');
+    SessionJournal.setStatus('PAUSED');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+      try {
+        await recorder.pause();
+        ForegroundServiceManager.updateProgress(
+          formatTimecode(telemetry.current.durationMs),
+          activePresetRef.current.badge,
+          true
+        );
+      } catch (err) {
+        console.warn('[useAudioRecording] recorder.pause failed:', err);
+      }
+    });
+  }, [recorder]);
+
+  const resumeRecording = useCallback(() => {
+    if (engineStateRef.current !== 'PAUSED') return;
+
+    telemetry.current.isPaused = false;
+    telemetry.current.startTime = Date.now();
+    isCapturingRef.current = true;
+
+    engineStateRef.current = 'RECORDING';
+    setEngineState('RECORDING');
+    SessionJournal.setStatus('RECORDING');
+
+    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+      try {
+        await recorder.record();
+      } catch (err) {
+        console.warn('[useAudioRecording] recorder.record failed:', err);
+      }
+    });
+  }, [recorder]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
-    if (isBusyRef.current) return null;
-    isBusyRef.current = true;
+    engineStateRef.current = 'STOPPED';
+    isCapturingRef.current = false;
+    telemetry.current.isPaused = true;
+    setEngineState('STOPPED');
 
-    try {
-      await recorder.stop();
-      const finalUri = recorder.uri || fileUriRef.current;
-
-      SessionJournal.setStatus('FINALIZED');
-      SessionJournal.clearSession();
-
-      setEngineState('STOPPED');
-      return finalUri;
-    } catch (error) {
-      setEngineState('ERROR');
-      throw error;
-    } finally {
-      isBusyRef.current = false;
-    }
+    return new Promise<string | null>((resolve, reject) => {
+      nativeQueueRef.current = nativeQueueRef.current.then(async () => {
+        try {
+          await recorder.stop();
+          const finalUri = recorder.uri || fileUriRef.current;
+          SessionJournal.setStatus('FINALIZED');
+          SessionJournal.clearSession();
+          resolve(finalUri);
+        } catch (error) {
+          setEngineState('ERROR');
+          engineStateRef.current = 'ERROR';
+          reject(error);
+        }
+      });
+    });
   }, [recorder]);
 
-  // Clean error recovery resetting the native session to clean state
   const resetEngine = useCallback(async () => {
-    try {
-      await recorder.stop();
-    } catch {}
+    try { await recorder.stop(); } catch {}
     SessionJournal.clearSession();
     setEngineState('IDLE');
-    setDurationMs(0);
-    setMeteringDb(-60);
-    accumulatedMsRef.current = 0;
-    isBusyRef.current = false;
+    engineStateRef.current = 'IDLE';
+    telemetry.current.durationMs = 0;
+    telemetry.current.accumulatedMs = 0;
+    telemetry.current.startTime = 0;
+    telemetry.current.meteringDb = -60;
+    telemetry.current.isPaused = false;
+    smoothedDbRef.current = -60;
   }, [recorder]);
 
   return {
     engineState,
-    durationMs,
-    meteringDb,
+    engineStateRef,
+    telemetry,
+    getExactDurationMs,
     currentUri: recorder.uri ?? fileUriRef.current,
     activePreset,
     setPresetKey: changePreset,
