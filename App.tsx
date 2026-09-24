@@ -88,6 +88,7 @@ function AudioRecorderApp() {
   const [toastData, setToastData] = useState<ToastData | null>(null);
 
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const isTransportBusyRef = useRef(false);
 
   const { isTablet, maxContentWidth, prompterHeight } = useResponsive();
 
@@ -177,14 +178,20 @@ function AudioRecorderApp() {
   };
 
   const handleStopPress = async () => {
+    if (isTransportBusyRef.current) return;
+    isTransportBusyRef.current = true;
+
     try {
       const finalDuration = getExactDurationMs();
       await deactivateKeepAwake();
-      await ForegroundServiceManager.stopService();
 
+      // Finalize audio capture engine before stopping foreground service
       const outputUri = await stopRecording();
       releaseHardwareRoutingRef.current();
       await resetEngine();
+
+      // Gracefully stop the foreground service
+      await ForegroundServiceManager.stopService();
 
       if (outputUri) {
         let sizeBytes = 0;
@@ -211,6 +218,8 @@ function AudioRecorderApp() {
       releaseHardwareRoutingRef.current();
       await resetEngine();
       Alert.alert('Stop Error', e.message);
+    } finally {
+      isTransportBusyRef.current = false;
     }
   };
 
@@ -307,13 +316,14 @@ function AudioRecorderApp() {
     bootstrap();
   }, [refreshDevices]);
 
-  // Synchronous, non-blocking transport action dispatcher
-  const handleMainButtonPress = () => {
+  // Asynchronous, serialized transport action dispatcher
+  const handleMainButtonPress = async () => {
     if (currentScreen === 'library') {
       setCurrentScreen('studio');
       return;
     }
 
+    if (isTransportBusyRef.current) return;
     const currentState = engineStateRef.current;
 
     try {
@@ -322,14 +332,17 @@ function AudioRecorderApp() {
       } else if (currentState === 'PAUSED') {
         resumeRecording();
       } else {
+        isTransportBusyRef.current = true;
         activateHardwareRoutingRef.current();
         activateKeepAwakeAsync();
-        ForegroundServiceManager.startService(activePreset.badge);
-        startRecording();
+        
+        // Wait for foreground service notification initialization prior to native record start
+        await ForegroundServiceManager.startService(activePreset.badge);
+        await startRecording();
       }
     } catch (e: any) {
       deactivateKeepAwake();
-      ForegroundServiceManager.stopService();
+      await ForegroundServiceManager.stopService();
       releaseHardwareRoutingRef.current();
       Alert.alert('Capture Fault', e.message, [
         {
@@ -340,6 +353,8 @@ function AudioRecorderApp() {
           },
         },
       ]);
+    } finally {
+      isTransportBusyRef.current = false;
     }
   };
 

@@ -1,4 +1,5 @@
 // src/services/audio/ForegroundServiceManager.ts
+import { Platform, PermissionsAndroid } from 'react-native';
 import notifee, {
   AndroidImportance,
   AndroidColor,
@@ -19,12 +20,12 @@ class ForegroundServiceManagerImpl {
   private channelId = 'recording_service_channel';
   private isInitialized = false;
   private isRunning = false;
-  private isStarting = false;
   private lastStartTime = 0;
   private handlers: ServiceHandlers = {};
+  private actionQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    // Keep the task runner open for the lifetime of the recording
+    // Keep headless task runner open for the lifetime of the recording
     notifee.registerForegroundService(() => {
       return new Promise(() => {});
     });
@@ -71,15 +72,23 @@ class ForegroundServiceManagerImpl {
     this.handlers = { ...this.handlers, ...handlers };
   }
 
-  public async startService(presetBadge: string): Promise<void> {
-    if (this.isRunning || this.isStarting) return;
-    this.isStarting = true;
+  public startService(presetBadge: string): Promise<void> {
+    this.actionQueue = this.actionQueue.then(async () => {
+      if (this.isRunning) return;
 
-    try {
+      // Android 14 guard: Never invoke microphone FGS without granted audio permission
+      if (Platform.OS === 'android') {
+        const hasMicPermission = await PermissionsAndroid.check(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+        );
+        if (!hasMicPermission) {
+          console.warn('[ForegroundServiceManager] RECORD_AUDIO permission missing; aborting FGS start.');
+          return;
+        }
+      }
+
       await this.initialize();
 
-      // Explicitly pass FOREGROUND_SERVICE_TYPE_MICROPHONE (128 / 0x80)
-      // to match android:foregroundServiceType="microphone" in the manifest
       await notifee.displayNotification({
         id: 'recording_ongoing',
         title: 'Recording Active',
@@ -92,105 +101,76 @@ class ForegroundServiceManagerImpl {
           ],
           color: AndroidColor.RED,
           ongoing: true,
-          pressAction: {
-            id: 'default',
-          },
+          pressAction: { id: 'default' },
           actions: [
-            {
-              title: 'Pause',
-              pressAction: { id: 'pause' },
-            },
-            {
-              title: 'Stop',
-              pressAction: { id: 'stop' },
-            },
+            { title: 'Pause', pressAction: { id: 'pause' } },
+            { title: 'Stop', pressAction: { id: 'stop' } },
           ],
         },
       });
 
       this.isRunning = true;
       this.lastStartTime = Date.now();
-    } catch (error) {
-      console.error('[ForegroundServiceManager] startService failed:', error);
+    }).catch((err) => {
+      console.error('[ForegroundServiceManager] startService failed:', err);
       this.isRunning = false;
-      throw error;
-    } finally {
-      this.isStarting = false;
-    }
+    });
+
+    return this.actionQueue;
   }
 
   public async updateProgress(timerText: string, presetBadge: string, isPaused: boolean): Promise<void> {
-    if (!this.isRunning || this.isStarting) return;
+    // Only update if service is actively established
+    if (!this.isRunning) return;
 
     try {
+      // NOTE: asForegroundService is intentionally omitted here to prevent re-calling Context.startForegroundService()
       await notifee.displayNotification({
         id: 'recording_ongoing',
         title: isPaused ? 'Recording Paused' : 'Recording Active',
         body: `${timerText} • ${presetBadge}`,
         android: {
           channelId: this.channelId,
-          asForegroundService: true,
-          foregroundServiceTypes: [
-            AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-          ],
           color: isPaused ? AndroidColor.ORANGE : AndroidColor.RED,
           ongoing: true,
-          pressAction: {
-            id: 'default',
-          },
+          pressAction: { id: 'default' },
           actions: isPaused
             ? [
-                {
-                  title: 'Resume',
-                  pressAction: { id: 'resume' },
-                },
-                {
-                  title: 'Stop',
-                  pressAction: { id: 'stop' },
-                },
+                { title: 'Resume', pressAction: { id: 'resume' } },
+                { title: 'Stop', pressAction: { id: 'stop' } },
               ]
             : [
-                {
-                  title: 'Pause',
-                  pressAction: { id: 'pause' },
-                },
-                {
-                  title: 'Stop',
-                  pressAction: { id: 'stop' },
-                },
+                { title: 'Pause', pressAction: { id: 'pause' } },
+                { title: 'Stop', pressAction: { id: 'stop' } },
               ],
         },
       });
-    } catch (e) {
-      // Ignore background UI update drops
+    } catch {
+      // Suppress transient background UI update drops
     }
   }
 
-  public async stopService(): Promise<void> {
-    // 1. Wait if startService is currently in flight
-    if (this.isStarting) {
-      let attempts = 0;
-      while (this.isStarting && attempts < 20) {
-        await new Promise((res) => setTimeout(res, 50));
-        attempts++;
+  public stopService(): Promise<void> {
+    this.actionQueue = this.actionQueue.then(async () => {
+      if (!this.isRunning) return;
+
+      // Allow Android OS at least 500ms to complete its native onStartCommand/startForeground handshake
+      const elapsed = Date.now() - this.lastStartTime;
+      if (elapsed < 500) {
+        await new Promise((res) => setTimeout(res, 500 - elapsed));
       }
-    }
 
-    // 2. Ensure Android had at least 250ms to call Service.startForeground()
-    const elapsedSinceStart = Date.now() - this.lastStartTime;
-    if (elapsedSinceStart < 250) {
-      await new Promise((res) => setTimeout(res, 250 - elapsedSinceStart));
-    }
+      try {
+        await notifee.stopForegroundService();
+        await notifee.cancelNotification('recording_ongoing');
+      } catch (error) {
+        console.warn('[ForegroundServiceManager] stopService error:', error);
+      } finally {
+        this.isRunning = false;
+      }
+    });
 
-    if (!this.isRunning) return;
-
-    try {
-      this.isRunning = false;
-      await notifee.stopForegroundService();
-      await notifee.cancelNotification('recording_ongoing');
-    } catch (error) {
-      console.warn('[ForegroundServiceManager] stopService error:', error);
-    }
+    return this.actionQueue;
   }
 }
 

@@ -6,7 +6,6 @@ module.exports = function withNotifeeForegroundService(config) {
     const manifest = config.modResults.manifest;
     const app = manifest.application[0];
 
-    // Ensure tools namespace is declared on the <manifest> root
     if (!manifest.$['xmlns:tools']) {
       manifest.$['xmlns:tools'] = 'http://schemas.android.com/tools';
     }
@@ -15,7 +14,6 @@ module.exports = function withNotifeeForegroundService(config) {
       app.service = [];
     }
 
-    // Locate Notifee's ForegroundService or declare it
     let service = app.service.find(
       (s) => s.$ && s.$['android:name'] === 'app.notifee.core.ForegroundService'
     );
@@ -24,12 +22,14 @@ module.exports = function withNotifeeForegroundService(config) {
       service = {
         $: {
           'android:name': 'app.notifee.core.ForegroundService',
+          'android:exported': 'false',
         },
       };
       app.service.push(service);
+    } else {
+      service.$['android:exported'] = 'false';
     }
 
-    // Override the default shortService (0x800) with microphone (0x80)
     service.$['android:foregroundServiceType'] = 'microphone';
     service.$['tools:replace'] = 'android:foregroundServiceType';
 
