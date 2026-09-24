@@ -7,11 +7,13 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
-  Platform,
   TouchableWithoutFeedback,
   Keyboard,
+  Platform,
+  LayoutAnimation,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Trash2, Check, Music2 } from 'lucide-react-native';
 
 interface SaveRecordingModalProps {
@@ -33,15 +35,45 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   onSubmit,
   onDiscard,
 }) => {
+  const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+
   const [name, setName] = useState(defaultName);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const inputRef = useRef<TextInput | null>(null);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      const kh = e.endCoordinates?.height || 0;
+      if (kh > 0) {
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setKeyboardHeight(kh);
+      }
+    });
+
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (visible) {
       setName(defaultName);
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         inputRef.current?.focus();
       }, 120);
+      return () => clearTimeout(timer);
+    } else {
+      setKeyboardHeight(0);
     }
   }, [visible, defaultName]);
 
@@ -56,6 +88,7 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   };
 
   const formatSize = (bytes: number) => {
+    if (bytes <= 0) return '0 KB';
     if (bytes < 1024 * 1024) {
       return `${(bytes / 1024).toFixed(1)} KB`;
     }
@@ -72,6 +105,12 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
     onDiscard();
   };
 
+  // Dynamically calculate the space between the top screen inset and the keyboard's top edge
+  const availableHeight =
+    keyboardHeight > 0
+      ? Math.max(0, windowHeight - keyboardHeight - insets.top)
+      : Math.max(0, windowHeight - insets.top - insets.bottom);
+
   return (
     <Modal
       visible={visible}
@@ -81,63 +120,63 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
       onRequestClose={handleDiscard}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={styles.backdrop}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.keyboardAvoid}
-          >
-            <View style={styles.card}>
-              {/* Header Icon & Title */}
-              <View style={styles.headerRow}>
-                <View style={styles.iconCircle}>
-                  <Music2 size={16} color="#FFFFFF" strokeWidth={2} />
+        <View style={[styles.backdrop, { paddingTop: insets.top }]}>
+          {/* Symmetrical container that centers the card strictly within the visible area */}
+          <View style={[styles.centerContainer, { height: availableHeight }]}>
+            <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
+              <View style={styles.card}>
+                {/* Header Icon & Title */}
+                <View style={styles.headerRow}>
+                  <View style={styles.iconCircle}>
+                    <Music2 size={16} color="#FFFFFF" strokeWidth={2} />
+                  </View>
+                  <View style={styles.headerTextGroup}>
+                    <Text style={styles.title}>Save Take</Text>
+                    <Text style={styles.subtitle}>
+                      {formatDuration(durationMs)} • {formatSize(sizeBytes)} • {formatBadge}
+                    </Text>
+                  </View>
                 </View>
-                <View style={styles.headerTextGroup}>
-                  <Text style={styles.title}>Save Take</Text>
-                  <Text style={styles.subtitle}>
-                    {formatDuration(durationMs)} • {formatSize(sizeBytes)} • {formatBadge}
-                  </Text>
+
+                {/* Name Input Field */}
+                <View style={styles.inputWrapper}>
+                  <Text style={styles.inputLabel}>TAKE NAME</Text>
+                  <TextInput
+                    ref={inputRef}
+                    style={styles.input}
+                    value={name}
+                    onChangeText={setName}
+                    placeholder={defaultName}
+                    placeholderTextColor="#52525B"
+                    selectTextOnFocus
+                    returnKeyType="done"
+                    onSubmitEditing={handleSave}
+                  />
+                </View>
+
+                {/* Action Buttons Row */}
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={styles.discardBtn}
+                    onPress={handleDiscard}
+                    activeOpacity={0.7}
+                  >
+                    <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                    <Text style={styles.discardBtnText}>Discard</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.saveBtn}
+                    onPress={handleSave}
+                    activeOpacity={0.8}
+                  >
+                    <Check size={14} color="#000000" strokeWidth={3} />
+                    <Text style={styles.saveBtnText}>Save</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
-
-              {/* Name Input Field */}
-              <View style={styles.inputWrapper}>
-                <Text style={styles.inputLabel}>TAKE NAME</Text>
-                <TextInput
-                  ref={inputRef}
-                  style={styles.input}
-                  value={name}
-                  onChangeText={setName}
-                  placeholder={defaultName}
-                  placeholderTextColor="#52525B"
-                  selectTextOnFocus
-                  returnKeyType="done"
-                  onSubmitEditing={handleSave}
-                />
-              </View>
-
-              {/* Action Buttons Row: Discard on Left, Save on Right */}
-              <View style={styles.actionRow}>
-                <TouchableOpacity
-                  style={styles.discardBtn}
-                  onPress={handleDiscard}
-                  activeOpacity={0.7}
-                >
-                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
-                  <Text style={styles.discardBtnText}>Discard</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.saveBtn}
-                  onPress={handleSave}
-                  activeOpacity={0.8}
-                >
-                  <Check size={14} color="#000000" strokeWidth={3} />
-                  <Text style={styles.saveBtnText}>Save</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </KeyboardAvoidingView>
+            </TouchableWithoutFeedback>
+          </View>
         </View>
       </TouchableWithoutFeedback>
     </Modal>
@@ -147,14 +186,15 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.82)',
     alignItems: 'center',
-    paddingHorizontal: 24,
+    justifyContent: 'flex-start',
   },
-  keyboardAvoid: {
+  centerContainer: {
     width: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
   },
   card: {
     width: '100%',
@@ -168,7 +208,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.6,
     shadowRadius: 20,
-    elevation: 12,
+    elevation: 16,
   },
   headerRow: {
     flexDirection: 'row',
@@ -225,7 +265,6 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     padding: 0,
   },
-  /* Action Buttons Spaced to the Left & Right */
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',

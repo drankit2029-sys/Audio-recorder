@@ -101,21 +101,16 @@ const RecordingCard = memo<RecordingCardProps>(({
   const scrubProgress = useSharedValue(0);
   const thumbScale = useSharedValue(1);
 
-  // Local scrub timestamp (only active during finger drag; zero setState in useEffect)
   const [localScrubSecs, setLocalScrubSecs] = useState<number | null>(null);
 
   const isScrubbingRef = useRef(false);
   const startRatioRef = useRef(0);
   const trackWidthRef = useRef(240);
 
-  // Live state reference to break closures
   const livePropsRef = useRef({ isPlaying, isActive, item, onSeek });
   livePropsRef.current = { isPlaying, isActive, item, onSeek };
 
-  // Previous playing state tracking
   const wasPlayingRef = useRef(false);
-
-  // Seek sync locks to prevent rubber-banding
   const seekTargetSecRef = useRef<number | null>(null);
   const seekLockedUntilRef = useRef<number>(0);
 
@@ -123,7 +118,6 @@ const RecordingCard = memo<RecordingCardProps>(({
   const itemTotalSecsRef = useRef(itemTotalSecs);
   itemTotalSecsRef.current = itemTotalSecs;
 
-  // Two-Phase Accordion Values
   const expandHeight = useSharedValue(0);
   const contentOpacity = useSharedValue(0);
   const hasOpenedRef = useRef(false);
@@ -155,7 +149,6 @@ const RecordingCard = memo<RecordingCardProps>(({
     }
   }, [isExpanded, expandHeight, contentOpacity]);
 
-  // Synchronized Continuous Progress Animation Engine
   useEffect(() => {
     if (isScrubbingRef.current) return;
 
@@ -167,7 +160,6 @@ const RecordingCard = memo<RecordingCardProps>(({
       return;
     }
 
-    // State Transition: PAUSED -> PLAYING (Start immediately with zero delay)
     if (isPlaying && !wasPlayingRef.current) {
       wasPlayingRef.current = true;
       cancelAnimation(scrubProgress);
@@ -183,15 +175,12 @@ const RecordingCard = memo<RecordingCardProps>(({
       return;
     }
 
-    // State Transition: PLAYING -> PAUSED (Freeze in place, zero snap-back)
     if (!isPlaying && wasPlayingRef.current) {
       wasPlayingRef.current = false;
       cancelAnimation(scrubProgress);
-      // scrubProgress.value is preserved exactly where it stopped
       return;
     }
 
-    // Reset when audio has fully completed and rewound
     if (!isPlaying && currentTime === 0) {
       cancelAnimation(scrubProgress);
       scrubProgress.value = 0;
@@ -199,9 +188,7 @@ const RecordingCard = memo<RecordingCardProps>(({
       return;
     }
 
-    // Active Playback Re-anchor (Only triggers if genuine audio stall or seek occurs)
     if (isPlaying) {
-      // Guard against rubber-banding: ignore stale pre-seek timestamps
       if (seekTargetSecRef.current !== null) {
         const diff = Math.abs(currentTime - seekTargetSecRef.current);
         const isTimedOut = Date.now() > seekLockedUntilRef.current;
@@ -215,7 +202,6 @@ const RecordingCard = memo<RecordingCardProps>(({
       const currentAnimatedSecs = scrubProgress.value * total;
       const driftSecs = Math.abs(currentAnimatedSecs - currentTime);
 
-      // Widened threshold (0.6s) absorbs native buffer startup without snapping
       if (driftSecs > 0.6) {
         cancelAnimation(scrubProgress);
         const actualRatio = Math.max(0, Math.min(1, currentTime / total));
@@ -231,7 +217,6 @@ const RecordingCard = memo<RecordingCardProps>(({
     }
   }, [isPlaying, isActive, currentTime, scrubProgress]);
 
-  // High-Precision PanResponder
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -271,7 +256,6 @@ const RecordingCard = memo<RecordingCardProps>(({
         setLocalScrubSecs(null);
         livePropsRef.current.onSeek(livePropsRef.current.item, finalSec);
 
-        // Resume linear motion immediately upon release
         if (livePropsRef.current.isPlaying && total > 0) {
           cancelAnimation(scrubProgress);
           scrubProgress.value = finalRatio;
@@ -292,7 +276,6 @@ const RecordingCard = memo<RecordingCardProps>(({
     })
   ).current;
 
-  // Animated Styles
   const accordionContainerStyle = useAnimatedStyle(() => ({
     height: expandHeight.value,
     overflow: 'hidden',
@@ -342,7 +325,6 @@ const RecordingCard = memo<RecordingCardProps>(({
       }}
       activeOpacity={0.88}
     >
-      {/* Header Row */}
       <View style={styles.cardHeaderRow}>
         {isEditMode && (
           <TouchableOpacity
@@ -371,7 +353,6 @@ const RecordingCard = memo<RecordingCardProps>(({
           </Text>
         </View>
 
-        {/* Isolated Play/Pause Hit Area */}
         {!isEditMode && (
           <TouchableOpacity
             style={styles.playCircleTouchArea}
@@ -390,7 +371,6 @@ const RecordingCard = memo<RecordingCardProps>(({
         )}
       </View>
 
-      {/* Meta Badges */}
       <View style={[styles.metaRow, isEditMode && { marginLeft: 32 }]}>
         <Text style={styles.metaBadge}>
           {item.uri.endsWith('.wav') ? 'WAV' : 'AAC'}
@@ -400,10 +380,8 @@ const RecordingCard = memo<RecordingCardProps>(({
         <Text style={styles.metaText}>{formatFileSize(item.sizeBytes)}</Text>
       </View>
 
-      {/* Two-Phase Animated Section */}
       <Animated.View style={accordionContainerStyle}>
         <Animated.View style={elementsFadeStyle}>
-          {/* Centered Timeline Scrubber with Padded Bounds */}
           <View style={styles.progressSection}>
             <View style={styles.scrubWrapper}>
               <View
@@ -414,12 +392,10 @@ const RecordingCard = memo<RecordingCardProps>(({
                 }}
                 {...panResponder.panHandlers}
               >
-                {/* Background Track */}
                 <View style={styles.progressTrack} pointerEvents="none">
                   <Animated.View style={[styles.progressFill, trackFillStyle]} pointerEvents="none" />
                 </View>
 
-                {/* Draggable Thumb */}
                 <Animated.View
                   style={[styles.scrubThumb, scrubThumbStyle]}
                   pointerEvents="none"
@@ -433,7 +409,6 @@ const RecordingCard = memo<RecordingCardProps>(({
             </View>
           </View>
 
-          {/* Action Buttons: Rename, Export, Delete */}
           <View style={styles.actionsRow}>
             <TouchableOpacity
               style={styles.actionBtn}
@@ -469,14 +444,17 @@ const RecordingCard = memo<RecordingCardProps>(({
 });
 
 // -------------------------------------------------------------
-// Main Library Screen
+// Library Screen Master Component
 // -------------------------------------------------------------
 export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   recordings,
   onLibraryUpdate,
   onEditModeChange,
 }) => {
-  const { isTablet, maxContentWidth } = useResponsive();
+  const { isTablet, maxContentWidth, insets } = useResponsive();
+
+  // Elevate floating deck cleanly above Android navigation buttons and iOS home indicator
+  const deckBottom = Math.max(insets.bottom + 20, Platform.OS === 'android' ? 54 : 28);
 
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -487,10 +465,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const [isEditMode, setIsEditMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // Expand / Collapse state
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // In-line Audio Player State
   const [activeId, setActiveId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -500,7 +476,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const durationRef = useRef(0);
   const ignorePollUntilRef = useRef(0);
 
-  // Dialog States
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [recordingToRename, setRecordingToRename] = useState<SavedRecording | null>(null);
   const [renameText, setRenameText] = useState('');
@@ -520,7 +495,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
   const progressPollRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Audio Playback Trigger Loop
   useEffect(() => {
     if (!isPlaying || !player || !activeRecording) return;
     let cancelled = false;
@@ -548,7 +522,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     };
   }, [isPlaying, player, activeId, activeRecording]);
 
-  // Audio Poller (Protected against infinite loops & false-0 readings)
   useEffect(() => {
     if (isPlaying && player) {
       progressPollRef.current = setInterval(() => {
@@ -566,25 +539,21 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
               : 0;
 
           if (typeof rawCur === 'number' && !isNaN(rawCur)) {
-            // Drop false 0.00s native readings while playback is active
             if (rawCur === 0 && currentTimeRef.current > 0) {
               return;
             }
 
-            // Only update React state when time actually shifts
             if (Math.abs(rawCur - currentTimeRef.current) >= 0.05) {
               currentTimeRef.current = rawCur;
               setCurrentTime(rawCur);
             }
           }
 
-          // Guard setDuration from dispatching on every tick
           if (dur > 0 && Math.abs(dur - durationRef.current) > 0.1) {
             durationRef.current = dur;
             setDuration(dur);
           }
 
-          // Natural take completion
           if (dur > 0.5 && typeof rawCur === 'number' && rawCur >= dur - 0.08) {
             setIsPlaying(false);
             currentTimeRef.current = 0;
@@ -638,7 +607,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     return list;
   }, [recordings, searchQuery, sortOption]);
 
-  // Plays audio AND automatically expands the card on first press
   const handlePlayToggle = (item: SavedRecording) => {
     if (expandedId !== item.id) {
       setExpandedId(item.id);
@@ -668,7 +636,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   };
 
   const handleSeek = (item: SavedRecording, seconds: number) => {
-    // 60ms lock gives native driver enough time to acknowledge seek without stuttering
     ignorePollUntilRef.current = Date.now() + 60;
     currentTimeRef.current = seconds;
     setCurrentTime(seconds);
@@ -715,7 +682,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     }
   };
 
-  // --- Single Item Actions ---
   const handleOpenRename = (item: SavedRecording) => {
     setRecordingToRename(item);
     setRenameText(item.name);
@@ -774,6 +740,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       const updated = await RecordingLibrary.delete(item.id);
       onLibraryUpdate(updated);
     } else if (deleteTarget.type === 'batch') {
+      if (selectedIds.size === 0) return;
+
       if (activeId && selectedIds.has(activeId)) {
         try {
           player?.pause();
@@ -802,6 +770,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const handleBatchExport = async () => {
     if (selectedIds.size === 0) return;
     const targets = recordings.filter((r) => selectedIds.has(r.id));
+    if (targets.length === 0) return;
 
     try {
       const isAvailable = await Sharing.isAvailableAsync();
@@ -824,6 +793,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     duration_asc: 'Length (Short to long)',
     duration_desc: 'Length (Long to short)',
   };
+
+  const isSelectionEmpty = selectedIds.size === 0;
+  const isAllSelected = processedRecordings.length > 0 && selectedIds.size === processedRecordings.length;
 
   const renderItem = ({ item }: { item: SavedRecording }) => {
     const isThisActive = activeId === item.id;
@@ -949,49 +921,84 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           />
         )}
 
+        {/* Floating Split Action Deck (Elevated above Android navigation buttons) */}
         {isEditMode && (
-          <View style={styles.bottomActionBar}>
-            <TouchableOpacity
-              style={[
-                styles.batchActionBtn,
-                selectedIds.size === 0 && styles.batchActionBtnDisabled,
-              ]}
-              disabled={selectedIds.size === 0}
-              onPress={handleBatchExport}
-              activeOpacity={0.7}
-            >
-              <Share2 size={16} color={selectedIds.size > 0 ? '#FFFFFF' : '#48484A'} />
-              <Text
+          <View style={[styles.floatingSplitDeck, { bottom: deckBottom }]} pointerEvents="box-none">
+            <View style={styles.floatingSplitBezel}>
+              <TouchableOpacity
                 style={[
-                  styles.batchActionText,
-                  selectedIds.size === 0 && styles.batchActionTextDisabled,
+                  styles.splitHalfBtn,
+                  styles.splitLeftBtn,
+                  isSelectionEmpty && styles.splitBtnDisabled,
                 ]}
+                disabled={isSelectionEmpty}
+                onPress={handleBatchDelete}
+                activeOpacity={0.75}
               >
-                Export ({selectedIds.size})
-              </Text>
-            </TouchableOpacity>
+                <View
+                  style={[
+                    styles.floatingIconCircleDelete,
+                    isSelectionEmpty && styles.floatingIconCircleDisabled,
+                  ]}
+                >
+                  <Trash2
+                    size={15}
+                    color={isSelectionEmpty ? '#5A2624' : '#FF453A'}
+                    strokeWidth={2.2}
+                  />
+                </View>
+                <Text
+                  style={[
+                    styles.splitDeleteText,
+                    isSelectionEmpty && styles.splitDeleteTextDisabled,
+                  ]}
+                >
+                  {isAllSelected
+                    ? 'Delete all'
+                    : selectedIds.size > 0
+                    ? `Delete (${selectedIds.size})`
+                    : 'Delete all'}
+                </Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[
-                styles.batchActionBtn,
-                styles.batchDeleteBtn,
-                selectedIds.size === 0 && styles.batchActionBtnDisabled,
-              ]}
-              disabled={selectedIds.size === 0}
-              onPress={handleBatchDelete}
-              activeOpacity={0.7}
-            >
-              <Trash2 size={16} color={selectedIds.size > 0 ? '#FF453A' : '#48484A'} />
-              <Text
+              <View style={styles.splitDivider} />
+
+              <TouchableOpacity
                 style={[
-                  styles.batchActionText,
-                  styles.batchDeleteText,
-                  selectedIds.size === 0 && styles.batchActionTextDisabled,
+                  styles.splitHalfBtn,
+                  styles.splitRightBtn,
+                  isSelectionEmpty && styles.splitBtnDisabled,
                 ]}
+                disabled={isSelectionEmpty}
+                onPress={handleBatchExport}
+                activeOpacity={0.75}
               >
-                Delete ({selectedIds.size})
-              </Text>
-            </TouchableOpacity>
+                <View
+                  style={[
+                    styles.floatingIconCircleExport,
+                    isSelectionEmpty && styles.floatingIconCircleDisabled,
+                  ]}
+                >
+                  <Share2
+                    size={15}
+                    color={isSelectionEmpty ? '#52525B' : '#FFFFFF'}
+                    strokeWidth={2.2}
+                  />
+                </View>
+                <Text
+                  style={[
+                    styles.splitExportText,
+                    isSelectionEmpty && styles.splitExportTextDisabled,
+                  ]}
+                >
+                  {isAllSelected
+                    ? 'Export all'
+                    : selectedIds.size > 0
+                    ? `Export (${selectedIds.size})`
+                    : 'Export all'}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       </View>
@@ -1091,7 +1098,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         </View>
       </Modal>
 
-      {/* Stylized Rename Recording Dialog */}
+      {/* Rename Dialog */}
       <Modal
         visible={renameModalVisible}
         transparent
@@ -1155,7 +1162,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         </View>
       </Modal>
 
-      {/* Stylized Delete Confirmation Dialog */}
+      {/* Delete Confirmation Dialog */}
       <DeleteConfirmationModal
         visible={deleteModalVisible}
         title={deleteTarget?.type === 'single' ? 'Delete Take' : 'Delete Recordings'}
@@ -1252,7 +1259,7 @@ const styles = StyleSheet.create({
   },
   listContent: {
     padding: 16,
-    paddingBottom: 180,
+    paddingBottom: 200,
     gap: 10,
   },
   card: {
@@ -1293,7 +1300,6 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  /* Isolated Play/Pause Hit Area */
   playCircleTouchArea: {
     padding: 10,
     marginRight: -10,
@@ -1334,7 +1340,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
   },
 
-  /* Scrubber Layout with Unified Coordinates */
   progressSection: {
     marginTop: 14,
   },
@@ -1379,7 +1384,6 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
 
-  /* In-Line Action Buttons */
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1418,49 +1422,97 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
 
-  /* Batch Bottom Action Bar */
-  bottomActionBar: {
+  /* Floating Split Action Deck */
+  floatingSplitDeck: {
     position: 'absolute',
-    bottom: 0,
     left: 0,
     right: 0,
+    alignItems: 'center',
+    zIndex: 9999,
+    elevation: 99,
+  },
+  floatingSplitBezel: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-around',
-    paddingVertical: 16,
-    paddingHorizontal: 24,
-    backgroundColor: '#121212',
-    borderTopWidth: 1,
-    borderTopColor: '#242424',
+    backgroundColor: '#141416',
+    borderWidth: 1.5,
+    borderColor: '#26262C',
+    borderRadius: 28,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    maxWidth: 360,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+    elevation: 14,
   },
-  batchActionBtn: {
+  splitHalfBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: '#1E1E20',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
   },
-  batchActionBtnDisabled: {
+  splitLeftBtn: {
+    paddingLeft: 10,
+  },
+  splitRightBtn: {
+    paddingRight: 10,
+  },
+  splitBtnDisabled: {
     opacity: 0.4,
   },
-  batchActionText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '600',
+  floatingIconCircleDelete: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#261414',
+    borderWidth: 1,
+    borderColor: '#3D1C1C',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  batchActionTextDisabled: {
-    color: '#636366',
+  floatingIconCircleExport: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: '#222228',
+    borderWidth: 1,
+    borderColor: '#2F2F38',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  batchDeleteBtn: {
-    backgroundColor: '#211212',
+  floatingIconCircleDisabled: {
+    backgroundColor: '#161618',
+    borderColor: '#222226',
   },
-  batchDeleteText: {
+  splitDeleteText: {
     color: '#FF453A',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  splitDeleteTextDisabled: {
+    color: '#5A2624',
+  },
+  splitDivider: {
+    width: 1,
+    height: 22,
+    backgroundColor: '#26262E',
+    marginHorizontal: 4,
+  },
+  splitExportText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  splitExportTextDisabled: {
+    color: '#52525B',
   },
 
-  /* Overlays & Modals */
   menuBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',

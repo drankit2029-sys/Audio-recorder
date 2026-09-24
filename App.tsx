@@ -41,7 +41,7 @@ import {
   Headphones,
 } from 'lucide-react-native';
 
-import { SessionJournal } from './src/services/storage/sessionJournal';
+import { SessionJournal, ActiveSessionRecord } from './src/services/storage/sessionJournal';
 import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
 import { useAudioRecording } from './src/services/audio/useAudioRecording';
 import { StudioTimer } from './src/components/studio/StudioTimer';
@@ -51,6 +51,7 @@ import { TeleprompterDeck } from './src/components/prompter/TeleprompterDeck';
 import { AudioSettingsModal } from './src/components/settings/AudioSettingsModal';
 import { SaveRecordingModal } from './src/components/audio/SaveRecordingModal';
 import { ActiveRecordingWarningModal } from './src/components/audio/ActiveRecordingWarningModal';
+import { InterruptedTakeModal } from './src/components/audio/InterruptedTakeModal';
 import { ForegroundServiceManager } from './src/services/audio/ForegroundServiceManager';
 import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices';
 import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
@@ -87,10 +88,17 @@ function AudioRecorderApp() {
   const [warningModalVisible, setWarningModalVisible] = useState(false);
   const [toastData, setToastData] = useState<ToastData | null>(null);
 
+  const [orphanedSession, setOrphanedSession] = useState<ActiveSessionRecord | null>(null);
+  const [orphanedTakeSize, setOrphanedTakeSize] = useState(0);
+  const [interruptedModalVisible, setInterruptedModalVisible] = useState(false);
+
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isTransportBusyRef = useRef(false);
 
-  const { isTablet, maxContentWidth, prompterHeight } = useResponsive();
+  const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
+
+  // Elevate controls above Android 3-button/gesture nav bars and iOS home indicator
+  const transportBottom = Math.max(insets.bottom + 20, Platform.OS === 'android' ? 54 : 28);
 
   const {
     devices,
@@ -185,12 +193,10 @@ function AudioRecorderApp() {
       const finalDuration = getExactDurationMs();
       await deactivateKeepAwake();
 
-      // Finalize audio capture engine before stopping foreground service
       const outputUri = await stopRecording();
       releaseHardwareRoutingRef.current();
       await resetEngine();
 
-      // Gracefully stop the foreground service
       await ForegroundServiceManager.stopService();
 
       if (outputUri) {
@@ -261,6 +267,68 @@ function AudioRecorderApp() {
     setPendingTake(null);
   };
 
+  const handleDiscardInterruptedTake = async () => {
+    if (orphanedSession?.fileUri) {
+      try {
+        await FileSystem.deleteAsync(orphanedSession.fileUri, { idempotent: true });
+      } catch (err) {
+        console.warn('[InterruptedTake] Failed to delete orphaned file:', err);
+      }
+    }
+
+    SessionJournal.clearSession();
+    setInterruptedModalVisible(false);
+    setOrphanedSession(null);
+
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastData({ title: 'Take Discarded', subtitle: 'Interrupted recording removed' });
+    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
+  };
+
+  const handleRestoreInterruptedTake = async () => {
+    if (!orphanedSession) return;
+
+    const durationMs =
+      orphanedSession.byteOffsetEstimate > 0
+        ? orphanedSession.byteOffsetEstimate
+        : Math.max(1000, orphanedSession.lastHeartbeatTimestamp - orphanedSession.startedAt);
+
+    const timeStr = new Date(orphanedSession.startedAt).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    const finalName = `Recovered Take (${timeStr})`;
+
+    const newRecord: SavedRecording = {
+      id: `take_${Date.now()}`,
+      name: finalName,
+      uri: orphanedSession.fileUri,
+      sizeBytes: orphanedTakeSize,
+      durationMs,
+      createdAt: orphanedSession.startedAt || Date.now(),
+    };
+
+    const updated = RecordingLibrary.save(newRecord);
+    setRecordings(updated);
+    SessionJournal.clearSession();
+
+    setInterruptedModalVisible(false);
+    setOrphanedSession(null);
+    setCurrentScreen('library');
+
+    const formattedSize =
+      orphanedTakeSize < 1024 * 1024
+        ? `${(orphanedTakeSize / 1024).toFixed(1)} KB`
+        : `${(orphanedTakeSize / (1024 * 1024)).toFixed(2)} MB`;
+
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastData({
+      title: 'Take Restored',
+      subtitle: `${newRecord.name} • ${formattedSize} saved to library`,
+    });
+    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3500);
+  };
+
   useEffect(() => {
     return () => { if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current); };
   }, []);
@@ -298,14 +366,18 @@ function AudioRecorderApp() {
 
         const orphaned = SessionJournal.checkOrphanedSession();
         if (orphaned) {
-          Alert.alert(
-            'Interrupted Take Detected',
-            `Session ${orphaned.sessionId} was not finalized.`,
-            [
-              { text: 'Discard', style: 'destructive', onPress: () => SessionJournal.clearSession() },
-              { text: 'Recover', onPress: () => console.log('Recovering:', orphaned.fileUri) },
-            ]
-          );
+          try {
+            const fileInfo = await FileSystem.getInfoAsync(orphaned.fileUri);
+            if (fileInfo.exists && !fileInfo.isDirectory && (fileInfo.size ?? 0) > 0) {
+              setOrphanedSession(orphaned);
+              setOrphanedTakeSize(fileInfo.size ?? 0);
+              setInterruptedModalVisible(true);
+            } else {
+              SessionJournal.clearSession();
+            }
+          } catch {
+            SessionJournal.clearSession();
+          }
         }
       } catch (err) {
         console.error('Bootstrap error:', err);
@@ -316,7 +388,6 @@ function AudioRecorderApp() {
     bootstrap();
   }, [refreshDevices]);
 
-  // Asynchronous, serialized transport action dispatcher
   const handleMainButtonPress = async () => {
     if (currentScreen === 'library') {
       setCurrentScreen('studio');
@@ -336,7 +407,6 @@ function AudioRecorderApp() {
         activateHardwareRoutingRef.current();
         activateKeepAwakeAsync();
         
-        // Wait for foreground service notification initialization prior to native record start
         await ForegroundServiceManager.startService(activePreset.badge);
         await startRecording();
       }
@@ -419,7 +489,6 @@ function AudioRecorderApp() {
         ) : (
           <Animated.View key="screen-std" entering={FadeIn.duration(240)} exiting={FadeOut.duration(180)} style={StyleSheet.absoluteFill}>
             <View style={[styles.contentConstraint, { maxWidth: maxContentWidth }]}>
-              {/* Minimal Studio Header */}
               <View style={styles.header}>
                 <TouchableOpacity style={styles.headerBtn} onPress={handleBackToLibrary} activeOpacity={0.7} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
                   <ChevronLeft size={24} color="#FFFFFF" strokeWidth={2} />
@@ -431,26 +500,21 @@ function AudioRecorderApp() {
               </View>
 
               <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} bounces={false}>
-                {/* 1. Teleprompter Region */}
                 {showPrompter ? (
                   <View style={styles.prompterWrapper}>
                     <TeleprompterDeck engineState={engineState} customHeight={prompterHeight} />
                   </View>
                 ) : null}
 
-                {/* 2. Cockpit Row */}
                 <View style={styles.cockpitRow}>
-                  {/* Left Column: Vertical Audio Meter */}
                   <View style={styles.cockpitLeft}>
                     <AudioMeter telemetry={telemetry} engineState={engineState} />
                   </View>
 
-                  {/* Center Column: Waveform, Centered Timer, & Horizontal Options */}
                   <View style={styles.cockpitCenter}>
                     <LiveWaveform telemetry={telemetry} engineState={engineState} height={54} />
                     <StudioTimer telemetry={telemetry} engineState={engineState} isTablet={isTablet} />
 
-                    {/* Options Row strictly under timer; bounded to prevent meter collision */}
                     <View style={styles.optionsHorizontalRow}>
                       <TouchableOpacity
                         style={[styles.cleanOptionBtn, isSessionActive ? styles.cleanOptionBtnDisabled : null]}
@@ -483,7 +547,6 @@ function AudioRecorderApp() {
                     </View>
                   </View>
 
-                  {/* Right Column: Symmetrical Counterweight */}
                   <View style={styles.cockpitRight} pointerEvents="none" />
                 </View>
               </ScrollView>
@@ -492,7 +555,6 @@ function AudioRecorderApp() {
         )}
       </View>
 
-      {/* Floating Save Toast Notification */}
       {toastData ? (
         <View style={styles.toastOverlay} pointerEvents="box-none">
           <Animated.View entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))} exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))} style={styles.toastCard}>
@@ -505,9 +567,9 @@ function AudioRecorderApp() {
         </View>
       ) : null}
 
-      {/* Tactile Hardware Transport Layer */}
+      {/* Tactile Hardware Transport Layer (Dynamically positioned above navigation bar) */}
       {!isLibraryEditMode ? (
-        <View style={styles.transportChassis} pointerEvents="box-none">
+        <View style={[styles.transportChassis, { bottom: transportBottom }]} pointerEvents="box-none">
           <View style={styles.transportBezel} pointerEvents="box-none">
             <Animated.View style={[styles.stopBtnWrapper, stopBtnAnimatedStyle]} pointerEvents={isSessionActive ? 'auto' : 'none'}>
               <Pressable onPress={handleStopPress} disabled={!isSessionActive} style={({ pressed }) => [styles.stopOuterBtn, pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] }]} hitSlop={10}>
@@ -530,6 +592,14 @@ function AudioRecorderApp() {
       ) : null}
 
       <ActiveRecordingWarningModal visible={warningModalVisible} onClose={() => setWarningModalVisible(false)} onStopAndExit={handleStopPress} />
+
+      <InterruptedTakeModal
+        visible={interruptedModalVisible}
+        session={orphanedSession}
+        sizeBytes={orphanedTakeSize}
+        onDiscard={handleDiscardInterruptedTake}
+        onRestore={handleRestoreInterruptedTake}
+      />
 
       {pendingTake ? (
         <SaveRecordingModal
@@ -582,7 +652,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 8,
     paddingTop: 8,
-    paddingBottom: 140,
+    paddingBottom: 170,
   },
 
   prompterWrapper: {
@@ -699,7 +769,6 @@ const styles = StyleSheet.create({
 
   transportChassis: {
     position: 'absolute',
-    bottom: 28,
     left: 0,
     right: 0,
     height: 80,
