@@ -1,7 +1,7 @@
 // src/components/studio/LiveWaveform.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
-import { Canvas, Path, Skia, LinearGradient, vec, BlurMask } from '@shopify/react-native-skia';
+import { Canvas, Path, Skia, BlurMask } from '@shopify/react-native-skia';
 import { EngineState } from '../../services/audio/useAudioRecording';
 
 interface LiveWaveformProps {
@@ -13,29 +13,33 @@ interface LiveWaveformProps {
   height?: number;
 }
 
-const HISTORY_POINTS = 46;
-const BASELINE_AMPLITUDE = 0.04;
-const NOISE_FLOOR_DB = -52;
-const GLOW_PADDING = 36;
+const BAR_COUNT = 156;
+const BASELINE_AMPLITUDE = 0.00; // Resting pill height during silence
+const NOISE_FLOOR_DB = -40;       // Floor to gate out room noise
+const PEAK_DB = 0;               // Target vocal ceiling
+const GLOW_PADDING = 24;
 
 export const LiveWaveform: React.FC<LiveWaveformProps> = ({
   telemetry,
   engineState,
-  height = 56,
+  height = 112,
 }) => {
-  const [canvasWidth, setCanvasWidth] = useState(200);
-  const historyRef = useRef<number[]>(new Array(HISTORY_POINTS).fill(BASELINE_AMPLITUDE));
+  const [canvasWidth, setCanvasWidth] = useState(240);
 
-  const envelopeRef = useRef<number>(BASELINE_AMPLITUDE);
-  const glowEnvelopeRef = useRef<number>(0);
+  // The historical tape: once pushed, each bar's height is FROZEN
+  const historyRef = useRef<number[]>(new Array(BAR_COUNT).fill(BASELINE_AMPLITUDE));
+
+  // Tracking refs for the incoming audio pulse and smoothed glow
+  const currentAmpRef = useRef(BASELINE_AMPLITUDE);
+  const glowRef = useRef(0);
 
   const [, setTick] = useState(0);
 
   useEffect(() => {
     if (engineState === 'IDLE' || engineState === 'STOPPED') {
-      historyRef.current = new Array(HISTORY_POINTS).fill(BASELINE_AMPLITUDE);
-      envelopeRef.current = BASELINE_AMPLITUDE;
-      glowEnvelopeRef.current = 0;
+      historyRef.current = new Array(BAR_COUNT).fill(BASELINE_AMPLITUDE);
+      currentAmpRef.current = BASELINE_AMPLITUDE;
+      glowRef.current = 0;
       setTick((t) => (t + 1) % 10000);
       return;
     }
@@ -45,47 +49,45 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
     }
 
     let frameId: number;
-    let lastTime = Date.now();
+    let lastPushTime = Date.now();
 
     const tick = () => {
-      // Instantly freezes waveform on Frame 0
-      if (telemetry.current.isPaused) {
-        return;
-      }
+      if (telemetry.current.isPaused) return;
 
       const now = Date.now();
-      if (now - lastTime >= 33) {
-        lastTime = now;
-        const rawDb = telemetry.current.meteringDb;
-        let targetAmp = BASELINE_AMPLITUDE;
-        let targetGlow = 0;
+      const rawDb = telemetry.current.meteringDb;
 
-        if (rawDb > NOISE_FLOOR_DB) {
-          const normalized = Math.max(0, Math.min(1.0, (rawDb - NOISE_FLOOR_DB) / (0 - NOISE_FLOOR_DB)));
-          targetAmp = Math.max(BASELINE_AMPLITUDE, Math.pow(normalized, 1.8));
-          targetGlow = Math.pow(normalized, 1.8);
-        }
-
-        if (targetAmp > envelopeRef.current) {
-          envelopeRef.current += (targetAmp - envelopeRef.current) * 0.60;
-        } else {
-          envelopeRef.current += (targetAmp - envelopeRef.current) * 0.15;
-        }
-
-        if (targetGlow > glowEnvelopeRef.current) {
-          glowEnvelopeRef.current += (targetGlow - glowEnvelopeRef.current) * 0.035;
-        } else {
-          glowEnvelopeRef.current += (targetGlow - glowEnvelopeRef.current) * 0.015;
-        }
-
-        historyRef.current.push(envelopeRef.current);
-        if (historyRef.current.length > HISTORY_POINTS) {
-          historyRef.current.shift();
-        }
-
-        setTick((t) => (t + 1) % 10000);
+      // 1. Precise vocal expansion
+      let targetAmp = BASELINE_AMPLITUDE;
+      if (rawDb > NOISE_FLOOR_DB) {
+        const normalized = Math.max(0, Math.min(1.0, (rawDb - NOISE_FLOOR_DB) / (PEAK_DB - NOISE_FLOOR_DB)));
+        targetAmp = Math.max(BASELINE_AMPLITUDE, Math.pow(normalized, 1.5));
       }
 
+      // 2. Instant Attack, Snappy Release for individual waveform bars
+      if (targetAmp > currentAmpRef.current) {
+        currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.90;
+      } else {
+        currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.40;
+      }
+
+      // 3. Asymmetric Glow Smoothing: Gentle bloom rise and long analog decay
+      if (targetAmp > glowRef.current) {
+        glowRef.current += (targetAmp - glowRef.current) * 0.12;
+      } else {
+        glowRef.current += (targetAmp - glowRef.current) * 0.035;
+      }
+
+      // 4. Shift the tape at ~34ms intervals (~29 slices per second)
+      if (now - lastPushTime >= 34) {
+        lastPushTime = now;
+        historyRef.current.push(currentAmpRef.current);
+        if (historyRef.current.length > BAR_COUNT) {
+          historyRef.current.shift();
+        }
+      }
+
+      setTick((t) => (t + 1) % 10000);
       frameId = requestAnimationFrame(tick);
     };
 
@@ -103,28 +105,21 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
   };
 
   const centerY = GLOW_PADDING + height / 2;
-  const maxDeflection = height * 0.38;
-  const stepX = canvasWidth / HISTORY_POINTS;
-  const barWidth = Math.max(2.0, stepX * 0.40);
+  const maxDeflection = height * 0.44;
+  const stepX = canvasWidth / BAR_COUNT;
+  const barWidth = 1;
 
   const path = Skia.Path.Make();
   const data = historyRef.current;
+  const isActive = engineState === 'RECORDING' || engineState === 'PAUSED';
+  const glow = isActive ? glowRef.current : 0;
 
   for (let i = 0; i < data.length; i++) {
     const x = GLOW_PADDING + i * stepX + stepX / 2;
-    const amp = Math.max(2, data[i] * maxDeflection);
-    path.moveTo(x, centerY - amp);
-    path.lineTo(x, centerY + amp);
+    const halfAmp = Math.max(1.8, data[i] * maxDeflection);
+    path.moveTo(x, centerY - halfAmp);
+    path.lineTo(x, centerY + halfAmp);
   }
-
-  const isActive = engineState === 'RECORDING' || engineState === 'PAUSED';
-  const glow = isActive ? glowEnvelopeRef.current : 0;
-
-  const neonPalette = ['#00F0FF', '#7000FF', '#FF0078', '#FF8A00'];
-  const hotCorePalette = ['#E0FFFF', '#F5E6FF', '#FFE6F0', '#FFF0E6'];
-  const idlePalette = ['#27272A', '#3F3F46', '#27272A'];
-
-  const baseColors = isActive ? neonPalette : idlePalette;
 
   return (
     <View style={[styles.container, { height }]} onLayout={onLayout} pointerEvents="none">
@@ -139,53 +134,29 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
           height: height + GLOW_PADDING * 2,
         }}
       >
-        {glow > 0.01 ? (
+        {/* Soft Ambient White Glow */}
+        {isActive && glow > 0.01 ? (
           <Path
             path={path}
             style="stroke"
-            strokeWidth={barWidth + 14}
+            strokeWidth={barWidth + 8}
             strokeCap="round"
-            opacity={glow * 0.55}
+            color="#FFFFFF"
+            opacity={Math.min(0.7, Math.max(0.12, glow * 0.85))}
           >
-            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={neonPalette} />
-            <BlurMask blur={24} style="normal" />
+            <BlurMask blur={18} style="normal" />
           </Path>
         ) : null}
 
-        {glow > 0.01 ? (
-          <Path
-            path={path}
-            style="stroke"
-            strokeWidth={barWidth + 6}
-            strokeCap="round"
-            opacity={glow * 0.85}
-          >
-            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={neonPalette} />
-            <BlurMask blur={10} style="normal" />
-          </Path>
-        ) : null}
-
+        {/* Sharp Solid White Waveform Bars */}
         <Path
           path={path}
           style="stroke"
           strokeWidth={barWidth}
           strokeCap="round"
-          opacity={isActive ? 0.35 + glow * 0.5 : 0.15}
-        >
-          <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={baseColors} />
-        </Path>
-
-        {glow > 0.05 ? (
-          <Path
-            path={path}
-            style="stroke"
-            strokeWidth={barWidth * 0.4}
-            strokeCap="round"
-            opacity={glow * 0.95}
-          >
-            <LinearGradient start={vec(GLOW_PADDING, centerY)} end={vec(GLOW_PADDING + canvasWidth, centerY)} colors={hotCorePalette} />
-          </Path>
-        ) : null}
+          color="#FFFFFF"
+          opacity={isActive ? Math.min(1.0, 0.55 + glow * 0.45) : 0.18}
+        />
       </Canvas>
     </View>
   );

@@ -21,13 +21,15 @@ const formatTimecode = (ms: number) => {
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
   const engineStateRef = useRef<EngineState>('IDLE');
-  const [presetKey, setPresetKeyState] = useState<PresetKey>(AudioSettingsStorage.getPreset());
+  
+  const [presetKey, setPresetKeyState] = useState<string>(AudioSettingsStorage.getPreset());
 
-  const activePreset: AudioPresetConfig = AUDIO_PRESETS[presetKey] || AUDIO_PRESETS.broadcast_wav_48k;
+  const activePreset: AudioPresetConfig = AudioSettingsStorage.getResolvedPreset(presetKey);
   const activePresetRef = useRef<AudioPresetConfig>(activePreset);
   activePresetRef.current = activePreset;
 
   const recorder = useAudioRecorder(activePreset.options);
+
 
   const isPollingRef = useRef(false);
   const isCapturingRef = useRef(false);
@@ -47,8 +49,7 @@ export function useAudioRecording() {
     accumulatedMs: 0,
     isPaused: false,
   });
-
-  const changePreset = useCallback((key: PresetKey) => {
+  const changePreset = useCallback((key: string) => {
     if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
       throw new Error('Cannot change format preset while capture is in progress.');
     }
@@ -76,14 +77,14 @@ export function useAudioRecording() {
         const clamped = Math.max(-60, Math.min(0, db));
         const delta = Math.abs(clamped - smoothedDbRef.current);
 
-        if (delta > 0.4) {
+        if (delta > 0.1) {
           if (clamped > smoothedDbRef.current) {
-            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.60;
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.9;
           } else {
-            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.18;
+            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.9;
           }
         }
-        telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 10) / 10;
+        telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 12) / 10;
       }
     } catch {
     } finally {

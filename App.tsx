@@ -556,7 +556,8 @@ function AudioRecorderApp() {
       </View>
 
       {toastData ? (
-        <View style={styles.toastOverlay} pointerEvents="box-none">
+        // Inside App.tsx, update the toast wrapper render:
+        <View style={[styles.toastOverlay, { top: Math.max(insets.top + 10, 26) }]} pointerEvents="box-none">
           <Animated.View entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))} exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))} style={styles.toastCard}>
             <View style={styles.toastIconCircle}><Check size={14} color="#000000" strokeWidth={3} /></View>
             <View style={styles.toastTextCol}>

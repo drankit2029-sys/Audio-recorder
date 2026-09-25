@@ -1,5 +1,5 @@
 // src/screens/LibraryScreen.tsx
-import React, { useState, useMemo, useRef, useEffect, memo } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,16 +8,10 @@ import {
   TouchableOpacity,
   TextInput,
   Modal,
-  PanResponder,
-  KeyboardAvoidingView,
-  Platform,
 } from 'react-native';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  withDelay,
-  cancelAnimation,
+  FadeInDown,
+  FadeOutUp,
   Easing,
 } from 'react-native-reanimated';
 import { useAudioPlayer } from 'expo-audio';
@@ -27,28 +21,18 @@ import {
   MoreVertical,
   Edit3,
   ArrowUpDown,
-  Check,
-  CheckSquare,
-  Square,
-  Share2,
-  Trash2,
-  Play,
-  Pause,
   X,
-  Pencil,
+  Check,
+  Trash2,
 } from 'lucide-react-native';
 
 import { RecordingLibrary, SavedRecording } from '../services/storage/recordingLibrary';
 import { useResponsive } from '../hooks/useResponsive';
 import { DeleteConfirmationModal } from '../components/audio/DeleteConfirmationModal';
-
-type SortOption =
-  | 'name_asc'
-  | 'name_desc'
-  | 'duration_asc'
-  | 'duration_desc'
-  | 'date_desc'
-  | 'date_asc';
+import { RenameRecordingModal } from '../components/library/RenameRecordingModal';
+import { LibrarySortModal, SortOption } from '../components/library/LibrarySortModal';
+import { LibraryBatchBar } from '../components/library/LibraryBatchBar';
+import { RecordingCard } from '../components/library/RecordingCard';
 
 interface LibraryScreenProps {
   recordings: SavedRecording[];
@@ -56,396 +40,12 @@ interface LibraryScreenProps {
   onEditModeChange: (isEdit: boolean) => void;
 }
 
-const THUMB_SIZE = 14;
-const TOUCH_HEIGHT = 32;
-const ACCORDION_TARGET_HEIGHT = 140;
-
-// -------------------------------------------------------------
-// Isolated, Memoized Recording Card
-// -------------------------------------------------------------
-interface RecordingCardProps {
-  item: SavedRecording;
-  isActive: boolean;
-  isPlaying: boolean;
-  isExpanded: boolean;
-  isEditMode: boolean;
-  isSelected: boolean;
-  currentTime: number;
-  duration: number;
-  onToggleExpand: (id: string) => void;
-  onToggleSelect: (id: string) => void;
-  onPlayToggle: (item: SavedRecording) => void;
-  onSeek: (item: SavedRecording, seconds: number) => void;
-  onOpenRename: (item: SavedRecording) => void;
-  onExport: (item: SavedRecording) => void;
-  onDelete: (item: SavedRecording) => void;
+interface ToastData {
+  title: string;
+  subtitle: string;
+  isDelete?: boolean;
 }
 
-const RecordingCard = memo<RecordingCardProps>(({
-  item,
-  isActive,
-  isPlaying,
-  isExpanded,
-  isEditMode,
-  isSelected,
-  currentTime,
-  duration,
-  onToggleExpand,
-  onToggleSelect,
-  onPlayToggle,
-  onSeek,
-  onOpenRename,
-  onExport,
-  onDelete,
-}) => {
-  const scrubProgress = useSharedValue(0);
-  const thumbScale = useSharedValue(1);
-
-  const [localScrubSecs, setLocalScrubSecs] = useState<number | null>(null);
-
-  const isScrubbingRef = useRef(false);
-  const startRatioRef = useRef(0);
-  const trackWidthRef = useRef(240);
-
-  const livePropsRef = useRef({ isPlaying, isActive, item, onSeek });
-  livePropsRef.current = { isPlaying, isActive, item, onSeek };
-
-  const wasPlayingRef = useRef(false);
-  const seekTargetSecRef = useRef<number | null>(null);
-  const seekLockedUntilRef = useRef<number>(0);
-
-  const itemTotalSecs = isActive && duration > 0 ? duration : (item.durationMs || 0) / 1000;
-  const itemTotalSecsRef = useRef(itemTotalSecs);
-  itemTotalSecsRef.current = itemTotalSecs;
-
-  const expandHeight = useSharedValue(0);
-  const contentOpacity = useSharedValue(0);
-  const hasOpenedRef = useRef(false);
-
-  useEffect(() => {
-    const cubicEase = Easing.out(Easing.cubic);
-
-    if (isExpanded) {
-      hasOpenedRef.current = true;
-      expandHeight.value = withTiming(ACCORDION_TARGET_HEIGHT, {
-        duration: 240,
-        easing: cubicEase,
-      });
-      contentOpacity.value = withDelay(
-        150,
-        withTiming(1, { duration: 180, easing: Easing.out(Easing.quad) })
-      );
-    } else {
-      if (hasOpenedRef.current) {
-        contentOpacity.value = withTiming(0, {
-          duration: 80,
-          easing: Easing.in(Easing.quad),
-        });
-        expandHeight.value = withDelay(
-          60,
-          withTiming(0, { duration: 210, easing: Easing.inOut(Easing.cubic) })
-        );
-      }
-    }
-  }, [isExpanded, expandHeight, contentOpacity]);
-
-  useEffect(() => {
-    if (isScrubbingRef.current) return;
-
-    const total = itemTotalSecsRef.current;
-    if (!isActive || total <= 0) {
-      cancelAnimation(scrubProgress);
-      scrubProgress.value = 0;
-      wasPlayingRef.current = false;
-      return;
-    }
-
-    if (isPlaying && !wasPlayingRef.current) {
-      wasPlayingRef.current = true;
-      cancelAnimation(scrubProgress);
-
-      const currentPos = scrubProgress.value;
-      const remainingMs = Math.max(0, (1 - currentPos) * total * 1000);
-      if (remainingMs > 0) {
-        scrubProgress.value = withTiming(1, {
-          duration: remainingMs,
-          easing: Easing.linear,
-        });
-      }
-      return;
-    }
-
-    if (!isPlaying && wasPlayingRef.current) {
-      wasPlayingRef.current = false;
-      cancelAnimation(scrubProgress);
-      return;
-    }
-
-    if (!isPlaying && currentTime === 0) {
-      cancelAnimation(scrubProgress);
-      scrubProgress.value = 0;
-      wasPlayingRef.current = false;
-      return;
-    }
-
-    if (isPlaying) {
-      if (seekTargetSecRef.current !== null) {
-        const diff = Math.abs(currentTime - seekTargetSecRef.current);
-        const isTimedOut = Date.now() > seekLockedUntilRef.current;
-        if (diff < 0.25 || isTimedOut) {
-          seekTargetSecRef.current = null;
-        } else {
-          return;
-        }
-      }
-
-      const currentAnimatedSecs = scrubProgress.value * total;
-      const driftSecs = Math.abs(currentAnimatedSecs - currentTime);
-
-      if (driftSecs > 0.6) {
-        cancelAnimation(scrubProgress);
-        const actualRatio = Math.max(0, Math.min(1, currentTime / total));
-        scrubProgress.value = actualRatio;
-        const remainingMs = Math.max(0, (1 - actualRatio) * total * 1000);
-        if (remainingMs > 0) {
-          scrubProgress.value = withTiming(1, {
-            duration: remainingMs,
-            easing: Easing.linear,
-          });
-        }
-      }
-    }
-  }, [isPlaying, isActive, currentTime, scrubProgress]);
-
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        isScrubbingRef.current = true;
-        cancelAnimation(scrubProgress);
-        thumbScale.value = withTiming(1.35, { duration: 100 });
-
-        const usableWidth = Math.max(1, trackWidthRef.current);
-        const touchX = Math.max(0, Math.min(usableWidth, evt.nativeEvent.locationX));
-        const initialRatio = touchX / usableWidth;
-
-        startRatioRef.current = initialRatio;
-        scrubProgress.value = initialRatio;
-        setLocalScrubSecs(initialRatio * itemTotalSecsRef.current);
-      },
-      onPanResponderMove: (_, gesture) => {
-        const usableWidth = Math.max(1, trackWidthRef.current);
-        const deltaRatio = gesture.dx / usableWidth;
-        const newRatio = Math.max(0, Math.min(1, startRatioRef.current + deltaRatio));
-
-        scrubProgress.value = newRatio;
-        setLocalScrubSecs(newRatio * itemTotalSecsRef.current);
-      },
-      onPanResponderRelease: () => {
-        thumbScale.value = withTiming(1.0, { duration: 100 });
-        isScrubbingRef.current = false;
-
-        const finalRatio = scrubProgress.value;
-        const total = itemTotalSecsRef.current;
-        const finalSec = finalRatio * total;
-
-        seekTargetSecRef.current = finalSec;
-        seekLockedUntilRef.current = Date.now() + 450;
-
-        setLocalScrubSecs(null);
-        livePropsRef.current.onSeek(livePropsRef.current.item, finalSec);
-
-        if (livePropsRef.current.isPlaying && total > 0) {
-          cancelAnimation(scrubProgress);
-          scrubProgress.value = finalRatio;
-          const remainingMs = Math.max(0, (total - finalSec) * 1000);
-          if (remainingMs > 0) {
-            scrubProgress.value = withTiming(1, {
-              duration: remainingMs,
-              easing: Easing.linear,
-            });
-          }
-        }
-      },
-      onPanResponderTerminate: () => {
-        thumbScale.value = withTiming(1.0, { duration: 100 });
-        isScrubbingRef.current = false;
-        setLocalScrubSecs(null);
-      },
-    })
-  ).current;
-
-  const accordionContainerStyle = useAnimatedStyle(() => ({
-    height: expandHeight.value,
-    overflow: 'hidden',
-  }));
-
-  const elementsFadeStyle = useAnimatedStyle(() => ({
-    opacity: contentOpacity.value,
-  }));
-
-  const trackFillStyle = useAnimatedStyle(() => ({
-    width: `${Math.max(0, Math.min(100, scrubProgress.value * 100))}%`,
-  }));
-
-  const scrubThumbStyle = useAnimatedStyle(() => ({
-    left: `${Math.max(0, Math.min(100, scrubProgress.value * 100))}%`,
-    transform: [{ scale: thumbScale.value }],
-  }));
-
-  const formatFileSize = (bytes: number): string => {
-    if (bytes <= 0) return '0 KB';
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
-
-  const formatSecs = (seconds: number): string => {
-    const s = Math.floor(seconds || 0);
-    const mins = Math.floor(s / 60);
-    const secs = s % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const displaySecs = localScrubSecs !== null ? localScrubSecs : (isActive ? currentTime : 0);
-
-  return (
-    <TouchableOpacity
-      style={[
-        styles.card,
-        isExpanded && styles.cardActive,
-        isSelected && styles.cardSelected,
-      ]}
-      onPress={() => {
-        if (isEditMode) {
-          onToggleSelect(item.id);
-        } else {
-          onToggleExpand(item.id);
-        }
-      }}
-      activeOpacity={0.88}
-    >
-      <View style={styles.cardHeaderRow}>
-        {isEditMode && (
-          <TouchableOpacity
-            style={styles.checkboxTouch}
-            onPress={() => onToggleSelect(item.id)}
-          >
-            {isSelected ? (
-              <CheckSquare size={20} color="#FFFFFF" />
-            ) : (
-              <Square size={20} color="#555555" />
-            )}
-          </TouchableOpacity>
-        )}
-
-        <View style={styles.cardInfoCol}>
-          <Text style={styles.cardTitle} numberOfLines={1}>
-            {item.name}
-          </Text>
-          <Text style={styles.cardTimestamp}>
-            {new Date(item.createdAt).toLocaleDateString([], {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            })}
-          </Text>
-        </View>
-
-        {!isEditMode && (
-          <TouchableOpacity
-            style={styles.playCircleTouchArea}
-            onPress={() => onPlayToggle(item)}
-            hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}
-            activeOpacity={0.75}
-          >
-            <View style={styles.playCircleBtn}>
-              {isPlaying && isActive ? (
-                <Pause size={15} color="#000000" fill="#000000" />
-              ) : (
-                <Play size={15} color="#000000" fill="#000000" style={{ marginLeft: 2 }} />
-              )}
-            </View>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      <View style={[styles.metaRow, isEditMode && { marginLeft: 32 }]}>
-        <Text style={styles.metaBadge}>
-          {item.uri.endsWith('.wav') ? 'WAV' : 'AAC'}
-        </Text>
-        <Text style={styles.metaText}>{formatSecs(item.durationMs / 1000)}</Text>
-        <Text style={styles.metaDot}>•</Text>
-        <Text style={styles.metaText}>{formatFileSize(item.sizeBytes)}</Text>
-      </View>
-
-      <Animated.View style={accordionContainerStyle}>
-        <Animated.View style={elementsFadeStyle}>
-          <View style={styles.progressSection}>
-            <View style={styles.scrubWrapper}>
-              <View
-                style={styles.scrubTouchArea}
-                onLayout={(e) => {
-                  const w = e.nativeEvent.layout.width;
-                  if (w > 0) trackWidthRef.current = w;
-                }}
-                {...panResponder.panHandlers}
-              >
-                <View style={styles.progressTrack} pointerEvents="none">
-                  <Animated.View style={[styles.progressFill, trackFillStyle]} pointerEvents="none" />
-                </View>
-
-                <Animated.View
-                  style={[styles.scrubThumb, scrubThumbStyle]}
-                  pointerEvents="none"
-                />
-              </View>
-            </View>
-
-            <View style={styles.timeRow}>
-              <Text style={styles.timeText}>{formatSecs(displaySecs)}</Text>
-              <Text style={styles.timeText}>{formatSecs(itemTotalSecs)}</Text>
-            </View>
-          </View>
-
-          <View style={styles.actionsRow}>
-            <TouchableOpacity
-              style={styles.actionBtn}
-              onPress={() => onOpenRename(item)}
-              activeOpacity={0.7}
-            >
-              <Pencil size={13} color="#FFFFFF" />
-              <Text style={styles.actionBtnText}>RENAME</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.actionBtn}
-              onPress={() => onExport(item)}
-              activeOpacity={0.7}
-            >
-              <Share2 size={13} color="#FFFFFF" />
-              <Text style={styles.actionBtnText}>EXPORT</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.deleteBtn]}
-              onPress={() => onDelete(item)}
-              activeOpacity={0.7}
-            >
-              <Trash2 size={13} color="#FF453A" />
-              <Text style={styles.deleteBtnText}>DELETE</Text>
-            </TouchableOpacity>
-          </View>
-        </Animated.View>
-      </Animated.View>
-    </TouchableOpacity>
-  );
-});
-
-// -------------------------------------------------------------
-// Library Screen Master Component
-// -------------------------------------------------------------
 export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   recordings,
   onLibraryUpdate,
@@ -453,8 +53,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 }) => {
   const { isTablet, maxContentWidth, insets } = useResponsive();
 
-  // Elevate floating deck cleanly above Android navigation buttons and iOS home indicator
-  const deckBottom = Math.max(insets.bottom + 20, Platform.OS === 'android' ? 54 : 28);
+  const deckBottom = Math.max(insets.bottom + 20, 54);
+  const toastTop = Math.max(insets.top + 10, 26);
 
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -466,19 +66,31 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const expandedIdRef = useRef(expandedId);
+  expandedIdRef.current = expandedId;
 
   const [activeId, setActiveId] = useState<string | null>(null);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+
   const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
   const currentTimeRef = useRef(0);
   const durationRef = useRef(0);
-  const ignorePollUntilRef = useRef(0);
+
+  // Seek latch protecting against stale native audio readings
+  const seekLockRef = useRef<{
+    targetSec: number;
+    timestamp: number;
+  } | null>(null);
 
   const [renameModalVisible, setRenameModalVisible] = useState(false);
   const [recordingToRename, setRecordingToRename] = useState<SavedRecording | null>(null);
-  const [renameText, setRenameText] = useState('');
 
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{
@@ -486,6 +98,22 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     item?: SavedRecording;
     count?: number;
   } | null>(null);
+
+  // In-Library Toast Feedback
+  const [toastData, setToastData] = useState<ToastData | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showToast = useCallback((title: string, subtitle: string, isDelete = false) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastData({ title, subtitle, isDelete });
+    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    };
+  }, []);
 
   const activeRecording = recordings.find((r) => r.id === activeId) ?? null;
   const player = useAudioPlayer(activeRecording?.uri ?? null);
@@ -496,85 +124,88 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const progressPollRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
-    if (!isPlaying || !player || !activeRecording) return;
-    let cancelled = false;
-
-    const triggerPlay = () => {
-      if (cancelled) return;
+    if (!player || !activeRecording) return;
+    if (isPlaying) {
       try {
         player.play();
       } catch {}
-    };
-
-    triggerPlay();
-
-    const checkInterval = setInterval(() => {
-      if (cancelled || player.playing) {
-        clearInterval(checkInterval);
-      } else {
-        triggerPlay();
-      }
-    }, 50);
-
-    return () => {
-      cancelled = true;
-      clearInterval(checkInterval);
-    };
+    } else {
+      try {
+        player.pause();
+      } catch {}
+    }
   }, [isPlaying, player, activeId, activeRecording]);
 
+  // High-Precision Native Audio Poller
   useEffect(() => {
-    if (isPlaying && player) {
-      progressPollRef.current = setInterval(() => {
-        if (Date.now() < ignorePollUntilRef.current) {
-          return;
-        }
-
-        try {
-          const rawCur = player.currentTime;
-          const dur =
-            player.duration > 0
-              ? player.duration
-              : activeRecording?.durationMs
-              ? activeRecording.durationMs / 1000
-              : 0;
-
-          if (typeof rawCur === 'number' && !isNaN(rawCur)) {
-            if (rawCur === 0 && currentTimeRef.current > 0) {
-              return;
-            }
-
-            if (Math.abs(rawCur - currentTimeRef.current) >= 0.05) {
-              currentTimeRef.current = rawCur;
-              setCurrentTime(rawCur);
-            }
-          }
-
-          if (dur > 0 && Math.abs(dur - durationRef.current) > 0.1) {
-            durationRef.current = dur;
-            setDuration(dur);
-          }
-
-          if (dur > 0.5 && typeof rawCur === 'number' && rawCur >= dur - 0.08) {
-            setIsPlaying(false);
-            currentTimeRef.current = 0;
-            setCurrentTime(0);
-            player.pause();
-            if (typeof player.seekTo === 'function') {
-              const res = player.seekTo(0);
-              if (res && typeof res.catch === 'function') res.catch(() => {});
-            }
-          }
-        } catch {}
-      }, 50);
-    } else {
+    if (!isPlaying || !player || !activeRecording) {
       if (progressPollRef.current) {
         clearInterval(progressPollRef.current);
         progressPollRef.current = null;
       }
+      return;
     }
 
+    progressPollRef.current = setInterval(() => {
+      try {
+        const rawCur = player.currentTime;
+        const dur =
+          activeRecording?.durationMs && activeRecording.durationMs > 0
+            ? activeRecording.durationMs / 1000
+            : player.duration > 0
+            ? player.duration
+            : 0;
+
+        if (typeof rawCur === 'number' && !isNaN(rawCur)) {
+          let effectiveCur = rawCur;
+
+          if (seekLockRef.current !== null) {
+            const { targetSec, timestamp } = seekLockRef.current;
+            const elapsedMs = Date.now() - timestamp;
+            const diffFromTarget = Math.abs(rawCur - targetSec);
+
+            if (diffFromTarget <= 0.35) {
+              seekLockRef.current = null;
+              effectiveCur = rawCur;
+            } else if (elapsedMs > 1200) {
+              seekLockRef.current = null;
+              effectiveCur = rawCur;
+            } else {
+              effectiveCur = isPlayingRef.current ? targetSec + elapsedMs / 1000 : targetSec;
+            }
+          }
+
+          // Natural take completion
+          if (dur > 0.5 && effectiveCur >= dur - 0.08) {
+            setIsPlaying(false);
+            currentTimeRef.current = 0;
+            setCurrentTime(0);
+            seekLockRef.current = null;
+            try {
+              player.pause();
+              player.seekTo(0);
+            } catch {}
+            return;
+          }
+
+          if (Math.abs(effectiveCur - currentTimeRef.current) >= 0.03) {
+            currentTimeRef.current = effectiveCur;
+            setCurrentTime(effectiveCur);
+          }
+        }
+
+        if (dur > 0 && Math.abs(dur - durationRef.current) > 0.1) {
+          durationRef.current = dur;
+          setDuration(dur);
+        }
+      } catch {}
+    }, 40);
+
     return () => {
-      if (progressPollRef.current) clearInterval(progressPollRef.current);
+      if (progressPollRef.current) {
+        clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
     };
   }, [isPlaying, player, activeRecording]);
 
@@ -607,40 +238,54 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     return list;
   }, [recordings, searchQuery, sortOption]);
 
-  const handlePlayToggle = (item: SavedRecording) => {
-    if (expandedId !== item.id) {
+  const handlePlayToggle = useCallback((item: SavedRecording) => {
+    if (expandedIdRef.current !== item.id) {
       setExpandedId(item.id);
     }
 
-    if (activeId === item.id) {
-      if (isPlaying) {
+    if (activeIdRef.current === item.id) {
+      if (isPlayingRef.current) {
         try {
-          player?.pause();
+          playerRef.current?.pause();
         } catch {}
         setIsPlaying(false);
       } else {
+        const dur = durationRef.current > 0 ? durationRef.current : (item.durationMs || 0) / 1000;
+        if (dur > 0 && currentTimeRef.current >= dur - 0.12) {
+          currentTimeRef.current = 0;
+          setCurrentTime(0);
+          try {
+            playerRef.current?.seekTo(0);
+          } catch {}
+        }
         setIsPlaying(true);
       }
     } else {
       try {
-        player?.pause();
+        playerRef.current?.pause();
       } catch {}
+      activeIdRef.current = item.id;
       setActiveId(item.id);
       currentTimeRef.current = 0;
       setCurrentTime(0);
+      seekLockRef.current = null;
       const initialDur = item.durationMs ? item.durationMs / 1000 : 0;
       durationRef.current = initialDur;
       setDuration(initialDur);
       setIsPlaying(true);
     }
-  };
+  }, []);
 
-  const handleSeek = (item: SavedRecording, seconds: number) => {
-    ignorePollUntilRef.current = Date.now() + 60;
+  const handleSeek = useCallback((item: SavedRecording, seconds: number) => {
+    seekLockRef.current = {
+      targetSec: seconds,
+      timestamp: Date.now(),
+    };
     currentTimeRef.current = seconds;
     setCurrentTime(seconds);
 
-    if (activeId !== item.id) {
+    if (activeIdRef.current !== item.id) {
+      activeIdRef.current = item.id;
       setActiveId(item.id);
       const initialDur = item.durationMs ? item.durationMs / 1000 : 0;
       durationRef.current = initialDur;
@@ -650,19 +295,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     const activeNativePlayer = playerRef.current;
     if (activeNativePlayer && typeof activeNativePlayer.seekTo === 'function') {
       try {
-        const seekPromise = activeNativePlayer.seekTo(seconds);
-        if (seekPromise && typeof seekPromise.catch === 'function') {
-          seekPromise.catch(() => {});
-        }
+        activeNativePlayer.seekTo(seconds);
       } catch {}
     }
-  };
+  }, []);
 
-  const handleToggleExpand = (id: string) => {
+  const handleToggleExpand = useCallback((id: string) => {
     setExpandedId((prev) => (prev === id ? null : id));
-  };
+  }, []);
 
-  const handleToggleSelect = (id: string) => {
+  const handleToggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -672,34 +314,34 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       }
       return next;
     });
-  };
+  }, []);
 
-  const handleSelectAll = () => {
+  const handleSelectAll = useCallback(() => {
     if (selectedIds.size === processedRecordings.length) {
       setSelectedIds(new Set());
     } else {
       setSelectedIds(new Set(processedRecordings.map((r) => r.id)));
     }
-  };
+  }, [processedRecordings, selectedIds.size]);
 
-  const handleOpenRename = (item: SavedRecording) => {
+  const handleOpenRename = useCallback((item: SavedRecording) => {
     setRecordingToRename(item);
-    setRenameText(item.name);
     setRenameModalVisible(true);
-  };
+  }, []);
 
-  const handleSaveRename = () => {
+  const handleSaveRename = useCallback((newName: string) => {
     if (!recordingToRename) return;
-    const trimmed = renameText.trim();
+    const trimmed = newName.trim();
     if (trimmed.length > 0 && trimmed !== recordingToRename.name) {
       const updated = RecordingLibrary.rename(recordingToRename.id, trimmed);
       onLibraryUpdate(updated);
+      showToast('Take Renamed', trimmed);
     }
     setRenameModalVisible(false);
     setRecordingToRename(null);
-  };
+  }, [recordingToRename, onLibraryUpdate, showToast]);
 
-  const handleExportSingle = async (item: SavedRecording) => {
+  const handleExportSingle = useCallback(async (item: SavedRecording) => {
     try {
       const isAvailable = await Sharing.isAvailableAsync();
       if (!isAvailable) return;
@@ -708,51 +350,54 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         dialogTitle: `Export ${item.name}`,
         mimeType: item.uri.endsWith('.wav') ? 'audio/wav' : 'audio/m4a',
       });
+      showToast('Take Exported', item.name);
     } catch {}
-  };
+  }, [showToast]);
 
-  const handleDeleteSingle = (item: SavedRecording) => {
+  const handleDeleteSingle = useCallback((item: SavedRecording) => {
     setDeleteTarget({ type: 'single', item });
     setDeleteModalVisible(true);
-  };
+  }, []);
 
-  const handleBatchDelete = () => {
+  const handleBatchDelete = useCallback(() => {
     if (selectedIds.size === 0) return;
     setDeleteTarget({ type: 'batch', count: selectedIds.size });
     setDeleteModalVisible(true);
-  };
+  }, [selectedIds.size]);
 
-  const handleConfirmDelete = async () => {
+  const handleConfirmDelete = useCallback(async () => {
     if (!deleteTarget) return;
 
     if (deleteTarget.type === 'single' && deleteTarget.item) {
       const item = deleteTarget.item;
-      if (activeId === item.id) {
+      if (activeIdRef.current === item.id) {
         try {
-          player?.pause();
+          playerRef.current?.pause();
         } catch {}
         setIsPlaying(false);
         setActiveId(null);
       }
-      if (expandedId === item.id) {
+      if (expandedIdRef.current === item.id) {
         setExpandedId(null);
       }
       const updated = await RecordingLibrary.delete(item.id);
       onLibraryUpdate(updated);
+      showToast('Take Deleted', `"${item.name}" removed`, true);
     } else if (deleteTarget.type === 'batch') {
       if (selectedIds.size === 0) return;
 
-      if (activeId && selectedIds.has(activeId)) {
+      if (activeIdRef.current && selectedIds.has(activeIdRef.current)) {
         try {
-          player?.pause();
+          playerRef.current?.pause();
         } catch {}
         setIsPlaying(false);
         setActiveId(null);
       }
-      if (expandedId && selectedIds.has(expandedId)) {
+      if (expandedIdRef.current && selectedIds.has(expandedIdRef.current)) {
         setExpandedId(null);
       }
 
+      const deletedCount = selectedIds.size;
       let updated = recordings;
       for (const id of selectedIds) {
         updated = await RecordingLibrary.delete(id);
@@ -761,13 +406,14 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       setSelectedIds(new Set());
       setIsEditMode(false);
       onEditModeChange(false);
+      showToast('Takes Deleted', `${deletedCount} recordings removed`, true);
     }
 
     setDeleteModalVisible(false);
     setDeleteTarget(null);
-  };
+  }, [deleteTarget, onEditModeChange, onLibraryUpdate, recordings, selectedIds, showToast]);
 
-  const handleBatchExport = async () => {
+  const handleBatchExport = useCallback(async () => {
     if (selectedIds.size === 0) return;
     const targets = recordings.filter((r) => selectedIds.has(r.id));
     if (targets.length === 0) return;
@@ -782,22 +428,11 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           mimeType: item.uri.endsWith('.wav') ? 'audio/wav' : 'audio/m4a',
         });
       }
+      showToast('Takes Exported', `${targets.length} recordings exported`);
     } catch {}
-  };
+  }, [recordings, selectedIds, showToast]);
 
-  const sortLabels: Record<SortOption, string> = {
-    date_desc: 'Date created (Latest to oldest)',
-    date_asc: 'Date created (Oldest to latest)',
-    name_asc: 'Name (A to Z)',
-    name_desc: 'Name (Z to A)',
-    duration_asc: 'Length (Short to long)',
-    duration_desc: 'Length (Long to short)',
-  };
-
-  const isSelectionEmpty = selectedIds.size === 0;
-  const isAllSelected = processedRecordings.length > 0 && selectedIds.size === processedRecordings.length;
-
-  const renderItem = ({ item }: { item: SavedRecording }) => {
+  const renderItem = useCallback(({ item }: { item: SavedRecording }) => {
     const isThisActive = activeId === item.id;
     const isThisPlaying = isThisActive && isPlaying;
     const isSelected = selectedIds.has(item.id);
@@ -811,8 +446,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         isExpanded={isExpanded}
         isEditMode={isEditMode}
         isSelected={isSelected}
-        currentTime={currentTime}
-        duration={duration}
+        currentTime={isThisActive ? currentTime : 0}
+        duration={isThisActive ? duration : 0}
         onToggleExpand={handleToggleExpand}
         onToggleSelect={handleToggleSelect}
         onPlayToggle={handlePlayToggle}
@@ -822,7 +457,22 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         onDelete={handleDeleteSingle}
       />
     );
-  };
+  }, [
+    activeId,
+    currentTime,
+    duration,
+    expandedId,
+    handleDeleteSingle,
+    handleExportSingle,
+    handleOpenRename,
+    handlePlayToggle,
+    handleSeek,
+    handleToggleExpand,
+    handleToggleSelect,
+    isEditMode,
+    isPlaying,
+    selectedIds,
+  ]);
 
   return (
     <View style={styles.container}>
@@ -921,87 +571,44 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           />
         )}
 
-        {/* Floating Split Action Deck (Elevated above Android navigation buttons) */}
         {isEditMode && (
-          <View style={[styles.floatingSplitDeck, { bottom: deckBottom }]} pointerEvents="box-none">
-            <View style={styles.floatingSplitBezel}>
-              <TouchableOpacity
-                style={[
-                  styles.splitHalfBtn,
-                  styles.splitLeftBtn,
-                  isSelectionEmpty && styles.splitBtnDisabled,
-                ]}
-                disabled={isSelectionEmpty}
-                onPress={handleBatchDelete}
-                activeOpacity={0.75}
-              >
-                <View
-                  style={[
-                    styles.floatingIconCircleDelete,
-                    isSelectionEmpty && styles.floatingIconCircleDisabled,
-                  ]}
-                >
-                  <Trash2
-                    size={15}
-                    color={isSelectionEmpty ? '#5A2624' : '#FF453A'}
-                    strokeWidth={2.2}
-                  />
-                </View>
-                <Text
-                  style={[
-                    styles.splitDeleteText,
-                    isSelectionEmpty && styles.splitDeleteTextDisabled,
-                  ]}
-                >
-                  {isAllSelected
-                    ? 'Delete all'
-                    : selectedIds.size > 0
-                    ? `Delete (${selectedIds.size})`
-                    : 'Delete all'}
-                </Text>
-              </TouchableOpacity>
-
-              <View style={styles.splitDivider} />
-
-              <TouchableOpacity
-                style={[
-                  styles.splitHalfBtn,
-                  styles.splitRightBtn,
-                  isSelectionEmpty && styles.splitBtnDisabled,
-                ]}
-                disabled={isSelectionEmpty}
-                onPress={handleBatchExport}
-                activeOpacity={0.75}
-              >
-                <View
-                  style={[
-                    styles.floatingIconCircleExport,
-                    isSelectionEmpty && styles.floatingIconCircleDisabled,
-                  ]}
-                >
-                  <Share2
-                    size={15}
-                    color={isSelectionEmpty ? '#52525B' : '#FFFFFF'}
-                    strokeWidth={2.2}
-                  />
-                </View>
-                <Text
-                  style={[
-                    styles.splitExportText,
-                    isSelectionEmpty && styles.splitExportTextDisabled,
-                  ]}
-                >
-                  {isAllSelected
-                    ? 'Export all'
-                    : selectedIds.size > 0
-                    ? `Export (${selectedIds.size})`
-                    : 'Export all'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+          <LibraryBatchBar
+            selectedCount={selectedIds.size}
+            totalCount={processedRecordings.length}
+            bottomOffset={deckBottom}
+            onDelete={handleBatchDelete}
+            onExport={handleBatchExport}
+          />
         )}
       </View>
+
+      {/* Floating Status-Bar Safe Toast */}
+      {toastData ? (
+        <View style={[styles.toastOverlay, { top: toastTop }]} pointerEvents="box-none">
+          <Animated.View
+            entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))}
+            exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))}
+            style={styles.toastCard}
+          >
+            <View
+              style={[
+                styles.toastIconCircle,
+                toastData.isDelete && styles.toastIconCircleDelete,
+              ]}
+            >
+              {toastData.isDelete ? (
+                <Trash2 size={13} color="#FFFFFF" strokeWidth={2.5} />
+              ) : (
+                <Check size={14} color="#000000" strokeWidth={3} />
+              )}
+            </View>
+            <View style={styles.toastTextCol}>
+              <Text style={styles.toastTitle}>{toastData.title}</Text>
+              <Text style={styles.toastSubtitle} numberOfLines={1}>{toastData.subtitle}</Text>
+            </View>
+          </Animated.View>
+        </View>
+      ) : null}
 
       {/* Overflow Menu */}
       <Modal
@@ -1046,123 +653,26 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         </TouchableOpacity>
       </Modal>
 
-      {/* Sort Options Modal */}
-      <Modal
+      <LibrarySortModal
         visible={sortModalVisible}
-        transparent
-        animationType={isTablet ? 'fade' : 'slide'}
-        onRequestClose={() => setSortModalVisible(false)}
-      >
-        <View style={styles.sortBackdrop}>
-          <TouchableOpacity
-            style={StyleSheet.absoluteFill}
-            activeOpacity={1}
-            onPress={() => setSortModalVisible(false)}
-          />
-          <View style={[styles.sortCard, isTablet && styles.sortCardTablet]}>
-            <View style={styles.sortHeader}>
-              <Text style={styles.sortHeading}>Sort by</Text>
-              <TouchableOpacity
-                onPress={() => setSortModalVisible(false)}
-                style={styles.sortCloseBtn}
-              >
-                <X size={16} color="#FFFFFF" />
-              </TouchableOpacity>
-            </View>
+        activeSort={sortOption}
+        onSelectSort={(opt) => {
+          setSortOption(opt);
+          setSortModalVisible(false);
+        }}
+        onClose={() => setSortModalVisible(false)}
+      />
 
-            {(Object.keys(sortLabels) as SortOption[]).map((key) => {
-              const isSelected = sortOption === key;
-              return (
-                <TouchableOpacity
-                  key={key}
-                  style={styles.sortOptionRow}
-                  onPress={() => {
-                    setSortOption(key);
-                    setSortModalVisible(false);
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Text
-                    style={[
-                      styles.sortOptionText,
-                      isSelected && styles.sortOptionTextSelected,
-                    ]}
-                  >
-                    {sortLabels[key]}
-                  </Text>
-                  {isSelected && <Check size={16} color="#FFFFFF" />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-      </Modal>
-
-      {/* Rename Dialog */}
-      <Modal
+      <RenameRecordingModal
         visible={renameModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setRenameModalVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.keyboardAvoidingView}
-          >
-            <View style={[styles.renameCard, isTablet && styles.renameCardTablet]}>
-              <Text style={styles.renameTitle}>Rename Recording</Text>
+        initialName={recordingToRename?.name ?? ''}
+        onSave={handleSaveRename}
+        onClose={() => {
+          setRenameModalVisible(false);
+          setRecordingToRename(null);
+        }}
+      />
 
-              <View style={styles.renameInputWrapper}>
-                <TextInput
-                  style={styles.renameInput}
-                  value={renameText}
-                  onChangeText={setRenameText}
-                  placeholder="Enter recording name..."
-                  placeholderTextColor="#636366"
-                  autoFocus
-                  selectTextOnFocus
-                  returnKeyType="done"
-                  onSubmitEditing={handleSaveRename}
-                />
-                {renameText.length > 0 && (
-                  <TouchableOpacity
-                    style={styles.clearBtn}
-                    onPress={() => setRenameText('')}
-                    activeOpacity={0.7}
-                  >
-                    <X size={14} color="#8E8E93" />
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              <View style={styles.renameActionsRow}>
-                <TouchableOpacity
-                  style={styles.renameCancelBtn}
-                  onPress={() => {
-                    setRenameModalVisible(false);
-                    setRecordingToRename(null);
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.renameCancelBtnText}>CANCEL</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.renameSaveBtn}
-                  onPress={handleSaveRename}
-                  activeOpacity={0.8}
-                >
-                  <Check size={15} color="#000000" strokeWidth={2.5} />
-                  <Text style={styles.renameSaveBtnText}>SAVE</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </KeyboardAvoidingView>
-        </View>
-      </Modal>
-
-      {/* Delete Confirmation Dialog */}
       <DeleteConfirmationModal
         visible={deleteModalVisible}
         title={deleteTarget?.type === 'single' ? 'Delete Take' : 'Delete Recordings'}
@@ -1262,255 +772,76 @@ const styles = StyleSheet.create({
     paddingBottom: 200,
     gap: 10,
   },
-  card: {
-    backgroundColor: '#121212',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1E1E1E',
-    padding: 16,
-  },
-  cardActive: {
-    borderColor: '#383838',
-    backgroundColor: '#161616',
-  },
-  cardSelected: {
-    borderColor: '#FFFFFF',
-    backgroundColor: '#1A1A1A',
-  },
-  cardHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  checkboxTouch: {
-    paddingRight: 4,
-  },
-  cardInfoCol: {
+  emptyContainer: {
     flex: 1,
-  },
-  cardTitle: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  cardTimestamp: {
-    color: '#71717A',
-    fontSize: 12,
-    marginTop: 2,
-  },
-
-  playCircleTouchArea: {
-    padding: 10,
-    marginRight: -10,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 32,
+    marginTop: 100,
   },
-  playCircleBtn: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  metaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 10,
-  },
-  metaBadge: {
-    backgroundColor: '#242426',
+  emptyTitle: {
     color: '#FFFFFF',
-    fontSize: 10,
+    fontSize: 18,
     fontWeight: '700',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
+    marginBottom: 6,
   },
-  metaText: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontVariant: ['tabular-nums'],
-  },
-  metaDot: {
-    color: '#3A3A3C',
-    fontSize: 10,
+  emptySub: {
+    color: '#71717A',
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 
-  progressSection: {
-    marginTop: 14,
-  },
-  scrubWrapper: {
-    paddingHorizontal: 8,
-  },
-  scrubTouchArea: {
-    height: TOUCH_HEIGHT,
-    justifyContent: 'center',
-    position: 'relative',
-    width: '100%',
-  },
-  progressTrack: {
-    height: 4,
-    backgroundColor: '#262628',
-    borderRadius: 2,
-    overflow: 'hidden',
-    width: '100%',
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#FFFFFF',
-  },
-  scrubThumb: {
-    position: 'absolute',
-    top: (TOUCH_HEIGHT - THUMB_SIZE) / 2,
-    marginLeft: -THUMB_SIZE / 2,
-    width: THUMB_SIZE,
-    height: THUMB_SIZE,
-    borderRadius: THUMB_SIZE / 2,
-    backgroundColor: '#FFFFFF',
-  },
-  timeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 8,
-    marginTop: 4,
-  },
-  timeText: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontVariant: ['tabular-nums'],
-  },
-
-  actionsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#202022',
-  },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#1E1E22',
-    borderWidth: 1,
-    borderColor: '#2A2A2E',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  actionBtnText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  deleteBtn: {
-    marginLeft: 'auto',
-    backgroundColor: '#1E1212',
-    borderColor: '#301818',
-  },
-  deleteBtnText: {
-    color: '#FF453A',
-    fontSize: 11,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-
-  /* Floating Split Action Deck */
-  floatingSplitDeck: {
+  /* Safe Insets Toast Notification */
+  toastOverlay: {
     position: 'absolute',
     left: 0,
     right: 0,
     alignItems: 'center',
-    zIndex: 9999,
-    elevation: 99,
+    zIndex: 10000,
+    elevation: 100,
   },
-  floatingSplitBezel: {
+  toastCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#141416',
-    borderWidth: 1.5,
-    borderColor: '#26262C',
-    borderRadius: 28,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    maxWidth: 360,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.6,
-    shadowRadius: 16,
-    elevation: 14,
-  },
-  splitHalfBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 8,
+    backgroundColor: '#18181B',
+    borderWidth: 1,
+    borderColor: '#27272A',
+    borderRadius: 30,
     paddingHorizontal: 16,
-    borderRadius: 20,
+    paddingVertical: 10,
+    maxWidth: 380,
+    gap: 10,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.45,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  splitLeftBtn: {
-    paddingLeft: 10,
-  },
-  splitRightBtn: {
-    paddingRight: 10,
-  },
-  splitBtnDisabled: {
-    opacity: 0.4,
-  },
-  floatingIconCircleDelete: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#261414',
-    borderWidth: 1,
-    borderColor: '#3D1C1C',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  floatingIconCircleExport: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#222228',
-    borderWidth: 1,
-    borderColor: '#2F2F38',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  floatingIconCircleDisabled: {
-    backgroundColor: '#161618',
-    borderColor: '#222226',
-  },
-  splitDeleteText: {
-    color: '#FF453A',
-    fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  splitDeleteTextDisabled: {
-    color: '#5A2624',
-  },
-  splitDivider: {
-    width: 1,
+  toastIconCircle: {
+    width: 22,
     height: 22,
-    backgroundColor: '#26262E',
-    marginHorizontal: 4,
+    borderRadius: 11,
+    backgroundColor: '#10B981',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  splitExportText: {
+  toastIconCircleDelete: {
+    backgroundColor: '#EF4444',
+  },
+  toastTextCol: {
+    flexShrink: 1,
+  },
+  toastTitle: {
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '700',
-    letterSpacing: 0.2,
   },
-  splitExportTextDisabled: {
-    color: '#52525B',
+  toastSubtitle: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 1,
   },
 
   menuBackdrop: {
@@ -1544,183 +875,5 @@ const styles = StyleSheet.create({
   popoverDivider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: '#2C2C2E',
-  },
-  sortBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'flex-end',
-  },
-  sortCard: {
-    backgroundColor: '#141414',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    borderWidth: 1,
-    borderColor: '#262626',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 32,
-    gap: 4,
-  },
-  sortCardTablet: {
-    alignSelf: 'center',
-    width: 480,
-    borderRadius: 24,
-    marginBottom: 60,
-  },
-  sortHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#222222',
-    marginBottom: 8,
-  },
-  sortHeading: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  sortCloseBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#202020',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sortOptionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 14,
-    paddingHorizontal: 8,
-  },
-  sortOptionText: {
-    color: '#8E8E93',
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  sortOptionTextSelected: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-  },
-  emptyContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 32,
-    marginTop: 100,
-  },
-  emptyTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 6,
-  },
-  emptySub: {
-    color: '#71717A',
-    fontSize: 14,
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.82)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  keyboardAvoidingView: {
-    width: '100%',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  renameCard: {
-    width: '100%',
-    maxWidth: 400,
-    backgroundColor: '#141416',
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: '#262628',
-    padding: 22,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 18,
-    elevation: 16,
-  },
-  renameCardTablet: {
-    maxWidth: 460,
-    padding: 26,
-  },
-  renameTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '700',
-    letterSpacing: -0.3,
-    marginBottom: 16,
-  },
-  renameInputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0C0C0E',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#26262A',
-    paddingHorizontal: 14,
-    height: 50,
-    marginBottom: 18,
-  },
-  renameInput: {
-    flex: 1,
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '500',
-    padding: 0,
-  },
-  clearBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#1E1E22',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 8,
-  },
-  renameActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-    gap: 10,
-  },
-  renameCancelBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    backgroundColor: '#1C1C1E',
-    borderWidth: 1,
-    borderColor: '#2A2A2E',
-  },
-  renameCancelBtnText: {
-    color: '#8E8E93',
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-  renameSaveBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-  },
-  renameSaveBtnText: {
-    color: '#000000',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.5,
   },
 });
