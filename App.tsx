@@ -76,7 +76,7 @@ interface ToastData {
 function AudioRecorderApp() {
   const [, setIsReady] = useState(false);
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('library');
-  const [showPrompter, setShowPrompter] = useState(false);
+  const [showPrompter, setShowPrompter] = useState(true);
 
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [deviceModalVisible, setDeviceModalVisible] = useState(false);
@@ -97,7 +97,6 @@ function AudioRecorderApp() {
 
   const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
 
-  // Elevate controls above Android 3-button/gesture nav bars and iOS home indicator
   const transportBottom = Math.max(insets.bottom + 20, Platform.OS === 'android' ? 54 : 28);
 
   const {
@@ -476,7 +475,9 @@ function AudioRecorderApp() {
       ? 'AAC'
       : activePreset.key === 'podcast_wav_44k'
       ? '44.1k'
-      : '48k'
+      : activePreset.key === 'broadcast_wav_48k'
+      ? '48k'
+      : activePreset.badge.split(' ')[0] || 'FORMAT'
     : 'WAV';
 
   return (
@@ -556,7 +557,6 @@ function AudioRecorderApp() {
       </View>
 
       {toastData ? (
-        // Inside App.tsx, update the toast wrapper render:
         <View style={[styles.toastOverlay, { top: Math.max(insets.top + 10, 26) }]} pointerEvents="box-none">
           <Animated.View entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))} exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))} style={styles.toastCard}>
             <View style={styles.toastIconCircle}><Check size={14} color="#000000" strokeWidth={3} /></View>
@@ -568,7 +568,6 @@ function AudioRecorderApp() {
         </View>
       ) : null}
 
-      {/* Tactile Hardware Transport Layer (Dynamically positioned above navigation bar) */}
       {!isLibraryEditMode ? (
         <View style={[styles.transportChassis, { bottom: transportBottom }]} pointerEvents="box-none">
           <View style={styles.transportBezel} pointerEvents="box-none">
@@ -614,8 +613,23 @@ function AudioRecorderApp() {
         />
       ) : null}
 
-      <InputDeviceModal visible={deviceModalVisible} onClose={() => setDeviceModalVisible(false)} devices={devices} selectedDeviceId={selectedDeviceId} onSelectDevice={handleSelectDevice} engineState={engineState} />
-      <AudioSettingsModal visible={settingsVisible} onClose={() => setSettingsVisible(false)} activePresetKey={activePreset.key} onSelectPreset={setPresetKey} engineState={engineState} />
+      <InputDeviceModal
+        visible={deviceModalVisible}
+        onClose={() => setDeviceModalVisible(false)}
+        devices={devices}
+        selectedDeviceId={selectedDeviceId}
+        onSelectDevice={handleSelectDevice}
+        engineState={engineState}
+      />
+
+      <AudioSettingsModal
+        visible={settingsVisible}
+        onClose={() => setSettingsVisible(false)}
+        activePresetKey={activePreset.key}
+        onSelectPreset={setPresetKey}
+        engineState={engineState}
+        selectedDevice={selectedDevice}
+      />
     </SafeAreaView>
   );
 }

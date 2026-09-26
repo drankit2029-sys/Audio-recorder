@@ -3,7 +3,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
-import { AUDIO_PRESETS, PresetKey, AudioPresetConfig } from './types';
+import { PresetKey, AudioPresetConfig } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
@@ -21,15 +21,12 @@ const formatTimecode = (ms: number) => {
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
   const engineStateRef = useRef<EngineState>('IDLE');
-  
+
   const [presetKey, setPresetKeyState] = useState<string>(AudioSettingsStorage.getPreset());
 
   const activePreset: AudioPresetConfig = AudioSettingsStorage.getResolvedPreset(presetKey);
   const activePresetRef = useRef<AudioPresetConfig>(activePreset);
   activePresetRef.current = activePreset;
-
-  const recorder = useAudioRecorder(activePreset.options);
-
 
   const isPollingRef = useRef(false);
   const isCapturingRef = useRef(false);
@@ -49,6 +46,57 @@ export function useAudioRecording() {
     accumulatedMs: 0,
     isPaused: false,
   });
+
+  // Accurate Broadcast Meter Ballistics (Instant Attack, Natural Decay)
+  const processMeterDb = useCallback((rawDb: number) => {
+    if (!isCapturingRef.current) return;
+    const clamped = Math.max(-60, Math.min(0, isFinite(rawDb) ? rawDb : -60));
+
+    if (clamped > smoothedDbRef.current) {
+      smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.85; // Fast attack
+    } else {
+      smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.18; // Smooth broadcast release
+    }
+
+    // Exact 1-decimal rounding (no scaling distortion)
+    telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 10) / 10;
+  }, []);
+
+  // Pass live status listener directly to expo-audio
+  const handleStatusUpdate = useCallback((status: any) => {
+    if (typeof status?.metering === 'number') {
+      processMeterDb(status.metering);
+    }
+  }, [processMeterDb]);
+
+  const recorder = useAudioRecorder(activePreset.options, handleStatusUpdate);
+
+  // Subscribe to native event emitter for builds where callback is event-based
+  useEffect(() => {
+    if (!recorder) return;
+    const rec = recorder as any;
+    let sub1: any;
+    let sub2: any;
+
+    if (typeof rec.addListener === 'function') {
+      try {
+        sub1 = rec.addListener('recordingStatusUpdate', (status: any) => {
+          if (typeof status?.metering === 'number') processMeterDb(status.metering);
+        });
+      } catch {}
+      try {
+        sub2 = rec.addListener('statusUpdate', (status: any) => {
+          if (typeof status?.metering === 'number') processMeterDb(status.metering);
+        });
+      } catch {}
+    }
+
+    return () => {
+      try { sub1?.remove?.(); } catch {}
+      try { sub2?.remove?.(); } catch {}
+    };
+  }, [recorder, processMeterDb]);
+
   const changePreset = useCallback((key: string) => {
     if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
       throw new Error('Cannot change format preset while capture is in progress.');
@@ -63,34 +111,27 @@ export function useAudioRecording() {
 
     try {
       let db: number | undefined;
-      if (typeof (recorder as any).getStatusAsync === 'function') {
-        const status = await (recorder as any).getStatusAsync();
+
+      // Handle both Promise-returning and synchronous getStatus()
+      if (typeof (recorder as any).getStatus === 'function') {
+        const res = (recorder as any).getStatus();
+        const status = res instanceof Promise ? await res : res;
         db = status?.metering;
-      } else if (typeof (recorder as any).getStatus === 'function') {
-        const status = (recorder as any).getStatus();
+      } else if (typeof (recorder as any).getStatusAsync === 'function') {
+        const status = await (recorder as any).getStatusAsync();
         db = status?.metering;
       } else if (typeof (recorder as any).metering === 'number') {
         db = (recorder as any).metering;
       }
 
-      if (typeof db === 'number' && !isNaN(db) && isCapturingRef.current) {
-        const clamped = Math.max(-60, Math.min(0, db));
-        const delta = Math.abs(clamped - smoothedDbRef.current);
-
-        if (delta > 0.1) {
-          if (clamped > smoothedDbRef.current) {
-            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.9;
-          } else {
-            smoothedDbRef.current += (clamped - smoothedDbRef.current) * 0.9;
-          }
-        }
-        telemetry.current.meteringDb = Math.round(smoothedDbRef.current * 12) / 10;
+      if (typeof db === 'number' && !isNaN(db)) {
+        processMeterDb(db);
       }
     } catch {
     } finally {
       isPollingRef.current = false;
     }
-  }, [recorder]);
+  }, [recorder, processMeterDb]);
 
   useEffect(() => {
     if (engineState === 'RECORDING') {
@@ -185,11 +226,8 @@ export function useAudioRecording() {
   const pauseRecording = useCallback(() => {
     if (engineStateRef.current !== 'RECORDING') return;
 
-    // Frame 0: Immediately stop recording telemetry and freeze the millisecond on screen
     isCapturingRef.current = false;
     telemetry.current.isPaused = true;
-
-    // Lock accumulatedMs directly to the exact millisecond currently visible on screen
     telemetry.current.accumulatedMs = telemetry.current.durationMs;
     telemetry.current.startTime = Date.now();
 

@@ -46,6 +46,7 @@ interface RecordingCardProps {
   onOpenRename: (item: SavedRecording) => void;
   onExport: (item: SavedRecording) => void;
   onDelete: (item: SavedRecording) => void;
+  onLongPress?: (id: string) => void;
 }
 
 export const RecordingCard = memo<RecordingCardProps>(({
@@ -64,6 +65,7 @@ export const RecordingCard = memo<RecordingCardProps>(({
   onOpenRename,
   onExport,
   onDelete,
+  onLongPress,
 }) => {
   const scrubProgress = useSharedValue(0);
   const thumbScale = useSharedValue(1);
@@ -75,7 +77,6 @@ export const RecordingCard = memo<RecordingCardProps>(({
   const trackWidthRef = useRef(240);
   const lastScrubUpdateRef = useRef(0);
 
-  // Seek latch protecting against stale React props right after finger release
   const seekRatioRef = useRef<number | null>(null);
   const lastSeekTimestampRef = useRef<number>(0);
 
@@ -117,7 +118,6 @@ export const RecordingCard = memo<RecordingCardProps>(({
     }
   }, [isExpanded, expandHeight, contentOpacity]);
 
-  // Audio-Clock Synchronized Progress Engine with Zero Snap-Back
   useEffect(() => {
     if (isScrubbingRef.current) return;
 
@@ -131,7 +131,6 @@ export const RecordingCard = memo<RecordingCardProps>(({
 
     const targetRatio = Math.max(0, Math.min(1, currentTime / total));
 
-    // Latch guard: Ignore lagging pre-seek incoming currentTime for 500ms
     if (seekRatioRef.current !== null) {
       const timeSinceSeek = Date.now() - lastSeekTimestampRef.current;
       const ratioDiff = Math.abs(targetRatio - seekRatioRef.current);
@@ -191,14 +190,12 @@ export const RecordingCard = memo<RecordingCardProps>(({
         const total = itemTotalSecsRef.current;
         const finalSec = finalRatio * total;
 
-        // Establish post-seek latch
         seekRatioRef.current = finalRatio;
         lastSeekTimestampRef.current = Date.now();
 
         setLocalScrubSecs(null);
         isScrubbingRef.current = false;
 
-        // Immediately project forward motion without waiting for native thread
         if (livePropsRef.current.isPlaying && total > 0) {
           cancelAnimation(scrubProgress);
           scrubProgress.value = finalRatio;
@@ -262,6 +259,16 @@ export const RecordingCard = memo<RecordingCardProps>(({
       ? currentTime
       : 0;
 
+  const getFormatBadge = (uri: string): string => {
+    const clean = uri.toLowerCase();
+    if (clean.endsWith('.wav')) return 'WAV';
+    if (clean.endsWith('.m4a')) return 'AAC';
+    if (clean.endsWith('.ogg')) return 'OPUS';
+    if (clean.endsWith('.flac')) return 'FLAC';
+    if (clean.endsWith('.3gp')) return 'AMR';
+    return 'AUDIO';
+  };
+
   return (
     <TouchableOpacity
       style={[
@@ -276,6 +283,12 @@ export const RecordingCard = memo<RecordingCardProps>(({
           onToggleExpand(item.id);
         }
       }}
+      onLongPress={() => {
+        if (onLongPress) {
+          onLongPress(item.id);
+        }
+      }}
+      delayLongPress={280}
       activeOpacity={0.88}
     >
       <View style={styles.cardHeaderRow}>
@@ -325,9 +338,7 @@ export const RecordingCard = memo<RecordingCardProps>(({
       </View>
 
       <View style={[styles.metaRow, isEditMode && { marginLeft: 32 }]}>
-        <Text style={styles.metaBadge}>
-          {item.uri.endsWith('.wav') ? 'WAV' : 'AAC'}
-        </Text>
+        <Text style={styles.metaBadge}>{getFormatBadge(item.uri)}</Text>
         <Text style={styles.metaText}>{formatSecs(itemTotalSecs)}</Text>
         <Text style={styles.metaDot}>•</Text>
         <Text style={styles.metaText}>{formatFileSize(item.sizeBytes)}</Text>

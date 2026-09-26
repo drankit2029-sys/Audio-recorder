@@ -29,6 +29,7 @@ export interface AudioPresetConfig {
   label: string;
   badge: string;
   description: string;
+  format: AudioFormatType;
   extension: '.wav' | '.m4a' | '.ogg' | '.flac' | '.3gp';
   mimeType: string;
   sampleRate: number;
@@ -57,11 +58,11 @@ export function checkDeviceCompatibility(
     device.type === 'usb_accessory';
 
   // 1. Android Codec-Specific Hard Limits
-  if (preset.options.android?.audioEncoder === 'amr_nb') {
+  if (preset.format === 'amr_nb') {
     if (preset.sampleRate !== 8000 || preset.channels !== 1) {
       reasons.push('AMR-NB codec is hard-limited to 8.0 kHz Mono voice telephony.');
     }
-  } else if (preset.options.android?.audioEncoder === 'amr_wb') {
+  } else if (preset.format === 'amr_wb') {
     if (preset.sampleRate !== 16000 || preset.channels !== 1) {
       reasons.push('AMR-WB codec is hard-limited to 16.0 kHz Mono voice telephony.');
     }
@@ -83,7 +84,6 @@ export function checkDeviceCompatibility(
   // 3. Hardware Sample Rate Clocking
   if (device.sampleRates && device.sampleRates.length > 0) {
     if (!device.sampleRates.includes(preset.sampleRate)) {
-      // Rates above 48kHz strictly require class-compliant USB Audio on Android
       if (preset.sampleRate > 48000 && !isUsb) {
         reasons.push(
           `High-res rate ${(preset.sampleRate / 1000).toFixed(1)} kHz requires an external USB Audio Interface. "${device.name}" DAC clock caps at 48.0 kHz.`
@@ -140,45 +140,31 @@ export function customPresetToAudioPreset(custom: CustomPresetConfig): AudioPres
 
   let extension: '.wav' | '.m4a' | '.ogg' | '.flac' | '.3gp' = '.wav';
   let mimeType = 'audio/wav';
-  let outputFormat = 'default';
-  let audioEncoder = 'default';
 
   switch (custom.format) {
     case 'wav':
       extension = '.wav';
       mimeType = 'audio/wav';
-      outputFormat = 'default';
-      audioEncoder = 'default';
       break;
     case 'aac':
       extension = '.m4a';
       mimeType = 'audio/mp4a-latm';
-      outputFormat = 'mpeg4';
-      audioEncoder = 'aac';
       break;
     case 'opus':
       extension = '.ogg';
       mimeType = 'audio/ogg';
-      outputFormat = 'ogg';
-      audioEncoder = 'opus';
       break;
     case 'flac':
       extension = '.flac';
       mimeType = 'audio/flac';
-      outputFormat = 'default';
-      audioEncoder = 'default';
       break;
     case 'amr_wb':
       extension = '.3gp';
       mimeType = 'audio/amr-wb';
-      outputFormat = 'three_gpp';
-      audioEncoder = 'amr_wb';
       break;
     case 'amr_nb':
       extension = '.3gp';
       mimeType = 'audio/3gpp';
-      outputFormat = 'three_gpp';
-      audioEncoder = 'amr_nb';
       break;
   }
 
@@ -191,8 +177,6 @@ export function customPresetToAudioPreset(custom: CustomPresetConfig): AudioPres
     isMeteringEnabled: true,
     android: {
       extension,
-      outputFormat,
-      audioEncoder,
       bitRate: custom.bitRate,
       isMeteringEnabled: true,
     },
@@ -205,6 +189,7 @@ export function customPresetToAudioPreset(custom: CustomPresetConfig): AudioPres
     description:
       custom.description ||
       `Custom ${formatLabels[custom.format]} configuration: ${rateKhz} kHz, ${depthOrRate}, ${chLabel}.`,
+    format: custom.format,
     extension,
     mimeType,
     sampleRate: custom.sampleRate,
@@ -222,6 +207,7 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
     label: 'Broadcast Master',
     badge: 'WAV 48kHz 16-bit Mono',
     description: 'Uncompressed PCM Mono. Industry standard for studio recording, film, and post-production mastering.',
+    format: 'wav',
     extension: '.wav',
     mimeType: 'audio/wav',
     sampleRate: 48000,
@@ -235,8 +221,6 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
       isMeteringEnabled: true,
       android: {
         extension: '.wav',
-        outputFormat: 'default',
-        audioEncoder: 'default',
         isMeteringEnabled: true,
       },
     },
@@ -246,6 +230,7 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
     label: 'Standard Podcast',
     badge: 'WAV 44.1kHz 16-bit Mono',
     description: 'Uncompressed CD-quality Mono. Optimized for spoken word, narrative podcasts, and speech synthesis.',
+    format: 'wav',
     extension: '.wav',
     mimeType: 'audio/wav',
     sampleRate: 44100,
@@ -259,8 +244,6 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
       isMeteringEnabled: true,
       android: {
         extension: '.wav',
-        outputFormat: 'default',
-        audioEncoder: 'default',
         isMeteringEnabled: true,
       },
     },
@@ -270,6 +253,7 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
     label: 'Lightweight Proxy',
     badge: 'AAC 256kbps 48kHz Mono',
     description: 'VBR MPEG-4 AAC. Compact file size for messaging apps, quick email previews, and scratch tracks.',
+    format: 'aac',
     extension: '.m4a',
     mimeType: 'audio/mp4a-latm',
     sampleRate: 48000,
@@ -283,8 +267,6 @@ export const AUDIO_PRESETS: Record<string, AudioPresetConfig> = {
       isMeteringEnabled: true,
       android: {
         extension: '.m4a',
-        outputFormat: 'mpeg4',
-        audioEncoder: 'aac',
         bitRate: 256000,
         isMeteringEnabled: true,
       },

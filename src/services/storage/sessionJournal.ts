@@ -11,7 +11,7 @@ export type RecordingStatus = 'RECORDING' | 'PAUSED' | 'FINALIZED' | 'INTERRUPTE
 export interface ActiveSessionRecord {
   sessionId: string;
   fileUri: string;
-  formatPreset: 'broadcast_wav_48k' | 'podcast_wav_44k' | 'share_aac_48k';
+  formatPreset: string;
   sampleRate: number;
   channels: 1 | 2;
   startedAt: number;
@@ -72,7 +72,6 @@ export const SessionJournal = {
   },
 
   clearSession(): void {
-    // .remove() replaced .delete() in v4
     sessionStorage.remove(ACTIVE_SESSION_KEY);
   }
 };

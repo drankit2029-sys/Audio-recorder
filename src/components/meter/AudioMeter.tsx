@@ -1,5 +1,5 @@
 // src/components/meter/AudioMeter.tsx
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { View, StyleSheet, Text } from 'react-native';
 import {
   Canvas,
@@ -22,17 +22,33 @@ interface AudioMeterProps {
   engineState: EngineState;
 }
 
-const MIN_DB = -60;
-const MAX_DB = 0;
 const DB_TICKS = [0, -6, -12, -18, -24, -36, -48, -60];
+
+// Non-linear piecewise mapping matching the 7 intervals of the legend ticks
+function dbToNorm(db: number): number {
+  if (db <= -60) return 0;
+  if (db >= 0) return 1;
+
+  if (db < -48) {
+    return (0 + (db - -60) / 12) / 7;
+  } else if (db < -36) {
+    return (1 + (db - -48) / 12) / 7;
+  } else if (db < -24) {
+    return (2 + (db - -36) / 12) / 7;
+  } else if (db < -18) {
+    return (3 + (db - -24) / 6) / 7;
+  } else if (db < -12) {
+    return (4 + (db - -18) / 6) / 7; // Sweet spot lower threshold (-18 dBFS)
+  } else if (db < -6) {
+    return (5 + (db - -12) / 6) / 7; // Sweet spot upper threshold (-12 dBFS)
+  } else {
+    return (6 + (db - -6) / 6) / 7; // Danger headroom zone (-6 to 0 dBFS)
+  }
+}
 
 export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }) => {
   const barWidth = 9;
   const layoutHeight = 140;
-
-  const [displayPeakDb, setDisplayPeakDb] = useState(-60);
-  const displayPeakDbRef = useRef(-60);
-  const lastTextUpdateRef = useRef(0);
 
   const meterLevel = useSharedValue(0);
   const peakHoldLevel = useSharedValue(0);
@@ -43,10 +59,8 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
       if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
       cancelAnimation(meterLevel);
       cancelAnimation(peakHoldLevel);
-      meterLevel.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
-      peakHoldLevel.value = withTiming(0, { duration: 300, easing: Easing.out(Easing.quad) });
-      setDisplayPeakDb(-60);
-      displayPeakDbRef.current = -60;
+      meterLevel.value = withTiming(0, { duration: 180, easing: Easing.out(Easing.quad) });
+      peakHoldLevel.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.quad) });
       return;
     }
 
@@ -54,7 +68,7 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
       if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
       cancelAnimation(meterLevel);
       cancelAnimation(peakHoldLevel);
-      return; 
+      return;
     }
 
     let frameId: number;
@@ -64,20 +78,10 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
       const rawDb = telemetry.current.meteringDb;
       if (rawDb !== lastDb) {
         lastDb = rawDb;
-        const clampedDb = Math.max(MIN_DB, Math.min(MAX_DB, rawDb));
-        const targetNorm = (clampedDb - MIN_DB) / (MAX_DB - MIN_DB);
+        const targetNorm = dbToNorm(rawDb);
 
-        meterLevel.value = withTiming(targetNorm, {
-          duration: 35,
-          easing: Easing.linear,
-        });
-
-        const now = Date.now();
-        if (now - lastTextUpdateRef.current > 120 || clampedDb > displayPeakDbRef.current) {
-          lastTextUpdateRef.current = now;
-          displayPeakDbRef.current = clampedDb;
-          setDisplayPeakDb(clampedDb);
-        }
+        // Immediate assignment: ballistics are computed smoothly in useAudioRecording
+        meterLevel.value = targetNorm;
 
         if (targetNorm >= peakHoldLevel.value) {
           if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
@@ -85,7 +89,7 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
 
           peakDecayTimeoutRef.current = setTimeout(() => {
             peakHoldLevel.value = withTiming(0, {
-              duration: 1800,
+              duration: 1600,
               easing: Easing.linear,
             });
           }, 900);
@@ -103,7 +107,9 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
 
   const activeHeight = useDerivedValue(() => Math.max(0, meterLevel.value * layoutHeight));
   const activeY = useDerivedValue(() => layoutHeight - activeHeight.value);
+  const cornerRadius = useDerivedValue(() => Math.min(2.5, activeHeight.value / 2));
   const peakY = useDerivedValue(() => Math.max(0, layoutHeight - peakHoldLevel.value * layoutHeight - 2));
+  const peakOpacity = useDerivedValue(() => (peakHoldLevel.value > 0.02 ? 1 : 0));
 
   return (
     <View style={styles.container}>
@@ -111,16 +117,16 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
         <Canvas style={{ width: barWidth, height: layoutHeight }}>
           <RoundedRect x={0} y={0} width={barWidth} height={layoutHeight} r={2.5} color="#0D0D10" />
 
-          <RoundedRect x={0} y={activeY} width={barWidth} height={activeHeight} r={2.5}>
+          <RoundedRect x={0} y={activeY} width={barWidth} height={activeHeight} r={cornerRadius}>
             <LinearGradient
               start={vec(0, layoutHeight)}
               end={vec(0, 0)}
               colors={['#10B981', '#34D399', '#FBBF24', '#F97316', '#EF4444']}
-              positions={[0, 0.65, 0.78, 0.90, 1.0]}
+              positions={[0, 0.571, 0.714, 0.857, 1.0]}
             />
           </RoundedRect>
 
-          <Rect x={0} y={peakY} width={barWidth} height={2} color="#FFFFFF" />
+          <Rect x={0} y={peakY} width={barWidth} height={2} color="#FFFFFF" opacity={peakOpacity} />
         </Canvas>
       </View>
 
@@ -137,7 +143,9 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
                 isSweet ? styles.sweetSpotText : null,
                 isClip ? styles.clipTickText : null,
               ]}
-            >{label}</Text>
+            >
+              {label}
+            </Text>
           );
         })}
       </View>

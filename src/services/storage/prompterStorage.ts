@@ -20,29 +20,33 @@ Use the Mirror toggle if you are shooting through a beam-splitter glass rig, or 
 
 export const PrompterStorage = {
   getScript(): string {
-    return prompterStorage.getString(SCRIPT_KEY) ?? DEFAULT_SCRIPT;
+    const val = prompterStorage.getString(SCRIPT_KEY);
+    return val && val.trim().length > 0 ? val : DEFAULT_SCRIPT;
   },
 
   setScript(text: string): void {
-    prompterStorage.set(SCRIPT_KEY, text);
+    const clean = text && text.trim().length > 0 ? text.trim() : DEFAULT_SCRIPT;
+    prompterStorage.set(SCRIPT_KEY, clean);
   },
 
   getSpeed(): number {
     const val = prompterStorage.getNumber(SPEED_KEY);
-    return val && val >= 15 && val <= 150 ? val : 35; // Default 35 px/s
+    return typeof val === 'number' && !isNaN(val) && val >= 0 && val <= 200 ? val : 35;
   },
 
   setSpeed(speed: number): void {
-    prompterStorage.set(SPEED_KEY, speed);
+    const clamped = Math.max(0, Math.min(200, speed));
+    prompterStorage.set(SPEED_KEY, clamped);
   },
 
   getFontSize(): number {
     const val = prompterStorage.getNumber(FONT_SIZE_KEY);
-    return val && val >= 14 && val <= 36 ? val : 20;
+    return typeof val === 'number' && !isNaN(val) && val >= 1 && val <= 50 ? val : 20;
   },
 
   setFontSize(size: number): void {
-    prompterStorage.set(FONT_SIZE_KEY, size);
+    const clamped = Math.max(1, Math.min(50, size));
+    prompterStorage.set(FONT_SIZE_KEY, clamped);
   },
 
   getIsMirrored(): boolean {
