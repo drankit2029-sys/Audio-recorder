@@ -10,11 +10,10 @@ import {
   Alert,
   Platform,
   PermissionsAndroid,
-  ScrollView,
   LayoutAnimation,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { GestureHandlerRootView,ScrollView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
   FadeOut,
