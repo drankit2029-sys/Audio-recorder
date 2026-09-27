@@ -7,7 +7,7 @@ import { PresetKey, AudioPresetConfig } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
-
+export const BAR_COUNT = 156;
 const formatTimecode = (ms: number) => {
   const totalSeconds = Math.floor(ms / 1000);
   const hrs = Math.floor(totalSeconds / 3600);
@@ -17,6 +17,22 @@ const formatTimecode = (ms: number) => {
     ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
     : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 };
+
+export function generateResumedWaveform(barCount: number = BAR_COUNT): number[] {
+  const bars: number[] = [];
+  let currentVal = 0.2;
+  for (let i = 0; i < barCount; i++) {
+    const cadence = Math.sin(i / 5.5) * Math.cos(i / 11);
+    if (cadence > 0.08) {
+      const noise = Math.sin(i * 1.8) * 0.22 + (Math.random() * 0.16 - 0.08);
+      currentVal = Math.max(0.14, Math.min(0.85, Math.abs(cadence) * 0.72 + noise));
+    } else {
+      currentVal = Math.max(0.01, Math.min(0.07, currentVal * 0.5));
+    }
+    bars.push(Math.round(currentVal * 1000) / 1000);
+  }
+  return bars;
+}
 
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
@@ -45,6 +61,7 @@ export function useAudioRecording() {
     startTime: 0,
     accumulatedMs: 0,
     isPaused: false,
+    waveformHistory: new Array<number>(BAR_COUNT).fill(0),
   });
 
   // Accurate Broadcast Meter Ballistics (Instant Attack, Natural Decay)
@@ -137,7 +154,8 @@ export function useAudioRecording() {
     if (engineState === 'RECORDING') {
       timerRef.current = setInterval(() => {
         const total = telemetry.current.durationMs;
-        SessionJournal.updateHeartbeat(total);
+        // Persist byte offset and current waveform snapshot
+        SessionJournal.updateHeartbeat(total, telemetry.current.waveformHistory);
 
         const now = Date.now();
         if (now - lastNotifTimeRef.current >= 1000) {
@@ -167,6 +185,7 @@ export function useAudioRecording() {
         telemetry.current.meteringDb = -60;
         telemetry.current.accumulatedMs = 0;
         telemetry.current.durationMs = 0;
+        telemetry.current.waveformHistory = new Array<number>(BAR_COUNT).fill(0);
       }
     }
 
@@ -180,19 +199,28 @@ export function useAudioRecording() {
     return telemetry.current.durationMs;
   }, []);
 
-  const startRecording = useCallback(async () => {
+  // In src/services/audio/useAudioRecording.ts
+
+const startRecording = useCallback(async (
+    initialDurationMs: number = 0,
+    initialWaveform?: number[]
+  ) => {
     if (engineStateRef.current === 'RECORDING') return;
 
     engineStateRef.current = 'RECORDING';
     telemetry.current.isPaused = false;
-    telemetry.current.durationMs = 0;
-    telemetry.current.accumulatedMs = 0;
+    telemetry.current.durationMs = initialDurationMs;
+    telemetry.current.accumulatedMs = initialDurationMs;
     telemetry.current.startTime = Date.now();
     isCapturingRef.current = true;
     smoothedDbRef.current = -60;
     telemetry.current.meteringDb = -60;
 
-    setEngineState('RECORDING');
+    if (initialWaveform && initialWaveform.length > 0) {
+      telemetry.current.waveformHistory = [...initialWaveform];
+    }
+
+  setEngineState('RECORDING');
 
     nativeQueueRef.current = nativeQueueRef.current.then(async () => {
       try {
@@ -209,10 +237,10 @@ export function useAudioRecording() {
           formatPreset: currentConfig.key,
           sampleRate: currentConfig.sampleRate,
           channels: currentConfig.channels,
-          startedAt: Date.now(),
+          startedAt: Date.now() - initialDurationMs,
         });
 
-        await recorder.record();
+      await recorder.record();
       } catch (error) {
         setEngineState('ERROR');
         engineStateRef.current = 'ERROR';
@@ -220,10 +248,12 @@ export function useAudioRecording() {
       }
     });
 
-    await nativeQueueRef.current;
-  }, [recorder]);
+  await nativeQueueRef.current;
+}, [recorder]);
 
-  const pauseRecording = useCallback(() => {
+  // In src/services/audio/useAudioRecording.ts
+
+  const pauseRecording = useCallback(async () => {
     if (engineStateRef.current !== 'RECORDING') return;
 
     isCapturingRef.current = false;
@@ -235,21 +265,20 @@ export function useAudioRecording() {
     setEngineState('PAUSED');
     SessionJournal.setStatus('PAUSED');
 
-    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-      try {
-        await recorder.pause();
-        ForegroundServiceManager.updateProgress(
-          formatTimecode(telemetry.current.durationMs),
-          activePresetRef.current.badge,
-          true
-        );
-      } catch (err) {
-        console.warn('[useAudioRecording] recorder.pause failed:', err);
-      }
-    });
+    try {
+      await recorder.pause();
+    } catch (err) {
+      console.warn('[useAudioRecording] recorder.pause failed:', err);
+    }
+
+    await ForegroundServiceManager.updateProgress(
+      formatTimecode(telemetry.current.durationMs),
+      activePresetRef.current.badge,
+      true
+    );
   }, [recorder]);
 
-  const resumeRecording = useCallback(() => {
+  const resumeRecording = useCallback(async () => {
     if (engineStateRef.current !== 'PAUSED') return;
 
     telemetry.current.isPaused = false;
@@ -260,40 +289,45 @@ export function useAudioRecording() {
     setEngineState('RECORDING');
     SessionJournal.setStatus('RECORDING');
 
-    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-      try {
-        await recorder.record();
-      } catch (err) {
-        console.warn('[useAudioRecording] recorder.record failed:', err);
-      }
-    });
+    try {
+      await recorder.record();
+    } catch (err) {
+      console.warn('[useAudioRecording] recorder.record failed:', err);
+    }
+
+    await ForegroundServiceManager.updateProgress(
+      formatTimecode(telemetry.current.durationMs),
+      activePresetRef.current.badge,
+      false
+    );
   }, [recorder]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
+    if (engineStateRef.current !== 'RECORDING' && engineStateRef.current !== 'PAUSED') {
+      return recorder.uri || fileUriRef.current;
+    }
+
     engineStateRef.current = 'STOPPED';
     isCapturingRef.current = false;
     telemetry.current.isPaused = true;
     setEngineState('STOPPED');
 
-    return new Promise<string | null>((resolve, reject) => {
-      nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-        try {
-          await recorder.stop();
-          const finalUri = recorder.uri || fileUriRef.current;
-          SessionJournal.setStatus('FINALIZED');
-          SessionJournal.clearSession();
-          resolve(finalUri);
-        } catch (error) {
-          setEngineState('ERROR');
-          engineStateRef.current = 'ERROR';
-          reject(error);
-        }
-      });
-    });
+    try {
+      await recorder.stop();
+    } catch (error) {
+      console.warn('[useAudioRecording] recorder.stop caught non-fatal exception:', error);
+    }
+
+    const finalUri = recorder.uri || fileUriRef.current;
+    SessionJournal.setStatus('FINALIZED');
+    SessionJournal.clearSession();
+    return finalUri;
   }, [recorder]);
 
   const resetEngine = useCallback(async () => {
-    try { await recorder.stop(); } catch {}
+    if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
+      try { await recorder.stop(); } catch {}
+    }
     SessionJournal.clearSession();
     setEngineState('IDLE');
     engineStateRef.current = 'IDLE';
@@ -302,6 +336,7 @@ export function useAudioRecording() {
     telemetry.current.startTime = 0;
     telemetry.current.meteringDb = -60;
     telemetry.current.isPaused = false;
+    telemetry.current.waveformHistory = new Array<number>(BAR_COUNT).fill(0);
     smoothedDbRef.current = -60;
   }, [recorder]);
 

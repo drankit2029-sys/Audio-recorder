@@ -2,7 +2,6 @@
 import { Platform, PermissionsAndroid } from 'react-native';
 import notifee, {
   AndroidImportance,
-  AndroidColor,
   EventType,
   Event,
   AndroidForegroundServiceType,
@@ -17,15 +16,17 @@ interface ServiceHandlers {
 }
 
 class ForegroundServiceManagerImpl {
-  private channelId = 'recording_service_channel';
+  private channelId = 'studio_recording_channel';
   private isInitialized = false;
   private isRunning = false;
   private lastStartTime = 0;
+  private isPaused = false;
+  private currentPresetBadge = 'WAV';
+  private lastTimerText = '00:00';
   private handlers: ServiceHandlers = {};
   private actionQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    // Keep headless task runner open for the lifetime of the recording
     notifee.registerForegroundService(() => {
       return new Promise(() => {});
     });
@@ -39,15 +40,51 @@ class ForegroundServiceManagerImpl {
     });
   }
 
+  private async renderNotification(): Promise<void> {
+    if (!this.isRunning) return;
+
+    const actions = this.isPaused
+      ? [
+          { title: 'Resume', pressAction: { id: 'resume' } },
+          { title: 'Stop', pressAction: { id: 'stop' } },
+        ]
+      : [
+          { title: 'Pause', pressAction: { id: 'pause' } },
+          { title: 'Stop', pressAction: { id: 'stop' } },
+        ];
+
+    try {
+      await notifee.displayNotification({
+        id: 'recording_ongoing',
+        title: this.isPaused ? 'Paused' : 'Recording',
+        body: `${this.lastTimerText} • ${this.currentPresetBadge}`,
+        android: {
+          channelId: this.channelId,
+          asForegroundService: true,
+          color: '#27272A',
+          ongoing: true,
+          onlyAlertOnce: true,
+          pressAction: { id: 'default' },
+          actions,
+        },
+      });
+    } catch {}
+  }
+
   private async handleNotificationAction(type: EventType, detail: any) {
     if (type === EventType.ACTION_PRESS && detail.pressAction) {
       const actionId = detail.pressAction.id;
-      if (actionId === 'pause' && this.handlers.onPause) {
-        await this.handlers.onPause();
-      } else if (actionId === 'resume' && this.handlers.onResume) {
-        await this.handlers.onResume();
-      } else if (actionId === 'stop' && this.handlers.onStop) {
-        await this.handlers.onStop();
+      if (actionId === 'pause') {
+        this.isPaused = true;
+        await this.renderNotification();
+        if (this.handlers.onPause) await this.handlers.onPause();
+      } else if (actionId === 'resume') {
+        this.isPaused = false;
+        await this.renderNotification();
+        if (this.handlers.onResume) await this.handlers.onResume();
+      } else if (actionId === 'stop') {
+        if (this.handlers.onStop) await this.handlers.onStop();
+        await this.stopService();
       }
     }
   }
@@ -76,22 +113,22 @@ class ForegroundServiceManagerImpl {
     this.actionQueue = this.actionQueue.then(async () => {
       if (this.isRunning) return;
 
-      // Android 14 guard: Never invoke microphone FGS without granted audio permission
       if (Platform.OS === 'android') {
         const hasMicPermission = await PermissionsAndroid.check(
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
         );
-        if (!hasMicPermission) {
-          console.warn('[ForegroundServiceManager] RECORD_AUDIO permission missing; aborting FGS start.');
-          return;
-        }
+        if (!hasMicPermission) return;
       }
 
       await this.initialize();
 
+      this.currentPresetBadge = presetBadge;
+      this.lastTimerText = '00:00';
+      this.isPaused = false;
+
       await notifee.displayNotification({
         id: 'recording_ongoing',
-        title: 'Recording Active',
+        title: 'Recording',
         body: `00:00 • ${presetBadge}`,
         android: {
           channelId: this.channelId,
@@ -99,8 +136,9 @@ class ForegroundServiceManagerImpl {
           foregroundServiceTypes: [
             AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
           ],
-          color: AndroidColor.RED,
+          color: '#27272A',
           ongoing: true,
+          onlyAlertOnce: true,
           pressAction: { id: 'default' },
           actions: [
             { title: 'Pause', pressAction: { id: 'pause' } },
@@ -120,41 +158,17 @@ class ForegroundServiceManagerImpl {
   }
 
   public async updateProgress(timerText: string, presetBadge: string, isPaused: boolean): Promise<void> {
-    // Only update if service is actively established
     if (!this.isRunning) return;
-
-    try {
-      // NOTE: asForegroundService is intentionally omitted here to prevent re-calling Context.startForegroundService()
-      await notifee.displayNotification({
-        id: 'recording_ongoing',
-        title: isPaused ? 'Recording Paused' : 'Recording Active',
-        body: `${timerText} • ${presetBadge}`,
-        android: {
-          channelId: this.channelId,
-          color: isPaused ? AndroidColor.ORANGE : AndroidColor.RED,
-          ongoing: true,
-          pressAction: { id: 'default' },
-          actions: isPaused
-            ? [
-                { title: 'Resume', pressAction: { id: 'resume' } },
-                { title: 'Stop', pressAction: { id: 'stop' } },
-              ]
-            : [
-                { title: 'Pause', pressAction: { id: 'pause' } },
-                { title: 'Stop', pressAction: { id: 'stop' } },
-              ],
-        },
-      });
-    } catch {
-      // Suppress transient background UI update drops
-    }
+    this.lastTimerText = timerText;
+    this.currentPresetBadge = presetBadge;
+    this.isPaused = isPaused;
+    await this.renderNotification();
   }
 
   public stopService(): Promise<void> {
     this.actionQueue = this.actionQueue.then(async () => {
       if (!this.isRunning) return;
 
-      // Allow Android OS at least 500ms to complete its native onStartCommand/startForeground handshake
       const elapsed = Date.now() - this.lastStartTime;
       if (elapsed < 500) {
         await new Promise((res) => setTimeout(res, 500 - elapsed));
@@ -167,6 +181,7 @@ class ForegroundServiceManagerImpl {
         console.warn('[ForegroundServiceManager] stopService error:', error);
       } finally {
         this.isRunning = false;
+        this.isPaused = false;
       }
     });
 

@@ -18,6 +18,8 @@ export interface ActiveSessionRecord {
   lastHeartbeatTimestamp: number;
   byteOffsetEstimate: number;
   status: RecordingStatus;
+  waveformSnapshot?: number[];
+  prompterOffset?: number;
 }
 
 const ACTIVE_SESSION_KEY = 'active_recording_session';
@@ -33,7 +35,11 @@ export const SessionJournal = {
     sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
   },
 
-  updateHeartbeat(byteOffset: number): void {
+  updateHeartbeat(
+    byteOffset: number,
+    waveformSnapshot?: number[],
+    prompterOffset?: number
+  ): void {
     const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
@@ -41,6 +47,12 @@ export const SessionJournal = {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.lastHeartbeatTimestamp = Date.now();
       record.byteOffsetEstimate = byteOffset;
+      if (waveformSnapshot && waveformSnapshot.length > 0) {
+        record.waveformSnapshot = waveformSnapshot;
+      }
+      if (typeof prompterOffset === 'number') {
+        record.prompterOffset = prompterOffset;
+      }
       sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
   },

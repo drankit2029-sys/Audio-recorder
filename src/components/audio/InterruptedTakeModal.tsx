@@ -7,7 +7,7 @@ import {
   TouchableOpacity,
   StyleSheet,
 } from 'react-native';
-import { RotateCcw, Trash2, Clock, HardDrive, AlertTriangle } from 'lucide-react-native';
+import { Play, Trash2, Clock, HardDrive, AlertTriangle } from 'lucide-react-native';
 import { ActiveSessionRecord } from '../../services/storage/sessionJournal';
 import { AUDIO_PRESETS } from '../../services/audio/types';
 import { useResponsive } from '../../hooks/useResponsive';
@@ -17,7 +17,7 @@ interface InterruptedTakeModalProps {
   session: ActiveSessionRecord | null;
   sizeBytes: number;
   onDiscard: () => void;
-  onRestore: () => void;
+  onResume: () => void;
 }
 
 export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
@@ -25,7 +25,7 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
   session,
   sizeBytes,
   onDiscard,
-  onRestore,
+  onResume,
 }) => {
   const { isTablet } = useResponsive();
 
@@ -68,17 +68,15 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
     >
       <View style={styles.backdrop}>
         <View style={[styles.card, isTablet && styles.cardTablet]}>
-          {/* Glowing Amber Warning Icon Circle */}
           <View style={styles.iconCircle}>
             <AlertTriangle size={24} color="#F59E0B" strokeWidth={2.2} />
           </View>
 
           <Text style={styles.title}>Interrupted Take Detected</Text>
           <Text style={styles.description}>
-            The app closed during active audio capture. You can restore this audio take to your library or permanently discard it.
+            The app closed during active audio capture. You can resume this recording from where it was left off or permanently discard it.
           </Text>
 
-          {/* Session Metadata Card */}
           <View style={styles.metaBox}>
             <View style={styles.metaRow}>
               <View style={styles.metaItem}>
@@ -107,7 +105,6 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
             </View>
           </View>
 
-          {/* Action Buttons */}
           <View style={styles.actionsRow}>
             <TouchableOpacity
               style={styles.discardBtn}
@@ -119,12 +116,12 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.restoreBtn}
-              onPress={onRestore}
+              style={styles.resumeBtn}
+              onPress={onResume}
               activeOpacity={0.8}
             >
-              <RotateCcw size={14} color="#000000" strokeWidth={2.5} />
-              <Text style={styles.restoreBtnText}>RESTORE TAKE</Text>
+              <Play size={13} color="#000000" fill="#000000" />
+              <Text style={styles.resumeBtnText}>RESUME TAKE</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -281,7 +278,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.5,
   },
-  restoreBtn: {
+  resumeBtn: {
     flex: 1.3,
     height: 44,
     flexDirection: 'row',
@@ -291,7 +288,7 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
-  restoreBtnText: {
+  resumeBtnText: {
     color: '#000000',
     fontSize: 12,
     fontWeight: '700',

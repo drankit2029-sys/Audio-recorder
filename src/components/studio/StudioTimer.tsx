@@ -14,12 +14,13 @@ interface StudioTimerProps {
   isTablet?: boolean;
 }
 
+
 export const StudioTimer: React.FC<StudioTimerProps> = ({
   telemetry,
   engineState,
   isTablet = false,
 }) => {
-  const [displayMs, setDisplayMs] = useState(0);
+  const [displayMs, setDisplayMs] = useState(telemetry.current.durationMs || 0);
 
   useEffect(() => {
     let frameId: number;
@@ -40,6 +41,8 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
 
     if (engineState === 'RECORDING' && !telemetry.current.isPaused) {
       frameId = requestAnimationFrame(tick);
+    } else if (engineState === 'PAUSED') {
+      setDisplayMs(telemetry.current.durationMs);
     } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
       setDisplayMs(0);
     }
@@ -48,6 +51,8 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
       if (frameId) cancelAnimationFrame(frameId);
     };
   }, [engineState, telemetry]);
+
+
 
   const totalSeconds = Math.floor(displayMs / 1000);
   const hrs = Math.floor(totalSeconds / 3600);

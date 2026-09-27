@@ -1,5 +1,5 @@
 // src/components/prompter/TeleprompterDeck.tsx
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -55,6 +55,7 @@ import { EngineState } from '../../services/audio/useAudioRecording';
 export interface TeleprompterDeckProps {
   engineState: EngineState;
   customHeight?: number;
+  initialDurationMs?: number; // Target time offset when resuming an interrupted take
 }
 
 const FALLBACK_SCRIPT = `Welcome to the studio. This is your synchronized teleprompter.
@@ -73,6 +74,7 @@ const ITEM_ROW_HEIGHT = 44;
 export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   engineState,
   customHeight,
+  initialDurationMs = 0,
 }) => {
   const [script, setScript] = useState(() => {
     const stored = PrompterStorage.getScript();
@@ -94,6 +96,8 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   const [containerHeight, setContainerHeight] = useState(initialHeight);
   const [canvasLayout, setCanvasLayout] = useState({ width: 360, height: initialHeight });
 
+  const hasRestoredPrompterRef = useRef(false);
+  
   const activeViewportHeight = Math.max(
     120,
     customHeight && customHeight > 0 ? customHeight : containerHeight
@@ -212,9 +216,18 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   }, [isAutoScrolling, isAutoScrollingShared]);
 
   // Sync scroll state with audio recording engine lifecycle
-  useEffect(() => {
+useEffect(() => {
     if (engineState === 'RECORDING') {
-      if (translateY.value <= -maxScrollShared.value + 2) {
+      // If resuming with elapsed duration, pre-position scroll down the script
+      if (initialDurationMs > 0 && !hasRestoredPrompterRef.current) {
+        const elapsedSeconds = initialDurationMs / 1000;
+        const targetScrollPx = Math.min(
+          maxScrollShared.value,
+          speedShared.value * elapsedSeconds
+        );
+        translateY.value = -targetScrollPx;
+        hasRestoredPrompterRef.current = true;
+      } else if (translateY.value <= -maxScrollShared.value + 2) {
         translateY.value = 0;
       }
       setIsAutoScrolling(true);
@@ -222,13 +235,14 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
       setIsAutoScrolling(false);
     } else if (engineState === 'STOPPED' || engineState === 'IDLE') {
       setIsAutoScrolling(false);
+      hasRestoredPrompterRef.current = false;
       cancelAnimation(translateY);
       translateY.value = withTiming(0, {
         duration: 250,
         easing: Easing.out(Easing.quad),
       });
     }
-  }, [engineState, translateY, maxScrollShared]);
+  }, [engineState, translateY, maxScrollShared, initialDurationMs, speedShared]);
 
   // Frame-by-frame delta integration
   useFrameCallback((frameInfo) => {

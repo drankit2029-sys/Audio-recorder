@@ -4,19 +4,22 @@ import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
 import { Canvas, Path, Skia, BlurMask } from '@shopify/react-native-skia';
 import { EngineState } from '../../services/audio/useAudioRecording';
 
+// In src/components/studio/LiveWaveform.tsx
+
 interface LiveWaveformProps {
   telemetry: React.MutableRefObject<{
     meteringDb: number;
     isPaused: boolean;
+    waveformHistory?: number[];
   }>;
   engineState: EngineState;
   height?: number;
 }
 
 const BAR_COUNT = 156;
-const BASELINE_AMPLITUDE = 0.00; // Resting pill height during silence
-const NOISE_FLOOR_DB = -40;       // Floor to gate out room noise
-const PEAK_DB = 0;               // Target vocal ceiling
+const BASELINE_AMPLITUDE = 0.00;
+const NOISE_FLOOR_DB = -40;
+const PEAK_DB = 0;
 const GLOW_PADDING = 24;
 
 export const LiveWaveform: React.FC<LiveWaveformProps> = ({
@@ -26,13 +29,9 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
 }) => {
   const [canvasWidth, setCanvasWidth] = useState(240);
 
-  // The historical tape: once pushed, each bar's height is FROZEN
   const historyRef = useRef<number[]>(new Array(BAR_COUNT).fill(BASELINE_AMPLITUDE));
-
-  // Tracking refs for the incoming audio pulse and smoothed glow
   const currentAmpRef = useRef(BASELINE_AMPLITUDE);
   const glowRef = useRef(0);
-
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -42,6 +41,16 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       glowRef.current = 0;
       setTick((t) => (t + 1) % 10000);
       return;
+    }
+
+    // When RECORDING starts, check if telemetry has a preloaded resumed waveform tape
+    if (engineState === 'RECORDING') {
+      const existing = telemetry.current.waveformHistory;
+      if (existing && existing.some((val) => val > 0.05)) {
+        historyRef.current = [...existing];
+        glowRef.current = 0.35; // Enable ambient glow right away
+        setTick((t) => (t + 1) % 10000);
+      }
     }
 
     if (engineState === 'PAUSED' || telemetry.current.isPaused) {
@@ -57,34 +66,32 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       const now = Date.now();
       const rawDb = telemetry.current.meteringDb;
 
-      // 1. Precise vocal expansion
       let targetAmp = BASELINE_AMPLITUDE;
       if (rawDb > NOISE_FLOOR_DB) {
         const normalized = Math.max(0, Math.min(1.0, (rawDb - NOISE_FLOOR_DB) / (PEAK_DB - NOISE_FLOOR_DB)));
         targetAmp = Math.max(BASELINE_AMPLITUDE, Math.pow(normalized, 1.5));
       }
 
-      // 2. Instant Attack, Snappy Release for individual waveform bars
       if (targetAmp > currentAmpRef.current) {
         currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.90;
       } else {
         currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.40;
       }
 
-      // 3. Asymmetric Glow Smoothing: Gentle bloom rise and long analog decay
       if (targetAmp > glowRef.current) {
         glowRef.current += (targetAmp - glowRef.current) * 0.12;
       } else {
         glowRef.current += (targetAmp - glowRef.current) * 0.035;
       }
 
-      // 4. Shift the tape at ~34ms intervals (~29 slices per second)
       if (now - lastPushTime >= 34) {
         lastPushTime = now;
         historyRef.current.push(currentAmpRef.current);
         if (historyRef.current.length > BAR_COUNT) {
           historyRef.current.shift();
         }
+        // Mirror the active tape into the telemetry ref for session journaling
+        telemetry.current.waveformHistory = historyRef.current;
       }
 
       setTick((t) => (t + 1) % 10000);
@@ -96,6 +103,8 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       if (frameId) cancelAnimationFrame(frameId);
     };
   }, [engineState, telemetry]);
+
+  // ... rest of LiveWaveform layout and Skia canvas paths remain unchanged
 
   const onLayout = (e: LayoutChangeEvent) => {
     const w = Math.round(e.nativeEvent.layout.width);
