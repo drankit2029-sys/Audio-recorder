@@ -73,7 +73,7 @@ import {
   LayoutAnimation,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { GestureHandlerRootView,ScrollView } from 'react-native-gesture-handler';
+import { GestureHandlerRootView, ScrollView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
   FadeOut,
@@ -102,7 +102,7 @@ import {
 
 import { SessionJournal, ActiveSessionRecord } from './src/services/storage/sessionJournal';
 import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
-import { useAudioRecording } from './src/services/audio/useAudioRecording';
+import { useAudioRecording, generateResumedWaveform } from './src/services/audio/useAudioRecording';
 import { StudioTimer } from './src/components/studio/StudioTimer';
 import { AudioMeter } from './src/components/meter/AudioMeter';
 import { LiveWaveform } from './src/components/studio/LiveWaveform';
@@ -150,6 +150,7 @@ function AudioRecorderApp() {
   const [orphanedSession, setOrphanedSession] = useState<ActiveSessionRecord | null>(null);
   const [orphanedTakeSize, setOrphanedTakeSize] = useState(0);
   const [interruptedModalVisible, setInterruptedModalVisible] = useState(false);
+  const [resumedDurationMs, setResumedDurationMs] = useState(0);
 
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isTransportBusyRef = useRef(false);
@@ -243,7 +244,9 @@ function AudioRecorderApp() {
     setShowPrompter((prev) => !prev);
   };
 
-  const handleStopPress = async () => {
+  // In App.tsx
+
+  const handleStopPress = async (autoSave = false) => {
     if (isTransportBusyRef.current) return;
     isTransportBusyRef.current = true;
 
@@ -254,6 +257,7 @@ function AudioRecorderApp() {
       const outputUri = await stopRecording();
       releaseHardwareRoutingRef.current();
       await resetEngine();
+      setResumedDurationMs(0);
 
       await ForegroundServiceManager.stopService();
 
@@ -267,25 +271,52 @@ function AudioRecorderApp() {
         const now = new Date();
         const defaultName = `Take ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
 
-        setPendingTake({
-          uri: outputUri,
-          sizeBytes,
-          durationMs: finalDuration,
-          defaultName,
-          formatBadge: activePreset.badge,
-        });
-        setNameModalVisible(true);
+        if (autoSave) {
+          // Direct background save when stopped via notification
+          const newRecord: SavedRecording = {
+            id: `take_${Date.now()}`,
+            name: defaultName,
+            uri: outputUri,
+            sizeBytes,
+            durationMs: finalDuration,
+            createdAt: Date.now(),
+          };
+
+          const updated = RecordingLibrary.save(newRecord);
+          setRecordings(updated);
+
+          if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+          const formattedSize = sizeBytes < 1024 * 1024
+            ? `${(sizeBytes / 1024).toFixed(1)} KB`
+            : `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
+
+          setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
+          toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
+        } else {
+          // In-app stop button: display name prompt modal
+          setPendingTake({
+            uri: outputUri,
+            sizeBytes,
+            durationMs: finalDuration,
+            defaultName,
+            formatBadge: activePreset.badge,
+          });
+          setNameModalVisible(true);
+        }
       }
     } catch (e: any) {
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
       releaseHardwareRoutingRef.current();
       await resetEngine();
+      setResumedDurationMs(0);
       Alert.alert('Stop Error', e.message);
     } finally {
       isTransportBusyRef.current = false;
     }
   };
+
+  
 
   const handleStopPressRef = useRef(handleStopPress);
   handleStopPressRef.current = handleStopPress;
@@ -337,13 +368,14 @@ function AudioRecorderApp() {
     SessionJournal.clearSession();
     setInterruptedModalVisible(false);
     setOrphanedSession(null);
+    setResumedDurationMs(0);
 
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     setToastData({ title: 'Take Discarded', subtitle: 'Interrupted recording removed' });
     toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
   };
 
-  const handleRestoreInterruptedTake = async () => {
+  const handleResumeInterruptedTake = async () => {
     if (!orphanedSession) return;
 
     const durationMs =
@@ -351,40 +383,66 @@ function AudioRecorderApp() {
         ? orphanedSession.byteOffsetEstimate
         : Math.max(1000, orphanedSession.lastHeartbeatTimestamp - orphanedSession.startedAt);
 
-    const timeStr = new Date(orphanedSession.startedAt).toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-    const finalName = `Recovered Take (${timeStr})`;
+    const oldFileUri = orphanedSession.fileUri;
+    const targetPresetKey = orphanedSession.formatPreset;
 
-    const newRecord: SavedRecording = {
-      id: `take_${Date.now()}`,
-      name: finalName,
-      uri: orphanedSession.fileUri,
-      sizeBytes: orphanedTakeSize,
-      durationMs,
-      createdAt: orphanedSession.startedAt || Date.now(),
-    };
+    const restoredWaveform =
+      orphanedSession.waveformSnapshot && orphanedSession.waveformSnapshot.length > 0
+        ? orphanedSession.waveformSnapshot
+        : generateResumedWaveform();
 
-    const updated = RecordingLibrary.save(newRecord);
-    setRecordings(updated);
-    SessionJournal.clearSession();
-
+    setResumedDurationMs(durationMs);
     setInterruptedModalVisible(false);
     setOrphanedSession(null);
-    setCurrentScreen('library');
+    setCurrentScreen('studio');
 
-    const formattedSize =
-      orphanedTakeSize < 1024 * 1024
-        ? `${(orphanedTakeSize / 1024).toFixed(1)} KB`
-        : `${(orphanedTakeSize / (1024 * 1024)).toFixed(2)} MB`;
+    if (targetPresetKey && targetPresetKey !== activePreset.key) {
+      try {
+        setPresetKey(targetPresetKey);
+      } catch {}
+    }
 
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    setToastData({
-      title: 'Take Restored',
-      subtitle: `${newRecord.name} • ${formattedSize} saved to library`,
-    });
-    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3500);
+    try {
+      isTransportBusyRef.current = true;
+      activateHardwareRoutingRef.current();
+      await activateKeepAwakeAsync();
+
+      await ForegroundServiceManager.startService(activePreset.badge);
+      await startRecording(durationMs, restoredWaveform);
+
+      if (oldFileUri) {
+        try {
+          await FileSystem.deleteAsync(oldFileUri, { idempotent: true });
+        } catch {}
+      }
+
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+      const mins = Math.floor(durationMs / 60000);
+      const secs = Math.floor((durationMs % 60000) / 1000);
+      const timeFormatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+
+      setToastData({
+        title: 'Take Resumed',
+        subtitle: `Resumed take from ${timeFormatted}`,
+      });
+      toastTimeoutRef.current = setTimeout(() => setToastData(null), 3500);
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
+      setResumedDurationMs(0);
+      Alert.alert('Capture Fault', `Could not resume take: ${e.message}`, [
+        {
+          text: 'OK',
+          onPress: async () => {
+            await resetEngine();
+            setCurrentScreen('studio');
+          },
+        },
+      ]);
+    } finally {
+      isTransportBusyRef.current = false;
+    }
   };
 
   useEffect(() => {
@@ -395,7 +453,7 @@ function AudioRecorderApp() {
     ForegroundServiceManager.registerHandlers({
       onPause: async () => { try { await pauseRecordingRef.current(); } catch {} },
       onResume: async () => { try { await resumeRecordingRef.current(); } catch {} },
-      onStop: async () => { try { await handleStopPressRef.current(); } catch {} },
+      onStop: async () => { try { await handleStopPressRef.current(true); } catch {} },
     });
   }, []);
 
@@ -413,11 +471,12 @@ function AudioRecorderApp() {
         }
 
         await AudioModule.setAudioModeAsync({
-          allowsRecording: true,
-          playsInSilentMode: true,
-          interruptionMode: 'doNotMix',
-          shouldRouteThroughEarpiece: false,
-        });
+            allowsRecording: true,
+            playsInSilentMode: true,
+            interruptionMode: 'doNotMix',
+            shouldRouteThroughEarpiece: false,
+            staysActiveInBackground: true, // <-- Prevents expo-audio from auto-pausing/resuming on background/foreground
+          });
 
         refreshDevices();
         setRecordings(RecordingLibrary.getAll());
@@ -462,9 +521,10 @@ function AudioRecorderApp() {
         resumeRecording();
       } else {
         isTransportBusyRef.current = true;
+        setResumedDurationMs(0);
         activateHardwareRoutingRef.current();
         activateKeepAwakeAsync();
-        
+
         await ForegroundServiceManager.startService(activePreset.badge);
         await startRecording();
       }
@@ -472,6 +532,7 @@ function AudioRecorderApp() {
       deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
       releaseHardwareRoutingRef.current();
+      setResumedDurationMs(0);
       Alert.alert('Capture Fault', e.message, [
         {
           text: 'OK',
@@ -562,7 +623,11 @@ function AudioRecorderApp() {
               <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} bounces={false}>
                 {showPrompter ? (
                   <View style={styles.prompterWrapper}>
-                    <TeleprompterDeck engineState={engineState} customHeight={prompterHeight} />
+                    <TeleprompterDeck
+                      engineState={engineState}
+                      customHeight={prompterHeight}
+                      initialDurationMs={resumedDurationMs}
+                    />
                   </View>
                 ) : null}
 
@@ -657,7 +722,7 @@ function AudioRecorderApp() {
         session={orphanedSession}
         sizeBytes={orphanedTakeSize}
         onDiscard={handleDiscardInterruptedTake}
-        onRestore={handleRestoreInterruptedTake}
+        onResume={handleResumeInterruptedTake}
       />
 
       {pendingTake ? (
@@ -1490,6 +1555,8 @@ export interface ActiveSessionRecord {
   lastHeartbeatTimestamp: number;
   byteOffsetEstimate: number;
   status: RecordingStatus;
+  waveformSnapshot?: number[];
+  prompterOffset?: number;
 }
 
 const ACTIVE_SESSION_KEY = 'active_recording_session';
@@ -1505,7 +1572,11 @@ export const SessionJournal = {
     sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
   },
 
-  updateHeartbeat(byteOffset: number): void {
+  updateHeartbeat(
+    byteOffset: number,
+    waveformSnapshot?: number[],
+    prompterOffset?: number
+  ): void {
     const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
@@ -1513,6 +1584,12 @@ export const SessionJournal = {
       const record: ActiveSessionRecord = JSON.parse(raw);
       record.lastHeartbeatTimestamp = Date.now();
       record.byteOffsetEstimate = byteOffset;
+      if (waveformSnapshot && waveformSnapshot.length > 0) {
+        record.waveformSnapshot = waveformSnapshot;
+      }
+      if (typeof prompterOffset === 'number') {
+        record.prompterOffset = prompterOffset;
+      }
       sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
   },
@@ -1556,7 +1633,6 @@ FILE: src/services/audio/ForegroundServiceManager.ts
 import { Platform, PermissionsAndroid } from 'react-native';
 import notifee, {
   AndroidImportance,
-  AndroidColor,
   EventType,
   Event,
   AndroidForegroundServiceType,
@@ -1571,15 +1647,17 @@ interface ServiceHandlers {
 }
 
 class ForegroundServiceManagerImpl {
-  private channelId = 'recording_service_channel';
+  private channelId = 'studio_recording_channel';
   private isInitialized = false;
   private isRunning = false;
   private lastStartTime = 0;
+  private isPaused = false;
+  private currentPresetBadge = 'WAV';
+  private lastTimerText = '00:00';
   private handlers: ServiceHandlers = {};
   private actionQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    // Keep headless task runner open for the lifetime of the recording
     notifee.registerForegroundService(() => {
       return new Promise(() => {});
     });
@@ -1593,15 +1671,51 @@ class ForegroundServiceManagerImpl {
     });
   }
 
+  private async renderNotification(): Promise<void> {
+    if (!this.isRunning) return;
+
+    const actions = this.isPaused
+      ? [
+          { title: 'Resume', pressAction: { id: 'resume' } },
+          { title: 'Stop', pressAction: { id: 'stop' } },
+        ]
+      : [
+          { title: 'Pause', pressAction: { id: 'pause' } },
+          { title: 'Stop', pressAction: { id: 'stop' } },
+        ];
+
+    try {
+      await notifee.displayNotification({
+        id: 'recording_ongoing',
+        title: this.isPaused ? 'Paused' : 'Recording',
+        body: `${this.lastTimerText} • ${this.currentPresetBadge}`,
+        android: {
+          channelId: this.channelId,
+          asForegroundService: true,
+          color: '#27272A',
+          ongoing: true,
+          onlyAlertOnce: true,
+          pressAction: { id: 'default' },
+          actions,
+        },
+      });
+    } catch {}
+  }
+
   private async handleNotificationAction(type: EventType, detail: any) {
     if (type === EventType.ACTION_PRESS && detail.pressAction) {
       const actionId = detail.pressAction.id;
-      if (actionId === 'pause' && this.handlers.onPause) {
-        await this.handlers.onPause();
-      } else if (actionId === 'resume' && this.handlers.onResume) {
-        await this.handlers.onResume();
-      } else if (actionId === 'stop' && this.handlers.onStop) {
-        await this.handlers.onStop();
+      if (actionId === 'pause') {
+        this.isPaused = true;
+        await this.renderNotification();
+        if (this.handlers.onPause) await this.handlers.onPause();
+      } else if (actionId === 'resume') {
+        this.isPaused = false;
+        await this.renderNotification();
+        if (this.handlers.onResume) await this.handlers.onResume();
+      } else if (actionId === 'stop') {
+        if (this.handlers.onStop) await this.handlers.onStop();
+        await this.stopService();
       }
     }
   }
@@ -1630,22 +1744,22 @@ class ForegroundServiceManagerImpl {
     this.actionQueue = this.actionQueue.then(async () => {
       if (this.isRunning) return;
 
-      // Android 14 guard: Never invoke microphone FGS without granted audio permission
       if (Platform.OS === 'android') {
         const hasMicPermission = await PermissionsAndroid.check(
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
         );
-        if (!hasMicPermission) {
-          console.warn('[ForegroundServiceManager] RECORD_AUDIO permission missing; aborting FGS start.');
-          return;
-        }
+        if (!hasMicPermission) return;
       }
 
       await this.initialize();
 
+      this.currentPresetBadge = presetBadge;
+      this.lastTimerText = '00:00';
+      this.isPaused = false;
+
       await notifee.displayNotification({
         id: 'recording_ongoing',
-        title: 'Recording Active',
+        title: 'Recording',
         body: `00:00 • ${presetBadge}`,
         android: {
           channelId: this.channelId,
@@ -1653,8 +1767,9 @@ class ForegroundServiceManagerImpl {
           foregroundServiceTypes: [
             AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
           ],
-          color: AndroidColor.RED,
+          color: '#27272A',
           ongoing: true,
+          onlyAlertOnce: true,
           pressAction: { id: 'default' },
           actions: [
             { title: 'Pause', pressAction: { id: 'pause' } },
@@ -1674,41 +1789,17 @@ class ForegroundServiceManagerImpl {
   }
 
   public async updateProgress(timerText: string, presetBadge: string, isPaused: boolean): Promise<void> {
-    // Only update if service is actively established
     if (!this.isRunning) return;
-
-    try {
-      // NOTE: asForegroundService is intentionally omitted here to prevent re-calling Context.startForegroundService()
-      await notifee.displayNotification({
-        id: 'recording_ongoing',
-        title: isPaused ? 'Recording Paused' : 'Recording Active',
-        body: `${timerText} • ${presetBadge}`,
-        android: {
-          channelId: this.channelId,
-          color: isPaused ? AndroidColor.ORANGE : AndroidColor.RED,
-          ongoing: true,
-          pressAction: { id: 'default' },
-          actions: isPaused
-            ? [
-                { title: 'Resume', pressAction: { id: 'resume' } },
-                { title: 'Stop', pressAction: { id: 'stop' } },
-              ]
-            : [
-                { title: 'Pause', pressAction: { id: 'pause' } },
-                { title: 'Stop', pressAction: { id: 'stop' } },
-              ],
-        },
-      });
-    } catch {
-      // Suppress transient background UI update drops
-    }
+    this.lastTimerText = timerText;
+    this.currentPresetBadge = presetBadge;
+    this.isPaused = isPaused;
+    await this.renderNotification();
   }
 
   public stopService(): Promise<void> {
     this.actionQueue = this.actionQueue.then(async () => {
       if (!this.isRunning) return;
 
-      // Allow Android OS at least 500ms to complete its native onStartCommand/startForeground handshake
       const elapsed = Date.now() - this.lastStartTime;
       if (elapsed < 500) {
         await new Promise((res) => setTimeout(res, 500 - elapsed));
@@ -1721,6 +1812,7 @@ class ForegroundServiceManagerImpl {
         console.warn('[ForegroundServiceManager] stopService error:', error);
       } finally {
         this.isRunning = false;
+        this.isPaused = false;
       }
     });
 
@@ -2095,7 +2187,7 @@ import { PresetKey, AudioPresetConfig } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
-
+export const BAR_COUNT = 156;
 const formatTimecode = (ms: number) => {
   const totalSeconds = Math.floor(ms / 1000);
   const hrs = Math.floor(totalSeconds / 3600);
@@ -2105,6 +2197,22 @@ const formatTimecode = (ms: number) => {
     ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
     : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
 };
+
+export function generateResumedWaveform(barCount: number = BAR_COUNT): number[] {
+  const bars: number[] = [];
+  let currentVal = 0.2;
+  for (let i = 0; i < barCount; i++) {
+    const cadence = Math.sin(i / 5.5) * Math.cos(i / 11);
+    if (cadence > 0.08) {
+      const noise = Math.sin(i * 1.8) * 0.22 + (Math.random() * 0.16 - 0.08);
+      currentVal = Math.max(0.14, Math.min(0.85, Math.abs(cadence) * 0.72 + noise));
+    } else {
+      currentVal = Math.max(0.01, Math.min(0.07, currentVal * 0.5));
+    }
+    bars.push(Math.round(currentVal * 1000) / 1000);
+  }
+  return bars;
+}
 
 export function useAudioRecording() {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
@@ -2133,6 +2241,7 @@ export function useAudioRecording() {
     startTime: 0,
     accumulatedMs: 0,
     isPaused: false,
+    waveformHistory: new Array<number>(BAR_COUNT).fill(0),
   });
 
   // Accurate Broadcast Meter Ballistics (Instant Attack, Natural Decay)
@@ -2225,7 +2334,8 @@ export function useAudioRecording() {
     if (engineState === 'RECORDING') {
       timerRef.current = setInterval(() => {
         const total = telemetry.current.durationMs;
-        SessionJournal.updateHeartbeat(total);
+        // Persist byte offset and current waveform snapshot
+        SessionJournal.updateHeartbeat(total, telemetry.current.waveformHistory);
 
         const now = Date.now();
         if (now - lastNotifTimeRef.current >= 1000) {
@@ -2255,6 +2365,7 @@ export function useAudioRecording() {
         telemetry.current.meteringDb = -60;
         telemetry.current.accumulatedMs = 0;
         telemetry.current.durationMs = 0;
+        telemetry.current.waveformHistory = new Array<number>(BAR_COUNT).fill(0);
       }
     }
 
@@ -2268,19 +2379,28 @@ export function useAudioRecording() {
     return telemetry.current.durationMs;
   }, []);
 
-  const startRecording = useCallback(async () => {
+  // In src/services/audio/useAudioRecording.ts
+
+const startRecording = useCallback(async (
+    initialDurationMs: number = 0,
+    initialWaveform?: number[]
+  ) => {
     if (engineStateRef.current === 'RECORDING') return;
 
     engineStateRef.current = 'RECORDING';
     telemetry.current.isPaused = false;
-    telemetry.current.durationMs = 0;
-    telemetry.current.accumulatedMs = 0;
+    telemetry.current.durationMs = initialDurationMs;
+    telemetry.current.accumulatedMs = initialDurationMs;
     telemetry.current.startTime = Date.now();
     isCapturingRef.current = true;
     smoothedDbRef.current = -60;
     telemetry.current.meteringDb = -60;
 
-    setEngineState('RECORDING');
+    if (initialWaveform && initialWaveform.length > 0) {
+      telemetry.current.waveformHistory = [...initialWaveform];
+    }
+
+  setEngineState('RECORDING');
 
     nativeQueueRef.current = nativeQueueRef.current.then(async () => {
       try {
@@ -2297,10 +2417,10 @@ export function useAudioRecording() {
           formatPreset: currentConfig.key,
           sampleRate: currentConfig.sampleRate,
           channels: currentConfig.channels,
-          startedAt: Date.now(),
+          startedAt: Date.now() - initialDurationMs,
         });
 
-        await recorder.record();
+      await recorder.record();
       } catch (error) {
         setEngineState('ERROR');
         engineStateRef.current = 'ERROR';
@@ -2308,10 +2428,12 @@ export function useAudioRecording() {
       }
     });
 
-    await nativeQueueRef.current;
-  }, [recorder]);
+  await nativeQueueRef.current;
+}, [recorder]);
 
-  const pauseRecording = useCallback(() => {
+  // In src/services/audio/useAudioRecording.ts
+
+  const pauseRecording = useCallback(async () => {
     if (engineStateRef.current !== 'RECORDING') return;
 
     isCapturingRef.current = false;
@@ -2323,21 +2445,20 @@ export function useAudioRecording() {
     setEngineState('PAUSED');
     SessionJournal.setStatus('PAUSED');
 
-    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-      try {
-        await recorder.pause();
-        ForegroundServiceManager.updateProgress(
-          formatTimecode(telemetry.current.durationMs),
-          activePresetRef.current.badge,
-          true
-        );
-      } catch (err) {
-        console.warn('[useAudioRecording] recorder.pause failed:', err);
-      }
-    });
+    try {
+      await recorder.pause();
+    } catch (err) {
+      console.warn('[useAudioRecording] recorder.pause failed:', err);
+    }
+
+    await ForegroundServiceManager.updateProgress(
+      formatTimecode(telemetry.current.durationMs),
+      activePresetRef.current.badge,
+      true
+    );
   }, [recorder]);
 
-  const resumeRecording = useCallback(() => {
+  const resumeRecording = useCallback(async () => {
     if (engineStateRef.current !== 'PAUSED') return;
 
     telemetry.current.isPaused = false;
@@ -2348,40 +2469,45 @@ export function useAudioRecording() {
     setEngineState('RECORDING');
     SessionJournal.setStatus('RECORDING');
 
-    nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-      try {
-        await recorder.record();
-      } catch (err) {
-        console.warn('[useAudioRecording] recorder.record failed:', err);
-      }
-    });
+    try {
+      await recorder.record();
+    } catch (err) {
+      console.warn('[useAudioRecording] recorder.record failed:', err);
+    }
+
+    await ForegroundServiceManager.updateProgress(
+      formatTimecode(telemetry.current.durationMs),
+      activePresetRef.current.badge,
+      false
+    );
   }, [recorder]);
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
+    if (engineStateRef.current !== 'RECORDING' && engineStateRef.current !== 'PAUSED') {
+      return recorder.uri || fileUriRef.current;
+    }
+
     engineStateRef.current = 'STOPPED';
     isCapturingRef.current = false;
     telemetry.current.isPaused = true;
     setEngineState('STOPPED');
 
-    return new Promise<string | null>((resolve, reject) => {
-      nativeQueueRef.current = nativeQueueRef.current.then(async () => {
-        try {
-          await recorder.stop();
-          const finalUri = recorder.uri || fileUriRef.current;
-          SessionJournal.setStatus('FINALIZED');
-          SessionJournal.clearSession();
-          resolve(finalUri);
-        } catch (error) {
-          setEngineState('ERROR');
-          engineStateRef.current = 'ERROR';
-          reject(error);
-        }
-      });
-    });
+    try {
+      await recorder.stop();
+    } catch (error) {
+      console.warn('[useAudioRecording] recorder.stop caught non-fatal exception:', error);
+    }
+
+    const finalUri = recorder.uri || fileUriRef.current;
+    SessionJournal.setStatus('FINALIZED');
+    SessionJournal.clearSession();
+    return finalUri;
   }, [recorder]);
 
   const resetEngine = useCallback(async () => {
-    try { await recorder.stop(); } catch {}
+    if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
+      try { await recorder.stop(); } catch {}
+    }
     SessionJournal.clearSession();
     setEngineState('IDLE');
     engineStateRef.current = 'IDLE';
@@ -2390,6 +2516,7 @@ export function useAudioRecording() {
     telemetry.current.startTime = 0;
     telemetry.current.meteringDb = -60;
     telemetry.current.isPaused = false;
+    telemetry.current.waveformHistory = new Array<number>(BAR_COUNT).fill(0);
     smoothedDbRef.current = -60;
   }, [recorder]);
 
@@ -2611,19 +2738,22 @@ import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
 import { Canvas, Path, Skia, BlurMask } from '@shopify/react-native-skia';
 import { EngineState } from '../../services/audio/useAudioRecording';
 
+// In src/components/studio/LiveWaveform.tsx
+
 interface LiveWaveformProps {
   telemetry: React.MutableRefObject<{
     meteringDb: number;
     isPaused: boolean;
+    waveformHistory?: number[];
   }>;
   engineState: EngineState;
   height?: number;
 }
 
 const BAR_COUNT = 156;
-const BASELINE_AMPLITUDE = 0.00; // Resting pill height during silence
-const NOISE_FLOOR_DB = -40;       // Floor to gate out room noise
-const PEAK_DB = 0;               // Target vocal ceiling
+const BASELINE_AMPLITUDE = 0.00;
+const NOISE_FLOOR_DB = -40;
+const PEAK_DB = 0;
 const GLOW_PADDING = 24;
 
 export const LiveWaveform: React.FC<LiveWaveformProps> = ({
@@ -2633,13 +2763,9 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
 }) => {
   const [canvasWidth, setCanvasWidth] = useState(240);
 
-  // The historical tape: once pushed, each bar's height is FROZEN
   const historyRef = useRef<number[]>(new Array(BAR_COUNT).fill(BASELINE_AMPLITUDE));
-
-  // Tracking refs for the incoming audio pulse and smoothed glow
   const currentAmpRef = useRef(BASELINE_AMPLITUDE);
   const glowRef = useRef(0);
-
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -2649,6 +2775,16 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       glowRef.current = 0;
       setTick((t) => (t + 1) % 10000);
       return;
+    }
+
+    // When RECORDING starts, check if telemetry has a preloaded resumed waveform tape
+    if (engineState === 'RECORDING') {
+      const existing = telemetry.current.waveformHistory;
+      if (existing && existing.some((val) => val > 0.05)) {
+        historyRef.current = [...existing];
+        glowRef.current = 0.35; // Enable ambient glow right away
+        setTick((t) => (t + 1) % 10000);
+      }
     }
 
     if (engineState === 'PAUSED' || telemetry.current.isPaused) {
@@ -2664,34 +2800,32 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       const now = Date.now();
       const rawDb = telemetry.current.meteringDb;
 
-      // 1. Precise vocal expansion
       let targetAmp = BASELINE_AMPLITUDE;
       if (rawDb > NOISE_FLOOR_DB) {
         const normalized = Math.max(0, Math.min(1.0, (rawDb - NOISE_FLOOR_DB) / (PEAK_DB - NOISE_FLOOR_DB)));
         targetAmp = Math.max(BASELINE_AMPLITUDE, Math.pow(normalized, 1.5));
       }
 
-      // 2. Instant Attack, Snappy Release for individual waveform bars
       if (targetAmp > currentAmpRef.current) {
         currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.90;
       } else {
         currentAmpRef.current += (targetAmp - currentAmpRef.current) * 0.40;
       }
 
-      // 3. Asymmetric Glow Smoothing: Gentle bloom rise and long analog decay
       if (targetAmp > glowRef.current) {
         glowRef.current += (targetAmp - glowRef.current) * 0.12;
       } else {
         glowRef.current += (targetAmp - glowRef.current) * 0.035;
       }
 
-      // 4. Shift the tape at ~34ms intervals (~29 slices per second)
       if (now - lastPushTime >= 34) {
         lastPushTime = now;
         historyRef.current.push(currentAmpRef.current);
         if (historyRef.current.length > BAR_COUNT) {
           historyRef.current.shift();
         }
+        // Mirror the active tape into the telemetry ref for session journaling
+        telemetry.current.waveformHistory = historyRef.current;
       }
 
       setTick((t) => (t + 1) % 10000);
@@ -2703,6 +2837,8 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       if (frameId) cancelAnimationFrame(frameId);
     };
   }, [engineState, telemetry]);
+
+  // ... rest of LiveWaveform layout and Skia canvas paths remain unchanged
 
   const onLayout = (e: LayoutChangeEvent) => {
     const w = Math.round(e.nativeEvent.layout.width);
@@ -2808,12 +2944,13 @@ interface StudioTimerProps {
   isTablet?: boolean;
 }
 
+
 export const StudioTimer: React.FC<StudioTimerProps> = ({
   telemetry,
   engineState,
   isTablet = false,
 }) => {
-  const [displayMs, setDisplayMs] = useState(0);
+  const [displayMs, setDisplayMs] = useState(telemetry.current.durationMs || 0);
 
   useEffect(() => {
     let frameId: number;
@@ -2834,6 +2971,8 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
 
     if (engineState === 'RECORDING' && !telemetry.current.isPaused) {
       frameId = requestAnimationFrame(tick);
+    } else if (engineState === 'PAUSED') {
+      setDisplayMs(telemetry.current.durationMs);
     } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
       setDisplayMs(0);
     }
@@ -2842,6 +2981,8 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
       if (frameId) cancelAnimationFrame(frameId);
     };
   }, [engineState, telemetry]);
+
+
 
   const totalSeconds = Math.floor(displayMs / 1000);
   const hrs = Math.floor(totalSeconds / 3600);
@@ -3559,7 +3700,7 @@ const styles = StyleSheet.create({
 FILE: src/components/prompter/TeleprompterDeck.tsx
 ================================================================================
 // src/components/prompter/TeleprompterDeck.tsx
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -3615,6 +3756,7 @@ import { EngineState } from '../../services/audio/useAudioRecording';
 export interface TeleprompterDeckProps {
   engineState: EngineState;
   customHeight?: number;
+  initialDurationMs?: number; // Target time offset when resuming an interrupted take
 }
 
 const FALLBACK_SCRIPT = `Welcome to the studio. This is your synchronized teleprompter.
@@ -3633,6 +3775,7 @@ const ITEM_ROW_HEIGHT = 44;
 export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   engineState,
   customHeight,
+  initialDurationMs = 0,
 }) => {
   const [script, setScript] = useState(() => {
     const stored = PrompterStorage.getScript();
@@ -3654,6 +3797,8 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   const [containerHeight, setContainerHeight] = useState(initialHeight);
   const [canvasLayout, setCanvasLayout] = useState({ width: 360, height: initialHeight });
 
+  const hasRestoredPrompterRef = useRef(false);
+  
   const activeViewportHeight = Math.max(
     120,
     customHeight && customHeight > 0 ? customHeight : containerHeight
@@ -3772,9 +3917,18 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   }, [isAutoScrolling, isAutoScrollingShared]);
 
   // Sync scroll state with audio recording engine lifecycle
-  useEffect(() => {
+useEffect(() => {
     if (engineState === 'RECORDING') {
-      if (translateY.value <= -maxScrollShared.value + 2) {
+      // If resuming with elapsed duration, pre-position scroll down the script
+      if (initialDurationMs > 0 && !hasRestoredPrompterRef.current) {
+        const elapsedSeconds = initialDurationMs / 1000;
+        const targetScrollPx = Math.min(
+          maxScrollShared.value,
+          speedShared.value * elapsedSeconds
+        );
+        translateY.value = -targetScrollPx;
+        hasRestoredPrompterRef.current = true;
+      } else if (translateY.value <= -maxScrollShared.value + 2) {
         translateY.value = 0;
       }
       setIsAutoScrolling(true);
@@ -3782,13 +3936,14 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
       setIsAutoScrolling(false);
     } else if (engineState === 'STOPPED' || engineState === 'IDLE') {
       setIsAutoScrolling(false);
+      hasRestoredPrompterRef.current = false;
       cancelAnimation(translateY);
       translateY.value = withTiming(0, {
         duration: 250,
         easing: Easing.out(Easing.quad),
       });
     }
-  }, [engineState, translateY, maxScrollShared]);
+  }, [engineState, translateY, maxScrollShared, initialDurationMs, speedShared]);
 
   // Frame-by-frame delta integration
   useFrameCallback((frameInfo) => {
@@ -6896,7 +7051,7 @@ import {
   TouchableOpacity,
   StyleSheet,
 } from 'react-native';
-import { RotateCcw, Trash2, Clock, HardDrive, AlertTriangle } from 'lucide-react-native';
+import { Play, Trash2, Clock, HardDrive, AlertTriangle } from 'lucide-react-native';
 import { ActiveSessionRecord } from '../../services/storage/sessionJournal';
 import { AUDIO_PRESETS } from '../../services/audio/types';
 import { useResponsive } from '../../hooks/useResponsive';
@@ -6906,7 +7061,7 @@ interface InterruptedTakeModalProps {
   session: ActiveSessionRecord | null;
   sizeBytes: number;
   onDiscard: () => void;
-  onRestore: () => void;
+  onResume: () => void;
 }
 
 export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
@@ -6914,7 +7069,7 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
   session,
   sizeBytes,
   onDiscard,
-  onRestore,
+  onResume,
 }) => {
   const { isTablet } = useResponsive();
 
@@ -6957,17 +7112,15 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
     >
       <View style={styles.backdrop}>
         <View style={[styles.card, isTablet && styles.cardTablet]}>
-          {/* Glowing Amber Warning Icon Circle */}
           <View style={styles.iconCircle}>
             <AlertTriangle size={24} color="#F59E0B" strokeWidth={2.2} />
           </View>
 
           <Text style={styles.title}>Interrupted Take Detected</Text>
           <Text style={styles.description}>
-            The app closed during active audio capture. You can restore this audio take to your library or permanently discard it.
+            The app closed during active audio capture. You can resume this recording from where it was left off or permanently discard it.
           </Text>
 
-          {/* Session Metadata Card */}
           <View style={styles.metaBox}>
             <View style={styles.metaRow}>
               <View style={styles.metaItem}>
@@ -6996,7 +7149,6 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
             </View>
           </View>
 
-          {/* Action Buttons */}
           <View style={styles.actionsRow}>
             <TouchableOpacity
               style={styles.discardBtn}
@@ -7008,12 +7160,12 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.restoreBtn}
-              onPress={onRestore}
+              style={styles.resumeBtn}
+              onPress={onResume}
               activeOpacity={0.8}
             >
-              <RotateCcw size={14} color="#000000" strokeWidth={2.5} />
-              <Text style={styles.restoreBtnText}>RESTORE TAKE</Text>
+              <Play size={13} color="#000000" fill="#000000" />
+              <Text style={styles.resumeBtnText}>RESUME TAKE</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -7170,7 +7322,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.5,
   },
-  restoreBtn: {
+  resumeBtn: {
     flex: 1.3,
     height: 44,
     flexDirection: 'row',
@@ -7180,7 +7332,7 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
-  restoreBtnText: {
+  resumeBtnText: {
     color: '#000000',
     fontSize: 12,
     fontWeight: '700',
