@@ -43,7 +43,7 @@ const FORMAT_OPTIONS: { id: AudioFormatType; label: string; tag: string }[] = [
   { id: 'amr_nb', label: 'AMR-NB', tag: '8 kHz voice' },
 ];
 
-const isCompressed = format !== 'wav';
+
 
 export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = ({
   visible,
@@ -69,7 +69,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const [description, setDescription] = useState('');
 
   const [keyboardHeight, setKeyboardHeight] = useState(0);
-
+  
   useEffect(() => {
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       const kh = e.endCoordinates?.height || 0;
@@ -118,8 +118,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const parsedBitRateKbps = Math.max(16, parseInt(bitRateKbpsStr, 10) || 256);
   const parsedBitRateBps = parsedBitRateKbps * 1000;
 
-  const isCompressed = format === 'aac' || format === 'opus' || format === 'amr_wb' || format === 'amr_nb';
-
+  const isCompressed = format !== 'wav';
   // Hardware Checks for Active Microphone
   const isUsb =
     selectedDevice?.type === 'usb_device' ||

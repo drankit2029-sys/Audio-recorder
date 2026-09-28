@@ -1,5 +1,5 @@
 # PROJECT CODEBASE CONTEXT DUMP
-# Total Files: 51
+# Total Files: 52
 
 ================================================================================
 FILE: .gitignore
@@ -1067,18 +1067,11 @@ FILE: app.json
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.BLUETOOTH_CONNECT",
-        { "android.permission.BLUETOOTH": {
-            "maxSdkVersion": 30 
-            }
-        },
-        { "android.permission.BLUETOOTH_ADMIN": {
-          "maxSdkVersion": 30 
-          }
-        }
       ]
     },
     "plugins": [
       "./plugins/withNotifeeForegroundService",
+      "./plugins/withBluetoothMaxSdk",
       [
         "expo-audio",
         {
@@ -1261,7 +1254,7 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -1270,7 +1263,7 @@ jobs:
         run: npm ci
 
       - name: Prebuild Native Project
-        run: npx expo prebuild --platform android
+        run: npx expo prebuild --platform android --clean
 
       - name: Build Debug APK
         run: |
@@ -2608,6 +2601,36 @@ module.exports = function withAndroidAudioForegroundService(config) {
       existingService.$['android:foregroundServiceType'] = 'microphone';
     }
 
+    return config;
+  });
+};
+
+
+================================================================================
+FILE: plugins/withBluetoothMaxSdk.js
+================================================================================
+const { withAndroidManifest } = require('@expo/config-plugins');
+
+module.exports = function withBluetoothMaxSdk(config) {
+  return withAndroidManifest(config, (config) => {
+    const manifest = config.modResults.manifest;
+    const permissions = manifest['uses-permission'] || [];
+
+    ['android.permission.BLUETOOTH', 'android.permission.BLUETOOTH_ADMIN'].forEach((permName) => {
+      const existing = permissions.find((p) => p.$['android:name'] === permName);
+      if (existing) {
+        existing.$['android:maxSdkVersion'] = '30';
+      } else {
+        permissions.push({
+          $: {
+            'android:name': permName,
+            'android:maxSdkVersion': '30',
+          },
+        });
+      }
+    });
+
+    manifest['uses-permission'] = permissions;
     return config;
   });
 };
@@ -7821,7 +7844,7 @@ const FORMAT_OPTIONS: { id: AudioFormatType; label: string; tag: string }[] = [
   { id: 'amr_nb', label: 'AMR-NB', tag: '8 kHz voice' },
 ];
 
-const isCompressed = format !== 'wav';
+
 
 export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = ({
   visible,
@@ -7847,7 +7870,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const [description, setDescription] = useState('');
 
   const [keyboardHeight, setKeyboardHeight] = useState(0);
-
+  
   useEffect(() => {
     const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
       const kh = e.endCoordinates?.height || 0;
@@ -7896,8 +7919,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const parsedBitRateKbps = Math.max(16, parseInt(bitRateKbpsStr, 10) || 256);
   const parsedBitRateBps = parsedBitRateKbps * 1000;
 
-  const isCompressed = format === 'aac' || format === 'opus' || format === 'amr_wb' || format === 'amr_nb';
-
+  const isCompressed = format !== 'wav';
   // Hardware Checks for Active Microphone
   const isUsb =
     selectedDevice?.type === 'usb_device' ||
