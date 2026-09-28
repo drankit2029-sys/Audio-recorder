@@ -1,14 +1,17 @@
 apply plugin: 'com.android.library'
 
 android {
-    compileSdkVersion 34
+    compileSdk 36
     namespace "expo.modules.audiohardwarerouter"
+
     defaultConfig {
-        minSdkVersion 24
-        targetSdkVersion 34
+        // Matches RN 0.86's floor and MediaRecorder.pause()/resume() (API 24+).
+        minSdk 24
     }
-    lintOptions {
+
+    lint {
         abortOnError false
+        checkReleaseBuilds false
     }
 }
 

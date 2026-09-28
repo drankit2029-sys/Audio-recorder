@@ -35,13 +35,15 @@ const BIT_DEPTHS = [8, 16, 24, 32];
 const COMPRESSED_BITRATES = [32, 64, 96, 128, 160, 192, 256, 320, 512];
 
 const FORMAT_OPTIONS: { id: AudioFormatType; label: string; tag: string }[] = [
-  { id: 'wav', label: 'WAV', tag: 'Linear PCM' },
-  { id: 'aac', label: 'AAC', tag: 'MPEG-4' },
-  { id: 'opus', label: 'OPUS', tag: 'Ogg Container' },
-  { id: 'flac', label: 'FLAC', tag: 'Lossless' },
-  { id: 'amr_wb', label: 'AMR-WB', tag: 'Wideband Voice' },
-  { id: 'amr_nb', label: 'AMR-NB', tag: 'Narrowband Voice' },
+  { id: 'wav', label: 'WAV', tag: 'Uncompressed RIFF' },
+  { id: 'aac', label: 'AAC', tag: 'MPEG-4 LC' },
+  { id: 'aac_adts', label: 'AAC-ADTS', tag: 'Raw AAC stream' },
+  { id: 'he_aac', label: 'HE-AAC', tag: 'High efficiency' },
+  { id: 'amr_wb', label: 'AMR-WB', tag: '16 kHz voice' },
+  { id: 'amr_nb', label: 'AMR-NB', tag: '8 kHz voice' },
 ];
+
+const isCompressed = format !== 'wav';
 
 export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = ({
   visible,
@@ -206,16 +208,16 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     const defaultName = `${formatName} ${(parsedRate / 1000).toFixed(1)}k ${chLabel}`;
 
     const config: CustomPresetConfig = {
-      id: initialPreset?.id || `custom_${Date.now()}`,
-      name: name.trim().length > 0 ? name.trim() : defaultName,
-      format,
-      sampleRate: parsedRate,
-      channels: parsedChannels,
-      bitDepth: !isCompressed ? parsedBitDepth : undefined,
-      bitRate: isCompressed ? parsedBitRateBps : undefined,
-      description: description.trim().length > 0 ? description.trim() : undefined,
-      createdAt: initialPreset?.createdAt || Date.now(),
-    };
+  id: initialPreset?.id || `custom_${Date.now()}`,
+  name: name.trim().length > 0 ? name.trim() : defaultName,
+  format,
+  sampleRate: parsedRate,
+  channels: parsedChannels as 1 | 2,
+  bitDepth: !isCompressed ? (parsedBitDepth === 32 ? 32 : 16) : undefined,
+  bitRate: isCompressed ? parsedBitRateBps : undefined,
+  description: description.trim().length > 0 ? description.trim() : undefined,
+  createdAt: initialPreset?.createdAt || Date.now(),
+};
 
     Keyboard.dismiss();
     onSave(config);
@@ -318,16 +320,18 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       key={opt.id}
                       style={[styles.formatBtn, format === opt.id && styles.formatBtnActive]}
                       onPress={() => {
-                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                        setFormat(opt.id);
-                        if (opt.id === 'amr_nb') {
-                          setSampleRateStr('8000');
-                          setChannelsStr('1');
-                        } else if (opt.id === 'amr_wb') {
-                          setSampleRateStr('16000');
-                          setChannelsStr('1');
-                        }
-                      }}
+                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                          setFormat(opt.id);
+                          if (opt.id === 'amr_nb') {
+                            setSampleRateStr('8000');
+                            setChannelsStr('1');
+                          } else if (opt.id === 'amr_wb') {
+                            setSampleRateStr('16000');
+                            setChannelsStr('1');
+                          } else if (opt.id === 'wav') {
+                            setBitDepthStr('16');
+                          }
+                        }}
                       activeOpacity={0.7}
                     >
                       <View style={styles.formatHeader}>

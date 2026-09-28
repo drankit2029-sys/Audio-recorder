@@ -5,14 +5,6 @@
     "version": "1.0.0",
     "orientation": "default",
     "newArchEnabled": true,
-    "ios": {
-      "supportsTablet": false,
-      "bundleIdentifier": "com.audiorecorder.app",
-      "infoPlist": {
-        "UIBackgroundModes": ["audio"],
-        "NSMicrophoneUsageDescription": "AudioRecorder requires microphone access to capture uncompressed master audio."
-      }
-    },
     "android": {
       "package": "com.audiorecorder.app",
       "supportsTablet": true,
@@ -24,8 +16,14 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.BLUETOOTH"
-        
+        { "android.permission.BLUETOOTH": {
+            "maxSdkVersion": 30 
+            }
+        },
+        { "android.permission.BLUETOOTH_ADMIN": {
+          "maxSdkVersion": 30 
+          }
+        }
       ]
     },
     "plugins": [
@@ -33,19 +31,18 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow AudioRecorder to access your microphone."
+          "recordAudioAndroid": true,
+          "enableBackgroundRecording": true,
+          "enableBackgroundPlayback": false
         }
       ],
       [
         "expo-build-properties",
         {
           "android": {
-            "minSdkVersion": 26,
+            "minSdkVersion": 24,
             "compileSdkVersion": 36,
-            "targetSdkVersion": 34
-          },
-          "ios": {
-            "deploymentTarget": "16.4"
+            "targetSdkVersion": 36
           }
         }
       ],

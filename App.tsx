@@ -56,7 +56,8 @@ import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices'
 import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 import { useResponsive } from './src/hooks/useResponsive';
 import { LibraryScreen } from './src/screens/LibraryScreen';
-
+import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
+import { ensureTakesFolder } from './src/services/storage/recordingPaths';
 type AppScreen = 'library' | 'studio';
 
 interface PendingTake {
@@ -97,8 +98,9 @@ function AudioRecorderApp() {
 
   const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
 
-  const transportBottom = Math.max(insets.bottom + 20, Platform.OS === 'android' ? 54 : 28);
 
+
+const transportBottom = insets.bottom + 24;
   const {
     devices,
     selectedDeviceId,
@@ -348,8 +350,7 @@ function AudioRecorderApp() {
       await activateKeepAwakeAsync();
 
       await ForegroundServiceManager.startService(activePreset.badge);
-      await startRecording(durationMs, restoredWaveform);
-
+      await startRecording(durationMs, restoredWaveform, `Take Resumed`, selectedDeviceId ?? -1);
       if (oldFileUri) {
         try {
           await FileSystem.deleteAsync(oldFileUri, { idempotent: true });
@@ -401,22 +402,31 @@ function AudioRecorderApp() {
     async function bootstrap() {
       try {
         await ForegroundServiceManager.initialize();
-        if (Platform.OS === 'android') {
-          const perms = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
-          if (Platform.Version >= 31) perms.push(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-          if (Platform.Version >= 33) perms.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-          await PermissionsAndroid.requestMultiple(perms);
-        } else {
-          await AudioModule.requestRecordingPermissionsAsync();
+
+        const { granted } = await requestRecordingPermissionsAsync();
+        if (!granted) {
+          console.warn('[bootstrap] Microphone permission was denied.');
         }
 
-        await AudioModule.setAudioModeAsync({
-            allowsRecording: true,
-            playsInSilentMode: true,
-            interruptionMode: 'doNotMix',
-            shouldRouteThroughEarpiece: false,
-            staysActiveInBackground: true, // <-- Prevents expo-audio from auto-pausing/resuming on background/foreground
-          });
+        if (Platform.Version >= 31) {
+          await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
+          );
+        }
+        if (Platform.Version >= 33) {
+          await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
+          );
+        }
+
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          interruptionMode: 'doNotMix',
+          allowsBackgroundRecording: true,
+          shouldPlayInBackground: false,
+        });
+
+        await ensureTakesFolder();
 
         refreshDevices();
         setRecordings(RecordingLibrary.getAll());
@@ -466,7 +476,10 @@ function AudioRecorderApp() {
         activateKeepAwakeAsync();
 
         await ForegroundServiceManager.startService(activePreset.badge);
-        await startRecording();
+        const stamp = new Date().toLocaleTimeString([], {
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          });
+        await startRecording(0, undefined, `Take ${stamp}`, selectedDeviceId ?? -1);
       }
     } catch (e: any) {
       deactivateKeepAwake();
