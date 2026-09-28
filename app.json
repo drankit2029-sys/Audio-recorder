@@ -16,18 +16,11 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.BLUETOOTH_CONNECT",
-        { "android.permission.BLUETOOTH": {
-            "maxSdkVersion": 30 
-            }
-        },
-        { "android.permission.BLUETOOTH_ADMIN": {
-          "maxSdkVersion": 30 
-          }
-        }
       ]
     },
     "plugins": [
       "./plugins/withNotifeeForegroundService",
+      "./plugins/withBluetoothMaxSdk",
       [
         "expo-audio",
         {
