@@ -1,5 +1,4 @@
-// src/components/library/RenameRecordingModal.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Modal,
   View,
@@ -7,19 +6,26 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
+  ScrollView,
   TouchableWithoutFeedback,
   Keyboard,
-  Platform,
-  LayoutAnimation,
-  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Check, X, Pencil } from 'lucide-react-native';
+
+import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 import { useResponsive } from '../../hooks/useResponsive';
+import {
+  MAX_TAKE_NAME_LENGTH,
+  sanitizeFileName,
+  extractExtension,
+} from '../../services/storage/recordingPaths';
 
 interface RenameRecordingModalProps {
   visible: boolean;
   initialName: string;
+  /** Optional: enables the on-disk filename preview. */
+  fileUri?: string;
   onSave: (name: string) => void;
   onClose: () => void;
 }
@@ -27,69 +33,56 @@ interface RenameRecordingModalProps {
 export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   visible,
   initialName,
+  fileUri,
   onSave,
   onClose,
 }) => {
-  const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { isTablet } = useResponsive();
+  const { offset: keyboardOffset, isVisible: isKeyboardVisible } = useKeyboardViewport();
 
   const [name, setName] = useState(initialName);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<TextInput | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
 
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      const kh = e.endCoordinates?.height || 0;
-      if (kh > 0) {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        setKeyboardHeight(kh);
-      }
-    });
+    if (!visible) {
+      setIsFocused(false);
+      return;
+    }
 
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setKeyboardHeight(0);
-    });
+    setName(initialName);
+    focusTimerRef.current = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 240);
 
     return () => {
-      showSub.remove();
-      hideSub.remove();
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
     };
-  }, []);
-
-  useEffect(() => {
-    if (visible) {
-      setName(initialName);
-      const timer = setTimeout(() => {
-        inputRef.current?.focus();
-      }, 120);
-      return () => clearTimeout(timer);
-    } else {
-      setKeyboardHeight(0);
-    }
   }, [visible, initialName]);
 
+  const trimmed = name.trim();
+  const canSave = trimmed.length > 0;
+
+  // Preview of the real file on disk once the rename is applied.
+  const previewFileName =
+    fileUri && canSave
+      ? `${sanitizeFileName(trimmed)}${extractExtension(fileUri)}`
+      : null;
+
   const handleSave = () => {
-    const trimmed = name.trim();
-    if (trimmed.length > 0) {
-      Keyboard.dismiss();
-      onSave(trimmed);
-    }
+    if (!canSave) return;
+    Keyboard.dismiss();
+    onSave(trimmed);
   };
 
   const handleCancel = () => {
     Keyboard.dismiss();
     onClose();
   };
-
-  const availableHeight =
-    keyboardHeight > 0
-      ? Math.max(0, windowHeight - keyboardHeight - insets.top)
-      : Math.max(0, windowHeight - insets.top - insets.bottom);
 
   return (
     <Modal
@@ -99,33 +92,64 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
       statusBarTranslucent
       onRequestClose={handleCancel}
     >
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={[styles.backdrop, { paddingTop: insets.top }]}>
-          <View style={[styles.centerContainer, { height: availableHeight }]}>
+      <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
+        <View style={styles.backdrop}>
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={[
+              styles.scrollContent,
+              {
+                paddingTop: insets.top + 16,
+                paddingBottom: insets.bottom + keyboardOffset + 16,
+              },
+            ]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+          >
             <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
               <View style={[styles.card, isTablet && styles.cardTablet]}>
+                {/* Header */}
                 <View style={styles.headerRow}>
                   <View style={styles.iconCircle}>
                     <Pencil size={16} color="#FFFFFF" strokeWidth={2} />
                   </View>
                   <View style={styles.headerTextGroup}>
                     <Text style={styles.title}>Rename Recording</Text>
-                    <Text style={styles.subtitle}>Update metadata label for this take</Text>
+                    <Text style={styles.subtitle}>Update the label for this take</Text>
                   </View>
                 </View>
 
-                <View style={styles.inputWrapper}>
-                  <Text style={styles.inputLabel}>RECORDING NAME</Text>
-                  <View style={styles.inputInnerRow}>
+                {/* Input Section */}
+                <View style={styles.fieldSection}>
+                  <View style={styles.labelRow}>
+                    <Text style={styles.fieldLabel}>RECORDING NAME</Text>
+                    <Text style={styles.counter}>
+                      {name.length}/{MAX_TAKE_NAME_LENGTH}
+                    </Text>
+                  </View>
+
+                  <View
+                    style={[
+                      styles.inputShell,
+                      isFocused && styles.inputShellFocused,
+                    ]}
+                  >
                     <TextInput
                       ref={inputRef}
                       style={styles.input}
                       value={name}
                       onChangeText={setName}
+                      onFocus={() => setIsFocused(true)}
+                      onBlur={() => setIsFocused(false)}
                       placeholder="Take title..."
                       placeholderTextColor="#52525B"
                       selectTextOnFocus
+                      maxLength={MAX_TAKE_NAME_LENGTH}
                       returnKeyType="done"
+                      blurOnSubmit
+                      underlineColorAndroid="transparent"
                       onSubmitEditing={handleSave}
                     />
                     {name.length > 0 && (
@@ -133,35 +157,52 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                         style={styles.clearBtn}
                         onPress={() => setName('')}
                         activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <X size={13} color="#8E8E93" />
                       </TouchableOpacity>
                     )}
                   </View>
+
+                  {previewFileName ? (
+                    <View style={styles.previewRow}>
+                      <Text style={styles.previewLabel}>SAVES AS</Text>
+                      <Text style={styles.previewName} numberOfLines={1}>
+                        {previewFileName}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
 
+                {/* Actions */}
                 <View style={styles.actionRow}>
                   <TouchableOpacity
                     style={styles.cancelBtn}
                     onPress={handleCancel}
-                    activeOpacity={0.7}
+                    activeOpacity={0.75}
                   >
                     <Text style={styles.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={[styles.saveBtn, name.trim().length === 0 && styles.saveBtnDisabled]}
+                    style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
                     onPress={handleSave}
-                    disabled={name.trim().length === 0}
+                    disabled={!canSave}
                     activeOpacity={0.8}
                   >
                     <Check size={14} color="#000000" strokeWidth={3} />
                     <Text style={styles.saveBtnText}>Save</Text>
                   </TouchableOpacity>
                 </View>
+
+                <Text style={styles.hint}>
+                  {isKeyboardVisible
+                    ? 'Tap Save or press done to apply'
+                    : 'The audio file is renamed to match'}
+                </Text>
               </View>
             </TouchableWithoutFeedback>
-          </View>
+          </ScrollView>
         </View>
       </TouchableWithoutFeedback>
     </Modal>
@@ -172,20 +213,22 @@ const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
   },
-  centerContainer: {
+  scroll: {
+    flex: 1,
     width: '100%',
+  },
+  scrollContent: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: 22,
   },
   card: {
     width: '100%',
     maxWidth: 380,
     backgroundColor: '#121215',
-    borderRadius: 22,
+    borderRadius: 24,
     borderWidth: 1,
     borderColor: '#222228',
     padding: 20,
@@ -193,7 +236,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.6,
     shadowRadius: 20,
-    elevation: 16,
+    elevation: 18,
   },
   cardTablet: {
     maxWidth: 440,
@@ -203,12 +246,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 18,
   },
   iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#1C1C22',
     borderWidth: 1,
     borderColor: '#2A2A32',
@@ -220,7 +263,7 @@ const styles = StyleSheet.create({
   },
   title: {
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '700',
     letterSpacing: -0.2,
   },
@@ -228,29 +271,44 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     fontSize: 11,
     fontWeight: '500',
-    marginTop: 2,
+    marginTop: 3,
     letterSpacing: 0.2,
   },
-  inputWrapper: {
-    backgroundColor: '#09090B',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1C1C22',
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 10,
-    marginBottom: 18,
+  fieldSection: {
+    marginBottom: 20,
   },
-  inputLabel: {
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    paddingHorizontal: 2,
+  },
+  fieldLabel: {
     color: '#71717A',
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.8,
-    marginBottom: 4,
   },
-  inputInnerRow: {
+  counter: {
+    color: '#52525B',
+    fontSize: 9,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  inputShell: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#09090B',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#1C1C22',
+    paddingHorizontal: 14,
+    height: 48,
+  },
+  inputShellFocused: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0A0E14',
   },
   input: {
     flex: 1,
@@ -268,19 +326,39 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 8,
   },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 2,
+  },
+  previewLabel: {
+    color: '#52525B',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  previewName: {
+    flex: 1,
+    color: '#34D399',
+    fontSize: 10.5,
+    fontWeight: '600',
+  },
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
+    gap: 10,
   },
   cancelBtn: {
     flex: 1,
-    height: 42,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 21,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: '#24242A',
   },
   cancelBtnText: {
     color: '#8E8E93',
@@ -289,13 +367,13 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   saveBtn: {
-    flex: 1,
+    flex: 1.15,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    height: 42,
-    borderRadius: 21,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
   saveBtnDisabled: {
@@ -306,5 +384,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  hint: {
+    color: '#52525B',
+    fontSize: 10,
+    fontWeight: '500',
+    textAlign: 'center',
+    marginTop: 12,
   },
 });

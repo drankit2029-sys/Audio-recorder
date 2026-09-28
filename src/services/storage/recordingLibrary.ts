@@ -60,4 +60,12 @@ export const RecordingLibrary = {
     libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
     return updated;
   },
+  // Add this method to the RecordingLibrary object / class:
+updateUri(id: string, uri: string): SavedRecording[] {
+  const existing = this.getAll();
+  const updated = existing.map((item) => (item.id === id ? { ...item, uri } : item));
+  libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
+  return updated;
+},
+
 };

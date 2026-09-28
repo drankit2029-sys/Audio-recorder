@@ -11,6 +11,7 @@ import {
   Platform,
   PermissionsAndroid,
   LayoutAnimation,
+  AppState,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView, ScrollView } from 'react-native-gesture-handler';
@@ -57,7 +58,8 @@ import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 import { useResponsive } from './src/hooks/useResponsive';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
-import { ensureTakesFolder } from './src/services/storage/recordingPaths';
+import { ensureTakesFolder, renameTakeFile } from './src/services/storage/recordingPaths';
+
 type AppScreen = 'library' | 'studio';
 
 interface PendingTake {
@@ -66,6 +68,7 @@ interface PendingTake {
   durationMs: number;
   defaultName: string;
   formatBadge: string;
+  warning?: string;
 }
 
 interface ToastData {
@@ -97,6 +100,19 @@ function AudioRecorderApp() {
   const isTransportBusyRef = useRef(false);
 
   const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
+  const showToast = (
+      title: string,
+      subtitle: string,
+      opts: { warning?: string; isDelete?: boolean } = {}
+    ) => {
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+      setToastData({ title, subtitle, ...opts });
+      toastTimeoutRef.current = setTimeout(() => setToastData(null), 3200);
+    };
+  const formatBytes = (bytes: number) =>
+  bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 
 
 
@@ -189,74 +205,77 @@ const transportBottom = insets.bottom + 24;
   // In App.tsx
 
   const handleStopPress = async (autoSave = false) => {
-    if (isTransportBusyRef.current) return;
-    isTransportBusyRef.current = true;
+  if (isTransportBusyRef.current) return;
+  isTransportBusyRef.current = true;
 
-    try {
-      const finalDuration = getExactDurationMs();
-      await deactivateKeepAwake();
+  try {
+    const finalDuration = getExactDurationMs();
+    await deactivateKeepAwake();
 
-      const outputUri = await stopRecording();
-      releaseHardwareRoutingRef.current();
-      await resetEngine();
-      setResumedDurationMs(0);
+    const result = await stopRecording();
+    releaseHardwareRoutingRef.current();
+    await resetEngine();
+    setResumedDurationMs(0);
 
-      await ForegroundServiceManager.stopService();
+    await ForegroundServiceManager.stopService();
 
-      if (outputUri) {
-        let sizeBytes = 0;
+    if (result.uri) {
+      const outputUri = result.uri;
+
+      let sizeBytes = result.sizeBytes;
+      if (!sizeBytes || sizeBytes <= 0) {
         try {
           const info = await FileSystem.getInfoAsync(outputUri);
-          if (info.exists && !info.isDirectory) sizeBytes = info.size;
+          if (info.exists && !info.isDirectory) sizeBytes = info.size ?? 0;
         } catch {}
-
-        const now = new Date();
-        const defaultName = `Take ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-
-        if (autoSave) {
-          // Direct background save when stopped via notification
-          const newRecord: SavedRecording = {
-            id: `take_${Date.now()}`,
-            name: defaultName,
-            uri: outputUri,
-            sizeBytes,
-            durationMs: finalDuration,
-            createdAt: Date.now(),
-          };
-
-          const updated = RecordingLibrary.save(newRecord);
-          setRecordings(updated);
-
-          if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-          const formattedSize = sizeBytes < 1024 * 1024
-            ? `${(sizeBytes / 1024).toFixed(1)} KB`
-            : `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
-
-          setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
-          toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
-        } else {
-          // In-app stop button: display name prompt modal
-          setPendingTake({
-            uri: outputUri,
-            sizeBytes,
-            durationMs: finalDuration,
-            defaultName,
-            formatBadge: activePreset.badge,
-          });
-          setNameModalVisible(true);
-        }
       }
-    } catch (e: any) {
-      await deactivateKeepAwake();
-      await ForegroundServiceManager.stopService();
-      releaseHardwareRoutingRef.current();
-      await resetEngine();
-      setResumedDurationMs(0);
-      Alert.alert('Stop Error', e.message);
-    } finally {
-      isTransportBusyRef.current = false;
+
+      const now = new Date();
+      const defaultName = `Take ${now.toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      })}`;
+
+      const durationMs = result.durationMs > 0 ? result.durationMs : finalDuration;
+      const shouldPrompt = !autoSave || AppState.currentState === 'active';
+
+      if (shouldPrompt) {
+        setPendingTake({
+          uri: outputUri,
+          sizeBytes,
+          durationMs,
+          defaultName,
+          formatBadge: activePreset.badge,
+          warning: result.degradationNote,
+        });
+        setNameModalVisible(true);
+      } else {
+        const record: SavedRecording = {
+          id: `take_${Date.now()}`,
+          name: defaultName,
+          uri: outputUri,
+          sizeBytes,
+          durationMs,
+          createdAt: Date.now(),
+        };
+        setRecordings(RecordingLibrary.save(record));
+        showToast('Take Saved', `${record.name} • ${formatBytes(sizeBytes)}`, {
+          warning: result.degradationNote,
+        });
+      }
+    } else if (result.degradationNote) {
+      showToast('Take Ended', result.degradationNote, { warning: result.degradationNote });
     }
-  };
+  } catch (e: any) {
+    await deactivateKeepAwake();
+    await ForegroundServiceManager.stopService();
+    releaseHardwareRoutingRef.current();
+    await resetEngine();
+    setResumedDurationMs(0);
+    Alert.alert('Stop Error', e?.message ?? 'Unknown error');
+  } finally {
+    isTransportBusyRef.current = false;
+  }
+};
 
   
 
@@ -264,31 +283,38 @@ const transportBottom = insets.bottom + 24;
   handleStopPressRef.current = handleStopPress;
 
   const handleFinalizeTake = (chosenName: string) => {
-    if (!pendingTake) return;
-    const finalName = chosenName.trim().length > 0 ? chosenName.trim() : pendingTake.defaultName;
+  if (!pendingTake) return;
+  const take = pendingTake;
+  const finalName = chosenName.trim().length > 0 ? chosenName.trim() : take.defaultName;
 
-    const newRecord: SavedRecording = {
-      id: `take_${Date.now()}`,
-      name: finalName,
-      uri: pendingTake.uri,
-      sizeBytes: pendingTake.sizeBytes,
-      durationMs: pendingTake.durationMs,
-      createdAt: Date.now(),
-    };
+  setNameModalVisible(false);
+  setPendingTake(null);
 
-    const updated = RecordingLibrary.save(newRecord);
-    setRecordings(updated);
-    setNameModalVisible(false);
-
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    const formattedSize = pendingTake.sizeBytes < 1024 * 1024
-      ? `${(pendingTake.sizeBytes / 1024).toFixed(1)} KB`
-      : `${(pendingTake.sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
-
-    setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
-    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
-    setPendingTake(null);
+  const record: SavedRecording = {
+    id: `take_${Date.now()}`,
+    name: finalName,
+    uri: take.uri,
+    sizeBytes: take.sizeBytes,
+    durationMs: take.durationMs,
+    createdAt: Date.now(),
   };
+
+  setRecordings(RecordingLibrary.save(record));
+  showToast('Take Saved', `${record.name} • ${formatBytes(take.sizeBytes)}`, {
+    warning: take.warning,
+  });
+
+  void (async () => {
+    try {
+      const renamed = await renameTakeFile(take.uri, finalName);
+      if (renamed && renamed !== take.uri) {
+        setRecordings(RecordingLibrary.updateUri(record.id, renamed));
+      }
+    } catch (err) {
+      console.warn('[App] Could not rename take on disk:', err);
+    }
+  })();
+};
 
   const handleDiscardTake = async () => {
     if (pendingTake?.uri) {

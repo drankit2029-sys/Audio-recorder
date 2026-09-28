@@ -39,6 +39,7 @@ import { RenameRecordingModal } from '../components/library/RenameRecordingModal
 import { LibrarySortModal, SortOption } from '../components/library/LibrarySortModal';
 import { LibraryBatchBar } from '../components/library/LibraryBatchBar';
 import { RecordingCard } from '../components/library/RecordingCard';
+import { renameTakeFile } from '../services/storage/recordingPaths';
 
 interface LibraryScreenProps {
   recordings: SavedRecording[];
@@ -377,16 +378,33 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   }, []);
 
   const handleSaveRename = useCallback((newName: string) => {
-    if (!recordingToRename) return;
-    const trimmed = newName.trim();
-    if (trimmed.length > 0 && trimmed !== recordingToRename.name) {
-      const updated = RecordingLibrary.rename(recordingToRename.id, trimmed);
-      onLibraryUpdate(updated);
-      showToast('Take Renamed', trimmed);
-    }
+  const target = recordingToRename;
+  if (!target) {
     setRenameModalVisible(false);
-    setRecordingToRename(null);
-  }, [recordingToRename, onLibraryUpdate, showToast]);
+    return;
+  }
+
+  const trimmed = newName.trim();
+  if (trimmed.length > 0 && trimmed !== target.name) {
+    const updated = RecordingLibrary.rename(target.id, trimmed);
+    onLibraryUpdate(updated);
+    showToast('Take Renamed', trimmed);
+
+    void (async () => {
+      try {
+        const renamed = await renameTakeFile(target.uri, trimmed);
+        if (renamed && renamed !== target.uri) {
+          onLibraryUpdate(RecordingLibrary.updateUri(target.id, renamed));
+        }
+      } catch (err) {
+        console.warn('[LibraryScreen] Could not rename take on disk:', err);
+      }
+    })();
+  }
+
+  setRenameModalVisible(false);
+  setRecordingToRename(null);
+}, [recordingToRename, onLibraryUpdate, showToast]);
 
   const handleDeleteSingle = useCallback((item: SavedRecording) => {
     setDeleteTarget({ type: 'single', item });
@@ -835,14 +853,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       />
 
       <RenameRecordingModal
-        visible={renameModalVisible}
-        initialName={recordingToRename?.name ?? ''}
-        onSave={handleSaveRename}
-        onClose={() => {
-          setRenameModalVisible(false);
-          setRecordingToRename(null);
-        }}
-      />
+  visible={renameModalVisible}
+  initialName={recordingToRename?.name ?? ''}
+  fileUri={recordingToRename?.uri}
+  onSave={handleSaveRename}
+  onClose={() => {
+    setRenameModalVisible(false);
+    setRecordingToRename(null);
+  }}
+/>
+
 
       <DeleteConfirmationModal
         visible={deleteModalVisible}

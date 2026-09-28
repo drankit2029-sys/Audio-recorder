@@ -1,5 +1,5 @@
 # PROJECT CODEBASE CONTEXT DUMP
-# Total Files: 52
+# Total Files: 54
 
 ================================================================================
 FILE: .gitignore
@@ -71,6 +71,7 @@ import {
   Platform,
   PermissionsAndroid,
   LayoutAnimation,
+  AppState,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView, ScrollView } from 'react-native-gesture-handler';
@@ -117,7 +118,8 @@ import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 import { useResponsive } from './src/hooks/useResponsive';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
-import { ensureTakesFolder } from './src/services/storage/recordingPaths';
+import { ensureTakesFolder, renameTakeFile } from './src/services/storage/recordingPaths';
+
 type AppScreen = 'library' | 'studio';
 
 interface PendingTake {
@@ -126,6 +128,7 @@ interface PendingTake {
   durationMs: number;
   defaultName: string;
   formatBadge: string;
+  warning?: string;
 }
 
 interface ToastData {
@@ -157,6 +160,19 @@ function AudioRecorderApp() {
   const isTransportBusyRef = useRef(false);
 
   const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
+  const showToast = (
+      title: string,
+      subtitle: string,
+      opts: { warning?: string; isDelete?: boolean } = {}
+    ) => {
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+      setToastData({ title, subtitle, ...opts });
+      toastTimeoutRef.current = setTimeout(() => setToastData(null), 3200);
+    };
+  const formatBytes = (bytes: number) =>
+  bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 
 
 
@@ -249,74 +265,77 @@ const transportBottom = insets.bottom + 24;
   // In App.tsx
 
   const handleStopPress = async (autoSave = false) => {
-    if (isTransportBusyRef.current) return;
-    isTransportBusyRef.current = true;
+  if (isTransportBusyRef.current) return;
+  isTransportBusyRef.current = true;
 
-    try {
-      const finalDuration = getExactDurationMs();
-      await deactivateKeepAwake();
+  try {
+    const finalDuration = getExactDurationMs();
+    await deactivateKeepAwake();
 
-      const outputUri = await stopRecording();
-      releaseHardwareRoutingRef.current();
-      await resetEngine();
-      setResumedDurationMs(0);
+    const result = await stopRecording();
+    releaseHardwareRoutingRef.current();
+    await resetEngine();
+    setResumedDurationMs(0);
 
-      await ForegroundServiceManager.stopService();
+    await ForegroundServiceManager.stopService();
 
-      if (outputUri) {
-        let sizeBytes = 0;
+    if (result.uri) {
+      const outputUri = result.uri;
+
+      let sizeBytes = result.sizeBytes;
+      if (!sizeBytes || sizeBytes <= 0) {
         try {
           const info = await FileSystem.getInfoAsync(outputUri);
-          if (info.exists && !info.isDirectory) sizeBytes = info.size;
+          if (info.exists && !info.isDirectory) sizeBytes = info.size ?? 0;
         } catch {}
-
-        const now = new Date();
-        const defaultName = `Take ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-
-        if (autoSave) {
-          // Direct background save when stopped via notification
-          const newRecord: SavedRecording = {
-            id: `take_${Date.now()}`,
-            name: defaultName,
-            uri: outputUri,
-            sizeBytes,
-            durationMs: finalDuration,
-            createdAt: Date.now(),
-          };
-
-          const updated = RecordingLibrary.save(newRecord);
-          setRecordings(updated);
-
-          if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-          const formattedSize = sizeBytes < 1024 * 1024
-            ? `${(sizeBytes / 1024).toFixed(1)} KB`
-            : `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
-
-          setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
-          toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
-        } else {
-          // In-app stop button: display name prompt modal
-          setPendingTake({
-            uri: outputUri,
-            sizeBytes,
-            durationMs: finalDuration,
-            defaultName,
-            formatBadge: activePreset.badge,
-          });
-          setNameModalVisible(true);
-        }
       }
-    } catch (e: any) {
-      await deactivateKeepAwake();
-      await ForegroundServiceManager.stopService();
-      releaseHardwareRoutingRef.current();
-      await resetEngine();
-      setResumedDurationMs(0);
-      Alert.alert('Stop Error', e.message);
-    } finally {
-      isTransportBusyRef.current = false;
+
+      const now = new Date();
+      const defaultName = `Take ${now.toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      })}`;
+
+      const durationMs = result.durationMs > 0 ? result.durationMs : finalDuration;
+      const shouldPrompt = !autoSave || AppState.currentState === 'active';
+
+      if (shouldPrompt) {
+        setPendingTake({
+          uri: outputUri,
+          sizeBytes,
+          durationMs,
+          defaultName,
+          formatBadge: activePreset.badge,
+          warning: result.degradationNote,
+        });
+        setNameModalVisible(true);
+      } else {
+        const record: SavedRecording = {
+          id: `take_${Date.now()}`,
+          name: defaultName,
+          uri: outputUri,
+          sizeBytes,
+          durationMs,
+          createdAt: Date.now(),
+        };
+        setRecordings(RecordingLibrary.save(record));
+        showToast('Take Saved', `${record.name} • ${formatBytes(sizeBytes)}`, {
+          warning: result.degradationNote,
+        });
+      }
+    } else if (result.degradationNote) {
+      showToast('Take Ended', result.degradationNote, { warning: result.degradationNote });
     }
-  };
+  } catch (e: any) {
+    await deactivateKeepAwake();
+    await ForegroundServiceManager.stopService();
+    releaseHardwareRoutingRef.current();
+    await resetEngine();
+    setResumedDurationMs(0);
+    Alert.alert('Stop Error', e?.message ?? 'Unknown error');
+  } finally {
+    isTransportBusyRef.current = false;
+  }
+};
 
   
 
@@ -324,31 +343,38 @@ const transportBottom = insets.bottom + 24;
   handleStopPressRef.current = handleStopPress;
 
   const handleFinalizeTake = (chosenName: string) => {
-    if (!pendingTake) return;
-    const finalName = chosenName.trim().length > 0 ? chosenName.trim() : pendingTake.defaultName;
+  if (!pendingTake) return;
+  const take = pendingTake;
+  const finalName = chosenName.trim().length > 0 ? chosenName.trim() : take.defaultName;
 
-    const newRecord: SavedRecording = {
-      id: `take_${Date.now()}`,
-      name: finalName,
-      uri: pendingTake.uri,
-      sizeBytes: pendingTake.sizeBytes,
-      durationMs: pendingTake.durationMs,
-      createdAt: Date.now(),
-    };
+  setNameModalVisible(false);
+  setPendingTake(null);
 
-    const updated = RecordingLibrary.save(newRecord);
-    setRecordings(updated);
-    setNameModalVisible(false);
-
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    const formattedSize = pendingTake.sizeBytes < 1024 * 1024
-      ? `${(pendingTake.sizeBytes / 1024).toFixed(1)} KB`
-      : `${(pendingTake.sizeBytes / (1024 * 1024)).toFixed(2)} MB`;
-
-    setToastData({ title: 'Take Saved', subtitle: `${newRecord.name} • ${formattedSize}` });
-    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
-    setPendingTake(null);
+  const record: SavedRecording = {
+    id: `take_${Date.now()}`,
+    name: finalName,
+    uri: take.uri,
+    sizeBytes: take.sizeBytes,
+    durationMs: take.durationMs,
+    createdAt: Date.now(),
   };
+
+  setRecordings(RecordingLibrary.save(record));
+  showToast('Take Saved', `${record.name} • ${formatBytes(take.sizeBytes)}`, {
+    warning: take.warning,
+  });
+
+  void (async () => {
+    try {
+      const renamed = await renameTakeFile(take.uri, finalName);
+      if (renamed && renamed !== take.uri) {
+        setRecordings(RecordingLibrary.updateUri(record.id, renamed));
+      }
+    } catch (err) {
+      console.warn('[App] Could not rename take on disk:', err);
+    }
+  })();
+};
 
   const handleDiscardTake = async () => {
     if (pendingTake?.uri) {
@@ -1863,6 +1889,11 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
             boolean wantFloat = options.hasKey("bitDepth")
                     && options.getInt("bitDepth") == 32;
             String path = options.hasKey("filePath") ? options.getString("filePath") : null;
+            path = normalizeToFilesystemPath(path);
+            if (path.isEmpty()) {
+                throw new IllegalArgumentException("filePath is required");
+            }
+
 
             if (sr <= 0) {
                 throw new IllegalArgumentException("sampleRate must be greater than 0");
@@ -2388,6 +2419,32 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         teardown();
         super.invalidate();
     }
+
+        /**
+     * Accepts either a bare filesystem path or a file:// URI and always returns
+     * an absolute filesystem path. java.io.File resolves relative-looking paths
+     * against the process CWD, which turns a file:// URI into
+     * "<cwd>/file:/data/..." and fails with ENOENT.
+     */
+    private static String normalizeToFilesystemPath(String raw) {
+        String p = raw == null ? "" : raw.trim();
+        if (p.startsWith("file://")) {
+            p = p.substring("file://".length());
+        }
+        if (p.isEmpty()) {
+            return "";
+        }
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        try {
+            p = java.net.URLDecoder.decode(p, "UTF-8");
+        } catch (Exception ignored) {
+            // keep the raw form if it isn't valid percent-encoding
+        }
+        return p;
+    }
+
 }
 
 
@@ -4895,8 +4952,7 @@ const styles = StyleSheet.create({
 ================================================================================
 FILE: src/components/library/RenameRecordingModal.tsx
 ================================================================================
-// src/components/library/RenameRecordingModal.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Modal,
   View,
@@ -4904,19 +4960,26 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
+  ScrollView,
   TouchableWithoutFeedback,
   Keyboard,
-  Platform,
-  LayoutAnimation,
-  useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Check, X, Pencil } from 'lucide-react-native';
+
+import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 import { useResponsive } from '../../hooks/useResponsive';
+import {
+  MAX_TAKE_NAME_LENGTH,
+  sanitizeFileName,
+  extractExtension,
+} from '../../services/storage/recordingPaths';
 
 interface RenameRecordingModalProps {
   visible: boolean;
   initialName: string;
+  /** Optional: enables the on-disk filename preview. */
+  fileUri?: string;
   onSave: (name: string) => void;
   onClose: () => void;
 }
@@ -4924,69 +4987,56 @@ interface RenameRecordingModalProps {
 export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   visible,
   initialName,
+  fileUri,
   onSave,
   onClose,
 }) => {
-  const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { isTablet } = useResponsive();
+  const { offset: keyboardOffset, isVisible: isKeyboardVisible } = useKeyboardViewport();
 
   const [name, setName] = useState(initialName);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<TextInput | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
 
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      const kh = e.endCoordinates?.height || 0;
-      if (kh > 0) {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        setKeyboardHeight(kh);
-      }
-    });
+    if (!visible) {
+      setIsFocused(false);
+      return;
+    }
 
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setKeyboardHeight(0);
-    });
+    setName(initialName);
+    focusTimerRef.current = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 240);
 
     return () => {
-      showSub.remove();
-      hideSub.remove();
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
     };
-  }, []);
-
-  useEffect(() => {
-    if (visible) {
-      setName(initialName);
-      const timer = setTimeout(() => {
-        inputRef.current?.focus();
-      }, 120);
-      return () => clearTimeout(timer);
-    } else {
-      setKeyboardHeight(0);
-    }
   }, [visible, initialName]);
 
+  const trimmed = name.trim();
+  const canSave = trimmed.length > 0;
+
+  // Preview of the real file on disk once the rename is applied.
+  const previewFileName =
+    fileUri && canSave
+      ? `${sanitizeFileName(trimmed)}${extractExtension(fileUri)}`
+      : null;
+
   const handleSave = () => {
-    const trimmed = name.trim();
-    if (trimmed.length > 0) {
-      Keyboard.dismiss();
-      onSave(trimmed);
-    }
+    if (!canSave) return;
+    Keyboard.dismiss();
+    onSave(trimmed);
   };
 
   const handleCancel = () => {
     Keyboard.dismiss();
     onClose();
   };
-
-  const availableHeight =
-    keyboardHeight > 0
-      ? Math.max(0, windowHeight - keyboardHeight - insets.top)
-      : Math.max(0, windowHeight - insets.top - insets.bottom);
 
   return (
     <Modal
@@ -4996,33 +5046,64 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
       statusBarTranslucent
       onRequestClose={handleCancel}
     >
-      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-        <View style={[styles.backdrop, { paddingTop: insets.top }]}>
-          <View style={[styles.centerContainer, { height: availableHeight }]}>
+      <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
+        <View style={styles.backdrop}>
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={[
+              styles.scrollContent,
+              {
+                paddingTop: insets.top + 16,
+                paddingBottom: insets.bottom + keyboardOffset + 16,
+              },
+            ]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+          >
             <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
               <View style={[styles.card, isTablet && styles.cardTablet]}>
+                {/* Header */}
                 <View style={styles.headerRow}>
                   <View style={styles.iconCircle}>
                     <Pencil size={16} color="#FFFFFF" strokeWidth={2} />
                   </View>
                   <View style={styles.headerTextGroup}>
                     <Text style={styles.title}>Rename Recording</Text>
-                    <Text style={styles.subtitle}>Update metadata label for this take</Text>
+                    <Text style={styles.subtitle}>Update the label for this take</Text>
                   </View>
                 </View>
 
-                <View style={styles.inputWrapper}>
-                  <Text style={styles.inputLabel}>RECORDING NAME</Text>
-                  <View style={styles.inputInnerRow}>
+                {/* Input Section */}
+                <View style={styles.fieldSection}>
+                  <View style={styles.labelRow}>
+                    <Text style={styles.fieldLabel}>RECORDING NAME</Text>
+                    <Text style={styles.counter}>
+                      {name.length}/{MAX_TAKE_NAME_LENGTH}
+                    </Text>
+                  </View>
+
+                  <View
+                    style={[
+                      styles.inputShell,
+                      isFocused && styles.inputShellFocused,
+                    ]}
+                  >
                     <TextInput
                       ref={inputRef}
                       style={styles.input}
                       value={name}
                       onChangeText={setName}
+                      onFocus={() => setIsFocused(true)}
+                      onBlur={() => setIsFocused(false)}
                       placeholder="Take title..."
                       placeholderTextColor="#52525B"
                       selectTextOnFocus
+                      maxLength={MAX_TAKE_NAME_LENGTH}
                       returnKeyType="done"
+                      blurOnSubmit
+                      underlineColorAndroid="transparent"
                       onSubmitEditing={handleSave}
                     />
                     {name.length > 0 && (
@@ -5030,35 +5111,52 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                         style={styles.clearBtn}
                         onPress={() => setName('')}
                         activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <X size={13} color="#8E8E93" />
                       </TouchableOpacity>
                     )}
                   </View>
+
+                  {previewFileName ? (
+                    <View style={styles.previewRow}>
+                      <Text style={styles.previewLabel}>SAVES AS</Text>
+                      <Text style={styles.previewName} numberOfLines={1}>
+                        {previewFileName}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
 
+                {/* Actions */}
                 <View style={styles.actionRow}>
                   <TouchableOpacity
                     style={styles.cancelBtn}
                     onPress={handleCancel}
-                    activeOpacity={0.7}
+                    activeOpacity={0.75}
                   >
                     <Text style={styles.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={[styles.saveBtn, name.trim().length === 0 && styles.saveBtnDisabled]}
+                    style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
                     onPress={handleSave}
-                    disabled={name.trim().length === 0}
+                    disabled={!canSave}
                     activeOpacity={0.8}
                   >
                     <Check size={14} color="#000000" strokeWidth={3} />
                     <Text style={styles.saveBtnText}>Save</Text>
                   </TouchableOpacity>
                 </View>
+
+                <Text style={styles.hint}>
+                  {isKeyboardVisible
+                    ? 'Tap Save or press done to apply'
+                    : 'The audio file is renamed to match'}
+                </Text>
               </View>
             </TouchableWithoutFeedback>
-          </View>
+          </ScrollView>
         </View>
       </TouchableWithoutFeedback>
     </Modal>
@@ -5069,20 +5167,22 @@ const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
   },
-  centerContainer: {
+  scroll: {
+    flex: 1,
     width: '100%',
+  },
+  scrollContent: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 24,
+    paddingHorizontal: 22,
   },
   card: {
     width: '100%',
     maxWidth: 380,
     backgroundColor: '#121215',
-    borderRadius: 22,
+    borderRadius: 24,
     borderWidth: 1,
     borderColor: '#222228',
     padding: 20,
@@ -5090,7 +5190,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.6,
     shadowRadius: 20,
-    elevation: 16,
+    elevation: 18,
   },
   cardTablet: {
     maxWidth: 440,
@@ -5100,12 +5200,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 18,
   },
   iconCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#1C1C22',
     borderWidth: 1,
     borderColor: '#2A2A32',
@@ -5117,7 +5217,7 @@ const styles = StyleSheet.create({
   },
   title: {
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: '700',
     letterSpacing: -0.2,
   },
@@ -5125,29 +5225,44 @@ const styles = StyleSheet.create({
     color: '#8E8E93',
     fontSize: 11,
     fontWeight: '500',
-    marginTop: 2,
+    marginTop: 3,
     letterSpacing: 0.2,
   },
-  inputWrapper: {
-    backgroundColor: '#09090B',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1C1C22',
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 10,
-    marginBottom: 18,
+  fieldSection: {
+    marginBottom: 20,
   },
-  inputLabel: {
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    paddingHorizontal: 2,
+  },
+  fieldLabel: {
     color: '#71717A',
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 0.8,
-    marginBottom: 4,
   },
-  inputInnerRow: {
+  counter: {
+    color: '#52525B',
+    fontSize: 9,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  inputShell: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: '#09090B',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#1C1C22',
+    paddingHorizontal: 14,
+    height: 48,
+  },
+  inputShellFocused: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0A0E14',
   },
   input: {
     flex: 1,
@@ -5165,19 +5280,39 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 8,
   },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 2,
+  },
+  previewLabel: {
+    color: '#52525B',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  previewName: {
+    flex: 1,
+    color: '#34D399',
+    fontSize: 10.5,
+    fontWeight: '600',
+  },
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
+    gap: 10,
   },
   cancelBtn: {
     flex: 1,
-    height: 42,
+    height: 44,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 21,
+    borderRadius: 22,
     backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: '#24242A',
   },
   cancelBtnText: {
     color: '#8E8E93',
@@ -5186,13 +5321,13 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   saveBtn: {
-    flex: 1,
+    flex: 1.15,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
-    height: 42,
-    borderRadius: 21,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
   saveBtnDisabled: {
@@ -5203,6 +5338,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  hint: {
+    color: '#52525B',
+    fontSize: 10,
+    fontWeight: '500',
+    textAlign: 'center',
+    marginTop: 12,
   },
 });
 
@@ -9041,6 +9183,57 @@ const styles = StyleSheet.create({
 
 
 ================================================================================
+FILE: src/hooks/useKeyboardViewport.ts
+================================================================================
+import { useEffect, useRef, useState } from 'react';
+import { Keyboard, Platform, useWindowDimensions } from 'react-native';
+
+export interface KeyboardViewport {
+  /** Raw height reported by the OS. */
+  rawHeight: number;
+  /**
+   * Height the UI must reserve at the bottom edge.
+   * 0 when the OS already shrank the window (Android adjustResize),
+   * otherwise the full keyboard height to prevent control clipping.
+   */
+  offset: number;
+  isVisible: boolean;
+}
+
+const SHOW_EVENT = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+const HIDE_EVENT = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+export function useKeyboardViewport(): KeyboardViewport {
+  const { height } = useWindowDimensions();
+  const heightRef = useRef(height);
+  heightRef.current = height;
+
+  const fullHeightRef = useRef(height);
+  const [rawHeight, setRawHeight] = useState(0);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener(SHOW_EVENT, (e) => {
+      setRawHeight(e.endCoordinates?.height ?? 0);
+    });
+    const hideSub = Keyboard.addListener(HIDE_EVENT, () => setRawHeight(0));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (rawHeight === 0) fullHeightRef.current = height;
+  }, [rawHeight, height]);
+
+  const windowShrink = Math.max(0, fullHeightRef.current - heightRef.current);
+  const offset = Math.max(0, rawHeight - windowShrink);
+
+  return { rawHeight, offset, isVisible: rawHeight > 0 };
+}
+
+
+================================================================================
 FILE: src/hooks/useResponsive.ts
 ================================================================================
 // src/hooks/useResponsive.ts
@@ -9118,6 +9311,7 @@ import { RenameRecordingModal } from '../components/library/RenameRecordingModal
 import { LibrarySortModal, SortOption } from '../components/library/LibrarySortModal';
 import { LibraryBatchBar } from '../components/library/LibraryBatchBar';
 import { RecordingCard } from '../components/library/RecordingCard';
+import { renameTakeFile } from '../services/storage/recordingPaths';
 
 interface LibraryScreenProps {
   recordings: SavedRecording[];
@@ -9456,16 +9650,33 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   }, []);
 
   const handleSaveRename = useCallback((newName: string) => {
-    if (!recordingToRename) return;
-    const trimmed = newName.trim();
-    if (trimmed.length > 0 && trimmed !== recordingToRename.name) {
-      const updated = RecordingLibrary.rename(recordingToRename.id, trimmed);
-      onLibraryUpdate(updated);
-      showToast('Take Renamed', trimmed);
-    }
+  const target = recordingToRename;
+  if (!target) {
     setRenameModalVisible(false);
-    setRecordingToRename(null);
-  }, [recordingToRename, onLibraryUpdate, showToast]);
+    return;
+  }
+
+  const trimmed = newName.trim();
+  if (trimmed.length > 0 && trimmed !== target.name) {
+    const updated = RecordingLibrary.rename(target.id, trimmed);
+    onLibraryUpdate(updated);
+    showToast('Take Renamed', trimmed);
+
+    void (async () => {
+      try {
+        const renamed = await renameTakeFile(target.uri, trimmed);
+        if (renamed && renamed !== target.uri) {
+          onLibraryUpdate(RecordingLibrary.updateUri(target.id, renamed));
+        }
+      } catch (err) {
+        console.warn('[LibraryScreen] Could not rename take on disk:', err);
+      }
+    })();
+  }
+
+  setRenameModalVisible(false);
+  setRecordingToRename(null);
+}, [recordingToRename, onLibraryUpdate, showToast]);
 
   const handleDeleteSingle = useCallback((item: SavedRecording) => {
     setDeleteTarget({ type: 'single', item });
@@ -9914,14 +10125,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       />
 
       <RenameRecordingModal
-        visible={renameModalVisible}
-        initialName={recordingToRename?.name ?? ''}
-        onSave={handleSaveRename}
-        onClose={() => {
-          setRenameModalVisible(false);
-          setRecordingToRename(null);
-        }}
-      />
+  visible={renameModalVisible}
+  initialName={recordingToRename?.name ?? ''}
+  fileUri={recordingToRename?.uri}
+  onSave={handleSaveRename}
+  onClose={() => {
+    setRenameModalVisible(false);
+    setRecordingToRename(null);
+  }}
+/>
+
 
       <DeleteConfirmationModal
         visible={deleteModalVisible}
@@ -10549,7 +10762,12 @@ FILE: src/services/audio/recordingEngine.ts
 import { AudioRecorder, RecordingOptions } from 'expo-audio';
 import { WavRecorder, WavStopResult } from '../../../modules/audio-hardware-router/src';
 import { AudioPresetConfig, EngineKind } from './types';
-import { moveIntoTakesFolder } from '../storage/recordingPaths';
+import {
+  moveIntoTakesFolder,
+  reserveNativeTakePath,
+  ensureTakesFolder,
+} from '../storage/recordingPaths';
+
 
 export interface UnifiedStopResult {
   uri: string | null;
@@ -10586,8 +10804,6 @@ function stripToFileUri(uri: string | null | undefined): string | null {
 class MediaRecorderEngine implements UnifiedRecorder {
   readonly kind: EngineKind = 'mediarecorder';
 
-  private degraded = false;
-  private degradationNote: string | undefined;
   private prepared = false;
 
   constructor(private readonly recorder: AudioRecorder) {}
@@ -10601,9 +10817,6 @@ class MediaRecorderEngine implements UnifiedRecorder {
     _displayName: string,
     _inputDeviceId: number
   ): Promise<void> {
-    this.degraded = false;
-    this.degradationNote = undefined;
-
     try {
       await this.recorder.stop();
     } catch {
@@ -10645,17 +10858,22 @@ class MediaRecorderEngine implements UnifiedRecorder {
       raw = this.recorder.uri ?? null;
     }
 
+    this.prepared = false;
+
     if (!raw) {
-      return { uri: null, durationMs, sizeBytes: 0, degraded: this.degraded, degradationNote: this.degradationNote };
+      return { uri: null, durationMs, sizeBytes: 0, degraded: false };
     }
 
-    const uri = await moveIntoTakesFolder(raw, displayName, extension);
+    const result = await moveIntoTakesFolder(raw, displayName, extension);
+
     return {
-      uri,
+      uri: result.uri,
       durationMs,
-      sizeBytes: 0,
-      degraded: this.degraded,
-      degradationNote: this.degradationNote,
+      sizeBytes: result.sizeBytes,
+      degraded: !result.relocated,
+      degradationNote: result.relocated
+        ? undefined
+        : 'The take could not be moved into the AudioRecorder folder; it is still readable from the app cache.',
     };
   }
 
@@ -10694,7 +10912,6 @@ class AudioRecordEngine implements UnifiedRecorder {
   readonly kind: EngineKind = 'audiorecord';
 
   private degradationNote: string | undefined;
-  private lastStop: WavStopResult | null = null;
   private active = false;
 
   get rawUri(): string | null {
@@ -10703,19 +10920,17 @@ class AudioRecordEngine implements UnifiedRecorder {
     return path ? `file://${path}` : null;
   }
 
-  async prepare(
+    async prepare(
     preset: AudioPresetConfig,
     displayName: string,
     inputDeviceId: number
   ): Promise<void> {
     WavRecorder.release();
 
-    const { ensureTakesFolder, buildTakeFileName } = await import(
-      '../storage/recordingPaths'
-    );
-    const folder = await ensureTakesFolder();
-    const fileName = buildTakeFileName(displayName, preset.extension);
-    const filePath = `${folder}${fileName}`;
+    // Write straight into the dedicated folder - no cache round-trip.
+    // toNativePath() strips file:// so java.io.File gets an absolute path.
+    await ensureTakesFolder();
+    const filePath = await reserveNativeTakePath(displayName, preset.extension);
 
     const result = await WavRecorder.prepare({
       filePath,
@@ -10725,23 +10940,21 @@ class AudioRecordEngine implements UnifiedRecorder {
       inputDeviceId,
     });
 
-    this.degradationNote = undefined;
+    const notes: string[] = [];
+
     if (result.sampleRate !== preset.sampleRate) {
-      this.degradationNote = `Hardware delivered ${result.sampleRate} Hz instead of ${preset.sampleRate} Hz.`;
+      notes.push(`Hardware delivered ${result.sampleRate} Hz instead of ${preset.sampleRate} Hz.`);
     }
     if (result.bitDepth !== (preset.bitDepth === 32 ? 32 : 16) * 8) {
-      const note = `Hardware delivered ${result.bitDepth}-bit instead of ${preset.bitDepth}-bit.`;
-      this.degradationNote = this.degradationNote
-        ? `${this.degradationNote} ${note}`
-        : note;
+      notes.push(`Hardware delivered ${result.bitDepth}-bit instead of ${preset.bitDepth}-bit.`);
     }
     if (result.numberOfChannels !== preset.channels) {
-      const note = `Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`;
-      this.degradationNote = this.degradationNote
-        ? `${this.degradationNote} ${note}`
-        : note;
+      notes.push(`Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`);
     }
+
+    this.degradationNote = notes.length > 0 ? notes.join(' ') : undefined;
   }
+
 
   async start(): Promise<void> {
     await WavRecorder.start();
@@ -10757,13 +10970,12 @@ class AudioRecordEngine implements UnifiedRecorder {
   }
 
   async stop(_displayName: string, _extension: string): Promise<UnifiedStopResult> {
-    const result = await WavRecorder.stop();
+    const result: WavStopResult = await WavRecorder.stop();
     this.active = false;
-    this.lastStop = result;
 
     const uri = result.filePath ? `file://${result.filePath}` : null;
     const note = result.truncated
-      ? 'Recording stopped early: the WAV container\'s 32-bit size field was reached.'
+      ? 'Recording stopped early: the WAV container 32-bit size field was reached.'
       : this.degradationNote;
 
     return {
@@ -10805,6 +11017,403 @@ export function createUnifiedRecorder(
 }
 
 export { stripToFileUri };
+
+
+================================================================================
+FILE: src/services/audio/saveRecordingModal.tsx
+================================================================================
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Modal,
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  TouchableWithoutFeedback,
+  Keyboard,
+  ScrollView,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Trash2, Check, Music2, HardDrive, X } from 'lucide-react-native';
+
+import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
+import {
+  MAX_TAKE_NAME_LENGTH,
+  TAKES_FOLDER_NAME,
+} from '../../services/storage/recordingPaths';
+
+interface SaveRecordingModalProps {
+  visible: boolean;
+  defaultName: string;
+  durationMs: number;
+  sizeBytes: number;
+  formatBadge: string;
+  onSubmit: (chosenName: string) => void;
+  onDiscard: () => void;
+}
+
+const formatDuration = (ms: number) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return hrs > 0
+    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
+const formatSize = (bytes: number) => {
+  if (bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+};
+
+export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
+  visible,
+  defaultName,
+  durationMs,
+  sizeBytes,
+  formatBadge,
+  onSubmit,
+  onDiscard,
+}) => {
+  const insets = useSafeAreaInsets();
+  const { offset: keyboardOffset, isVisible: isKeyboardVisible } = useKeyboardViewport();
+
+  const [name, setName] = useState(defaultName);
+  const [isFocused, setIsFocused] = useState(false);
+  const inputRef = useRef<TextInput | null>(null);
+  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+
+    if (!visible) {
+      setIsFocused(false);
+      return;
+    }
+
+    setName(defaultName);
+    focusTimerRef.current = setTimeout(() => {
+      inputRef.current?.focus();
+    }, 240);
+
+    return () => {
+      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
+    };
+  }, [visible, defaultName]);
+
+  const trimmed = name.trim();
+  const canSave = trimmed.length > 0;
+  const isDirty = trimmed.length > 0 && trimmed !== defaultName.trim();
+
+  const handleSave = () => {
+    if (!canSave) return;
+    Keyboard.dismiss();
+    onSubmit(trimmed);
+  };
+
+  const handleDiscard = () => {
+    Keyboard.dismiss();
+    onDiscard();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent
+      onRequestClose={handleDiscard}
+    >
+      <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
+        <View style={styles.backdrop}>
+          <ScrollView
+            style={styles.scroll}
+            contentContainerStyle={[
+              styles.scrollContent,
+              {
+                paddingTop: insets.top + 16,
+                paddingBottom: insets.bottom + keyboardOffset + 16,
+              },
+            ]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+          >
+            <View style={styles.card}>
+              <View style={styles.headerRow}>
+                <View style={styles.iconCircle}>
+                  <Music2 size={17} color="#FFFFFF" strokeWidth={2} />
+                </View>
+                <View style={styles.headerTextGroup}>
+                  <Text style={styles.title}>Name your take</Text>
+                  <Text style={styles.subtitle} numberOfLines={1}>
+                    {formatDuration(durationMs)} • {formatSize(sizeBytes)} • {formatBadge}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.fieldSection}>
+                <View style={styles.labelRow}>
+                  <Text style={styles.fieldLabel}>TAKE NAME</Text>
+                  <Text style={styles.counter}>
+                    {name.length}/{MAX_TAKE_NAME_LENGTH}
+                  </Text>
+                </View>
+
+                <View
+                  style={[
+                    styles.inputShell,
+                    isFocused && styles.inputShellFocused,
+                  ]}
+                >
+                  <TextInput
+                    ref={inputRef}
+                    style={styles.input}
+                    value={name}
+                    onChangeText={setName}
+                    onFocus={() => setIsFocused(true)}
+                    onBlur={() => setIsFocused(false)}
+                    placeholder={defaultName}
+                    placeholderTextColor="#52525B"
+                    selectTextOnFocus
+                    maxLength={MAX_TAKE_NAME_LENGTH}
+                    returnKeyType="done"
+                    blurOnSubmit
+                    underlineColorAndroid="transparent"
+                    onSubmitEditing={handleSave}
+                  />
+                  {name.length > 0 && (
+                    <TouchableOpacity
+                      style={styles.clearBtn}
+                      onPress={() => setName('')}
+                      activeOpacity={0.7}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    >
+                      <X size={13} color="#8E8E93" />
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                <View style={styles.storageRow}>
+                  <HardDrive size={11} color="#34D399" />
+                  <Text style={styles.storageText} numberOfLines={1}>
+                    Already stored in {TAKES_FOLDER_NAME}/ on this device
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.discardBtn}
+                  onPress={handleDiscard}
+                  activeOpacity={0.75}
+                >
+                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                  <Text style={styles.discardBtnText}>Discard</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+                  onPress={handleSave}
+                  disabled={!canSave}
+                  activeOpacity={0.8}
+                >
+                  <Check size={14} color="#000000" strokeWidth={3} />
+                  <Text style={styles.saveBtnText}>
+                    {isDirty ? 'Save' : 'Save take'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {isKeyboardVisible ? (
+                <Text style={styles.hint}>Tap Save or press done to keep this take</Text>
+              ) : (
+                <Text style={styles.hint}>
+                  Discard permanently deletes the audio file
+                </Text>
+              )}
+            </View>
+          </ScrollView>
+        </View>
+      </TouchableWithoutFeedback>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.86)',
+  },
+  scroll: {
+    flex: 1,
+    width: '100%',
+  },
+  scrollContent: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 22,
+  },
+  card: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#121215',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#222228',
+    padding: 20,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.6,
+    shadowRadius: 20,
+    elevation: 18,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 18,
+  },
+  iconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#1C1C22',
+    borderWidth: 1,
+    borderColor: '#2A2A32',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerTextGroup: { flex: 1 },
+  title: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+  },
+  subtitle: {
+    color: '#8E8E93',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 3,
+    letterSpacing: 0.2,
+  },
+  fieldSection: { marginBottom: 20 },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+    paddingHorizontal: 2,
+  },
+  fieldLabel: {
+    color: '#71717A',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+  },
+  counter: {
+    color: '#52525B',
+    fontSize: 9,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  inputShell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#09090B',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#1C1C22',
+    paddingHorizontal: 14,
+    height: 48,
+  },
+  inputShellFocused: {
+    borderColor: '#38BDF8',
+    backgroundColor: '#0A0E14',
+  },
+  input: {
+    flex: 1,
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '500',
+    padding: 0,
+  },
+  clearBtn: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#18181D',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  storageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginTop: 8,
+    paddingHorizontal: 2,
+  },
+  storageText: {
+    flex: 1,
+    color: '#52525B',
+    fontSize: 10.5,
+    fontWeight: '500',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  discardBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.24)',
+  },
+  discardBtnText: {
+    color: '#EF4444',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
+  saveBtn: {
+    flex: 1.15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+  },
+  saveBtnDisabled: { opacity: 0.4 },
+  saveBtnText: {
+    color: '#000000',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  hint: {
+    color: '#52525B',
+    fontSize: 10,
+    fontWeight: '500',
+    textAlign: 'center',
+    marginTop: 12,
+  },
+});
 
 
 ================================================================================
@@ -11380,7 +11989,7 @@ import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
 import { onWavMetering } from '../../../modules/audio-hardware-router/src';
-import { PresetKey, AudioPresetConfig } from './types';
+import { PresetKey, AudioPresetConfig, EngineKind } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
 import {
   UnifiedRecorder,
@@ -11390,6 +11999,13 @@ import {
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export const BAR_COUNT = 156;
+export interface RecordingStopOutcome {
+  uri: string | null;
+  durationMs: number;
+  sizeBytes: number;
+  degradationNote?: string;
+  engine: EngineKind;
+}
 
 const formatTimecode = (ms: number) => {
   const totalSeconds = Math.floor(ms / 1000);
@@ -11603,12 +12219,13 @@ export function useAudioRecording() {
 
           SessionJournal.startSession({
             sessionId,
-            fileUri: stripToFileUri(rawUri) ?? '',
+            fileUri: rawUri ?? '',
             formatPreset: currentConfig.key,
             sampleRate: currentConfig.sampleRate,
             channels: currentConfig.channels as 1 | 2,
             startedAt: Date.now() - initialDurationMs,
           });
+
 
           await engine.start();
         } catch (error) {
@@ -11673,44 +12290,67 @@ export function useAudioRecording() {
     );
   }, [getEngine]);
 
-  const stopRecording = useCallback(async (): Promise<string | null> => {
-    if (
-      engineStateRef.current !== 'RECORDING' &&
-      engineStateRef.current !== 'PAUSED'
-    ) {
-      return fileUriRef.current;
-    }
+  
+  const stopRecording = useCallback(async (): Promise<RecordingStopOutcome> => {
+  const preset = activePresetRef.current;
+  const fallbackDuration = telemetry.current.durationMs;
 
-    engineStateRef.current = 'STOPPED';
-    isCapturingRef.current = false;
-    telemetry.current.isPaused = true;
-    setEngineState('STOPPED');
+  if (
+    engineStateRef.current !== 'RECORDING' &&
+    engineStateRef.current !== 'PAUSED'
+  ) {
+    return {
+      uri: fileUriRef.current,
+      durationMs: fallbackDuration,
+      sizeBytes: 0,
+      engine: preset.engine,
+    };
+  }
 
-    let finalUri: string | null = fileUriRef.current;
+  engineStateRef.current = 'STOPPED';
+  isCapturingRef.current = false;
+  telemetry.current.isPaused = true;
+  setEngineState('STOPPED');
 
-    try {
-      const engine = getEngine();
-      const result = await engine.stop(
-        `Take ${new Date().toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })}`,
-        activePresetRef.current.extension
-      );
-      finalUri = result.uri ?? finalUri;
-      if (result.degraded && result.degradationNote) {
-        console.warn('[useAudioRecording] ' + result.degradationNote);
-      }
-    } catch (error) {
-      console.warn('[useAudioRecording] engine.stop caught exception:', error);
-    }
+  let finalUri: string | null = fileUriRef.current;
+  let durationMs = fallbackDuration;
+  let sizeBytes = 0;
+  let degradationNote: string | undefined;
 
-    fileUriRef.current = finalUri;
-    SessionJournal.setStatus('FINALIZED');
-    SessionJournal.clearSession();
-    return finalUri;
-  }, [getEngine]);
+  try {
+    const engine = getEngine();
+    const stamp = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    const result = await engine.stop(`Take ${stamp}`, preset.extension);
+
+    finalUri = result.uri ?? finalUri;
+    if (result.durationMs > 0) durationMs = result.durationMs;
+    sizeBytes = result.sizeBytes;
+    degradationNote = result.degradationNote;
+  } catch (error: any) {
+    console.warn('[useAudioRecording] engine.stop caught exception:', error);
+    degradationNote = error?.message
+      ? `Capture ended with an error: ${error.message}`
+      : 'Capture ended with an unknown error.';
+  }
+
+  fileUriRef.current = finalUri;
+  SessionJournal.setStatus('FINALIZED');
+  SessionJournal.clearSession();
+
+  return {
+    uri: finalUri,
+    durationMs,
+    sizeBytes,
+    degradationNote,
+    engine: preset.engine,
+  };
+}, [getEngine]);
+
 
   const resetEngine = useCallback(async () => {
     if (
@@ -11970,6 +12610,14 @@ export const RecordingLibrary = {
     libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
     return updated;
   },
+  // Add this method to the RecordingLibrary object / class:
+updateUri(id: string, uri: string): SavedRecording[] {
+  const existing = this.getAll();
+  const updated = existing.map((item) => (item.id === id ? { ...item, uri } : item));
+  libraryStorage.set(LIBRARY_STORAGE_KEY, JSON.stringify(updated));
+  return updated;
+},
+
 };
 
 
@@ -11980,15 +12628,37 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 export const TAKES_FOLDER_NAME = 'AudioRecorder';
 
+/** Kept in sync with maxLength on the rename inputs. */
+export const MAX_TAKE_NAME_LENGTH = 80;
+
 let cachedFolderUri: string | null = null;
 
+/*
+ * NOTE ON THESE PATTERNS
+ * -----------------------
+ * Every character class below is written with \u / \x escapes on purpose.
+ * The previous version embedded a raw control byte inside the class:
+ *     .replace(/[/\\?%*:|"<>\u0000-]/g, '_')
+ * Hermes cannot build that class and throws at evaluation time:
+ *   "Invalid regular expression: character class out of range"
+ */
+const ILLEGAL_NAME_CHARS = /[\\/:*?"<>|]/g;
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+const LEADING_JUNK = /^[.\s]+/;
+const TRAILING_JUNK = /[.\s]+$/;
+const WHITESPACE_RUN = /\s+/g;
+const EXTENSION_TAIL = /\.[A-Za-z0-9]{1,8}$/;
+
+export interface RelocateResult {
+  uri: string | null;
+  sizeBytes: number;
+  /** False when the file could not be placed in the takes folder. */
+  relocated: boolean;
+}
+
 /**
- * Single dedicated folder for every take, regardless of which native engine
- * produced it:
- *
- *   /storage/emulated/0/Android/data/com.audiorecorder.app/files/AudioRecorder/
- *
- * App-scoped external files directory. Survives reboots and won't be purged by OS cache sweeps.
+ * Single dedicated folder for every take, regardless of native capture engine:
+ * /storage/emulated/0/Android/data/com.audiorecorder.app/files/AudioRecorder/
  */
 export function getTakesFolderUri(): string {
   if (cachedFolderUri) return cachedFolderUri;
@@ -12016,53 +12686,75 @@ export async function ensureTakesFolder(): Promise<string> {
   return uri;
 }
 
+/**
+ * Plain filesystem path (no scheme) for the takes folder.
+ *
+ * Android native modules backed by java.io.File need this form. Handing them a
+ * file:// URI makes java.io.File resolve it against the process CWD, producing
+ * "<cwd>/file:/data/..." and failing with ENOENT.
+ */
+export function getTakesFolderPath(): string {
+  return toNativePath(getTakesFolderUri());
+}
+
+/** Strips the file:// scheme and percent-decodes a URI into a filesystem path. */
+export function toNativePath(uri: string | null | undefined): string {
+  if (!uri) return '';
+
+  let path = uri.trim();
+
+  if (path.startsWith('content://') || path.startsWith('assets-library://')) {
+    throw new Error(`Cannot use a content:// URI as a native path: ${path}`);
+  }
+
+  if (path.startsWith('file://')) {
+    path = path.slice('file://'.length);
+  }
+
+  // A leftover third slash would collapse to a relative path inside java.io.File.
+  if (!path.startsWith('/')) {
+    path = `/${path}`;
+  }
+
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Reserves a collision-free path inside the takes folder, for native writers. */
+export async function reserveNativeTakePath(
+  name: string,
+  extension: string
+): Promise<string> {
+  return toNativePath(await reserveTakeFilePath(name, extension));
+}
+
 /** Strips characters that are illegal or hostile in Android/SAF file names. */
 export function sanitizeFileName(name: string): string {
-  const cleaned = name
-    .replace(/[/\\?%*:|"<>�-]/g, '_')
-    .replace(/\s+/g, ' ')
+  const safe = String(name ?? '')
+    .replace(CONTROL_CHARS, ' ')
+    .replace(ILLEGAL_NAME_CHARS, '_')
+    .replace(WHITESPACE_RUN, ' ')
+    .replace(LEADING_JUNK, '')
+    .replace(TRAILING_JUNK, '')
     .trim();
-  const safe = cleaned.length > 0 ? cleaned : 'Take';
-  return safe.length > 80 ? safe.slice(0, 80) : safe;
+
+  if (safe.length === 0) return 'Take';
+  return safe.length > MAX_TAKE_NAME_LENGTH
+    ? safe.slice(0, MAX_TAKE_NAME_LENGTH).trim()
+    : safe;
+}
+
+export function normalizeExtension(extension: string): string {
+  const raw = String(extension ?? '').trim().toLowerCase();
+  if (raw.length === 0) return '';
+  return raw.startsWith('.') ? raw : `.${raw}`;
 }
 
 export function buildTakeFileName(name: string, extension: string): string {
-  const ext = extension.startsWith('.') ? extension : `.${extension}`;
-  return `${sanitizeFileName(name)}${ext}`;
-}
-
-/**
- * Relocates a finished take into the dedicated folder under a human-readable name.
- */
-export async function moveIntoTakesFolder(
-  sourceUri: string | null | undefined,
-  name: string,
-  extension: string
-): Promise<string | null> {
-  if (!sourceUri) return null;
-
-  const folder = await ensureTakesFolder();
-  const target = `${folder}${buildTakeFileName(name, extension)}`;
-
-  try {
-    const info = await FileSystem.getInfoAsync(sourceUri);
-    if (!info.exists) {
-      return sourceUri;
-    }
-
-    // Never clobber an existing take.
-    let finalTarget = target;
-    if (await pathExists(finalTarget)) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      finalTarget = `${folder}${sanitizeFileName(name)}_${stamp}${extension}`;
-    }
-
-    await FileSystem.moveAsync({ from: sourceUri, to: finalTarget });
-    return finalTarget;
-  } catch (e) {
-    console.warn('[recordingPaths] Failed to relocate take:', e);
-    return sourceUri;
-  }
+  return `${sanitizeFileName(name)}${normalizeExtension(extension)}`;
 }
 
 export async function pathExists(uri: string): Promise<boolean> {
@@ -12071,6 +12763,118 @@ export async function pathExists(uri: string): Promise<boolean> {
     return Boolean(info.exists);
   } catch {
     return false;
+  }
+}
+
+export async function getFileSize(uri: string): Promise<number> {
+  if (!uri) return 0;
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists && !info.isDirectory) return info.size ?? 0;
+  } catch {
+    /* ignore */
+  }
+  return 0;
+}
+
+/** "Take 1.wav" -> ".wav" */
+export function extractExtension(uri: string): string {
+  const clean = String(uri ?? '').split('?')[0];
+  const match = EXTENSION_TAIL.exec(clean);
+  return match ? match[0].toLowerCase() : '';
+}
+
+export function isInTakesFolder(uri: string | null | undefined): boolean {
+  if (!uri) return false;
+  try {
+    return uri.startsWith(getTakesFolderUri());
+  } catch {
+    return false;
+  }
+}
+
+/** Collision resolver: "Name.wav" -> "Name (2).wav" -> ... */
+async function uniqueTarget(folder: string, stem: string, ext: string): Promise<string> {
+  let candidate = `${folder}${stem}${ext}`;
+  let n = 1;
+  while (await pathExists(candidate)) {
+    n += 1;
+    if (n > 200) {
+      return `${folder}${stem}-${Date.now()}${ext}`;
+    }
+    candidate = `${folder}${stem} (${n})${ext}`;
+  }
+  return candidate;
+}
+
+/** Reserves a collision-free path inside the takes folder. */
+export async function reserveTakeFilePath(name: string, extension: string): Promise<string> {
+  const folder = await ensureTakesFolder();
+  return uniqueTarget(folder, sanitizeFileName(name), normalizeExtension(extension));
+}
+
+/** Renames an existing take so disk contents match user-edited labels. */
+export async function renameTakeFile(
+  uri: string,
+  newName: string,
+  extension?: string
+): Promise<string | null> {
+  if (!uri || !isInTakesFolder(uri)) return null;
+
+  const stem = sanitizeFileName(newName);
+  const ext = normalizeExtension(extension ?? '') || extractExtension(uri);
+  if (!stem) return null;
+
+  const folder = getTakesFolderUri();
+  const target = await uniqueTarget(folder, stem, ext);
+  if (target === uri) return uri;
+
+  try {
+    await FileSystem.moveAsync({ from: uri, to: target });
+    return target;
+  } catch {
+    try {
+      await FileSystem.copyAsync({ from: uri, to: target });
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+      return target;
+    } catch (copyError) {
+      console.warn('[recordingPaths] Failed to rename take:', copyError);
+      return null;
+    }
+  }
+}
+
+/** Relocates finished files with an EXDEV copy+delete fallback. */
+export async function moveIntoTakesFolder(
+  sourceUri: string | null | undefined,
+  name: string,
+  extension: string
+): Promise<RelocateResult> {
+  if (!sourceUri) return { uri: null, sizeBytes: 0, relocated: false };
+
+  const sizeBytes = await getFileSize(sourceUri);
+  const folder = await ensureTakesFolder();
+  const ext = normalizeExtension(extension);
+  const target = await uniqueTarget(folder, sanitizeFileName(name), ext);
+
+  if (target === sourceUri) {
+    return { uri: sourceUri, sizeBytes, relocated: true };
+  }
+
+  try {
+    await FileSystem.moveAsync({ from: sourceUri, to: target });
+    return { uri: target, sizeBytes, relocated: true };
+  } catch (moveError) {
+    console.warn('[recordingPaths] moveAsync failed, falling back to copy:', moveError);
+  }
+
+  try {
+    await FileSystem.copyAsync({ from: sourceUri, to: target });
+    await FileSystem.deleteAsync(sourceUri, { idempotent: true });
+    return { uri: target, sizeBytes, relocated: true };
+  } catch (copyError) {
+    console.warn('[recordingPaths] Failed to relocate take:', copyError);
+    return { uri: sourceUri, sizeBytes, relocated: false };
   }
 }
 

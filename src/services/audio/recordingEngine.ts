@@ -1,7 +1,12 @@
 import { AudioRecorder, RecordingOptions } from 'expo-audio';
 import { WavRecorder, WavStopResult } from '../../../modules/audio-hardware-router/src';
 import { AudioPresetConfig, EngineKind } from './types';
-import { moveIntoTakesFolder } from '../storage/recordingPaths';
+import {
+  moveIntoTakesFolder,
+  reserveNativeTakePath,
+  ensureTakesFolder,
+} from '../storage/recordingPaths';
+
 
 export interface UnifiedStopResult {
   uri: string | null;
@@ -38,8 +43,6 @@ function stripToFileUri(uri: string | null | undefined): string | null {
 class MediaRecorderEngine implements UnifiedRecorder {
   readonly kind: EngineKind = 'mediarecorder';
 
-  private degraded = false;
-  private degradationNote: string | undefined;
   private prepared = false;
 
   constructor(private readonly recorder: AudioRecorder) {}
@@ -53,9 +56,6 @@ class MediaRecorderEngine implements UnifiedRecorder {
     _displayName: string,
     _inputDeviceId: number
   ): Promise<void> {
-    this.degraded = false;
-    this.degradationNote = undefined;
-
     try {
       await this.recorder.stop();
     } catch {
@@ -97,17 +97,22 @@ class MediaRecorderEngine implements UnifiedRecorder {
       raw = this.recorder.uri ?? null;
     }
 
+    this.prepared = false;
+
     if (!raw) {
-      return { uri: null, durationMs, sizeBytes: 0, degraded: this.degraded, degradationNote: this.degradationNote };
+      return { uri: null, durationMs, sizeBytes: 0, degraded: false };
     }
 
-    const uri = await moveIntoTakesFolder(raw, displayName, extension);
+    const result = await moveIntoTakesFolder(raw, displayName, extension);
+
     return {
-      uri,
+      uri: result.uri,
       durationMs,
-      sizeBytes: 0,
-      degraded: this.degraded,
-      degradationNote: this.degradationNote,
+      sizeBytes: result.sizeBytes,
+      degraded: !result.relocated,
+      degradationNote: result.relocated
+        ? undefined
+        : 'The take could not be moved into the AudioRecorder folder; it is still readable from the app cache.',
     };
   }
 
@@ -146,7 +151,6 @@ class AudioRecordEngine implements UnifiedRecorder {
   readonly kind: EngineKind = 'audiorecord';
 
   private degradationNote: string | undefined;
-  private lastStop: WavStopResult | null = null;
   private active = false;
 
   get rawUri(): string | null {
@@ -155,19 +159,17 @@ class AudioRecordEngine implements UnifiedRecorder {
     return path ? `file://${path}` : null;
   }
 
-  async prepare(
+    async prepare(
     preset: AudioPresetConfig,
     displayName: string,
     inputDeviceId: number
   ): Promise<void> {
     WavRecorder.release();
 
-    const { ensureTakesFolder, buildTakeFileName } = await import(
-      '../storage/recordingPaths'
-    );
-    const folder = await ensureTakesFolder();
-    const fileName = buildTakeFileName(displayName, preset.extension);
-    const filePath = `${folder}${fileName}`;
+    // Write straight into the dedicated folder - no cache round-trip.
+    // toNativePath() strips file:// so java.io.File gets an absolute path.
+    await ensureTakesFolder();
+    const filePath = await reserveNativeTakePath(displayName, preset.extension);
 
     const result = await WavRecorder.prepare({
       filePath,
@@ -177,23 +179,21 @@ class AudioRecordEngine implements UnifiedRecorder {
       inputDeviceId,
     });
 
-    this.degradationNote = undefined;
+    const notes: string[] = [];
+
     if (result.sampleRate !== preset.sampleRate) {
-      this.degradationNote = `Hardware delivered ${result.sampleRate} Hz instead of ${preset.sampleRate} Hz.`;
+      notes.push(`Hardware delivered ${result.sampleRate} Hz instead of ${preset.sampleRate} Hz.`);
     }
     if (result.bitDepth !== (preset.bitDepth === 32 ? 32 : 16) * 8) {
-      const note = `Hardware delivered ${result.bitDepth}-bit instead of ${preset.bitDepth}-bit.`;
-      this.degradationNote = this.degradationNote
-        ? `${this.degradationNote} ${note}`
-        : note;
+      notes.push(`Hardware delivered ${result.bitDepth}-bit instead of ${preset.bitDepth}-bit.`);
     }
     if (result.numberOfChannels !== preset.channels) {
-      const note = `Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`;
-      this.degradationNote = this.degradationNote
-        ? `${this.degradationNote} ${note}`
-        : note;
+      notes.push(`Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`);
     }
+
+    this.degradationNote = notes.length > 0 ? notes.join(' ') : undefined;
   }
+
 
   async start(): Promise<void> {
     await WavRecorder.start();
@@ -209,13 +209,12 @@ class AudioRecordEngine implements UnifiedRecorder {
   }
 
   async stop(_displayName: string, _extension: string): Promise<UnifiedStopResult> {
-    const result = await WavRecorder.stop();
+    const result: WavStopResult = await WavRecorder.stop();
     this.active = false;
-    this.lastStop = result;
 
     const uri = result.filePath ? `file://${result.filePath}` : null;
     const note = result.truncated
-      ? 'Recording stopped early: the WAV container\'s 32-bit size field was reached.'
+      ? 'Recording stopped early: the WAV container 32-bit size field was reached.'
       : this.degradationNote;
 
     return {

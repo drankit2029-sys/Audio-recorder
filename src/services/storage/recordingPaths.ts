@@ -2,15 +2,37 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 export const TAKES_FOLDER_NAME = 'AudioRecorder';
 
+/** Kept in sync with maxLength on the rename inputs. */
+export const MAX_TAKE_NAME_LENGTH = 80;
+
 let cachedFolderUri: string | null = null;
 
+/*
+ * NOTE ON THESE PATTERNS
+ * -----------------------
+ * Every character class below is written with \u / \x escapes on purpose.
+ * The previous version embedded a raw control byte inside the class:
+ *     .replace(/[/\\?%*:|"<>\u0000-]/g, '_')
+ * Hermes cannot build that class and throws at evaluation time:
+ *   "Invalid regular expression: character class out of range"
+ */
+const ILLEGAL_NAME_CHARS = /[\\/:*?"<>|]/g;
+const CONTROL_CHARS = /[\u0000-\u001F\u007F]/g;
+const LEADING_JUNK = /^[.\s]+/;
+const TRAILING_JUNK = /[.\s]+$/;
+const WHITESPACE_RUN = /\s+/g;
+const EXTENSION_TAIL = /\.[A-Za-z0-9]{1,8}$/;
+
+export interface RelocateResult {
+  uri: string | null;
+  sizeBytes: number;
+  /** False when the file could not be placed in the takes folder. */
+  relocated: boolean;
+}
+
 /**
- * Single dedicated folder for every take, regardless of which native engine
- * produced it:
- *
- *   /storage/emulated/0/Android/data/com.audiorecorder.app/files/AudioRecorder/
- *
- * App-scoped external files directory. Survives reboots and won't be purged by OS cache sweeps.
+ * Single dedicated folder for every take, regardless of native capture engine:
+ * /storage/emulated/0/Android/data/com.audiorecorder.app/files/AudioRecorder/
  */
 export function getTakesFolderUri(): string {
   if (cachedFolderUri) return cachedFolderUri;
@@ -38,53 +60,75 @@ export async function ensureTakesFolder(): Promise<string> {
   return uri;
 }
 
+/**
+ * Plain filesystem path (no scheme) for the takes folder.
+ *
+ * Android native modules backed by java.io.File need this form. Handing them a
+ * file:// URI makes java.io.File resolve it against the process CWD, producing
+ * "<cwd>/file:/data/..." and failing with ENOENT.
+ */
+export function getTakesFolderPath(): string {
+  return toNativePath(getTakesFolderUri());
+}
+
+/** Strips the file:// scheme and percent-decodes a URI into a filesystem path. */
+export function toNativePath(uri: string | null | undefined): string {
+  if (!uri) return '';
+
+  let path = uri.trim();
+
+  if (path.startsWith('content://') || path.startsWith('assets-library://')) {
+    throw new Error(`Cannot use a content:// URI as a native path: ${path}`);
+  }
+
+  if (path.startsWith('file://')) {
+    path = path.slice('file://'.length);
+  }
+
+  // A leftover third slash would collapse to a relative path inside java.io.File.
+  if (!path.startsWith('/')) {
+    path = `/${path}`;
+  }
+
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Reserves a collision-free path inside the takes folder, for native writers. */
+export async function reserveNativeTakePath(
+  name: string,
+  extension: string
+): Promise<string> {
+  return toNativePath(await reserveTakeFilePath(name, extension));
+}
+
 /** Strips characters that are illegal or hostile in Android/SAF file names. */
 export function sanitizeFileName(name: string): string {
-  const cleaned = name
-    .replace(/[/\\?%*:|"<>�-]/g, '_')
-    .replace(/\s+/g, ' ')
+  const safe = String(name ?? '')
+    .replace(CONTROL_CHARS, ' ')
+    .replace(ILLEGAL_NAME_CHARS, '_')
+    .replace(WHITESPACE_RUN, ' ')
+    .replace(LEADING_JUNK, '')
+    .replace(TRAILING_JUNK, '')
     .trim();
-  const safe = cleaned.length > 0 ? cleaned : 'Take';
-  return safe.length > 80 ? safe.slice(0, 80) : safe;
+
+  if (safe.length === 0) return 'Take';
+  return safe.length > MAX_TAKE_NAME_LENGTH
+    ? safe.slice(0, MAX_TAKE_NAME_LENGTH).trim()
+    : safe;
+}
+
+export function normalizeExtension(extension: string): string {
+  const raw = String(extension ?? '').trim().toLowerCase();
+  if (raw.length === 0) return '';
+  return raw.startsWith('.') ? raw : `.${raw}`;
 }
 
 export function buildTakeFileName(name: string, extension: string): string {
-  const ext = extension.startsWith('.') ? extension : `.${extension}`;
-  return `${sanitizeFileName(name)}${ext}`;
-}
-
-/**
- * Relocates a finished take into the dedicated folder under a human-readable name.
- */
-export async function moveIntoTakesFolder(
-  sourceUri: string | null | undefined,
-  name: string,
-  extension: string
-): Promise<string | null> {
-  if (!sourceUri) return null;
-
-  const folder = await ensureTakesFolder();
-  const target = `${folder}${buildTakeFileName(name, extension)}`;
-
-  try {
-    const info = await FileSystem.getInfoAsync(sourceUri);
-    if (!info.exists) {
-      return sourceUri;
-    }
-
-    // Never clobber an existing take.
-    let finalTarget = target;
-    if (await pathExists(finalTarget)) {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      finalTarget = `${folder}${sanitizeFileName(name)}_${stamp}${extension}`;
-    }
-
-    await FileSystem.moveAsync({ from: sourceUri, to: finalTarget });
-    return finalTarget;
-  } catch (e) {
-    console.warn('[recordingPaths] Failed to relocate take:', e);
-    return sourceUri;
-  }
+  return `${sanitizeFileName(name)}${normalizeExtension(extension)}`;
 }
 
 export async function pathExists(uri: string): Promise<boolean> {
@@ -93,6 +137,118 @@ export async function pathExists(uri: string): Promise<boolean> {
     return Boolean(info.exists);
   } catch {
     return false;
+  }
+}
+
+export async function getFileSize(uri: string): Promise<number> {
+  if (!uri) return 0;
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (info.exists && !info.isDirectory) return info.size ?? 0;
+  } catch {
+    /* ignore */
+  }
+  return 0;
+}
+
+/** "Take 1.wav" -> ".wav" */
+export function extractExtension(uri: string): string {
+  const clean = String(uri ?? '').split('?')[0];
+  const match = EXTENSION_TAIL.exec(clean);
+  return match ? match[0].toLowerCase() : '';
+}
+
+export function isInTakesFolder(uri: string | null | undefined): boolean {
+  if (!uri) return false;
+  try {
+    return uri.startsWith(getTakesFolderUri());
+  } catch {
+    return false;
+  }
+}
+
+/** Collision resolver: "Name.wav" -> "Name (2).wav" -> ... */
+async function uniqueTarget(folder: string, stem: string, ext: string): Promise<string> {
+  let candidate = `${folder}${stem}${ext}`;
+  let n = 1;
+  while (await pathExists(candidate)) {
+    n += 1;
+    if (n > 200) {
+      return `${folder}${stem}-${Date.now()}${ext}`;
+    }
+    candidate = `${folder}${stem} (${n})${ext}`;
+  }
+  return candidate;
+}
+
+/** Reserves a collision-free path inside the takes folder. */
+export async function reserveTakeFilePath(name: string, extension: string): Promise<string> {
+  const folder = await ensureTakesFolder();
+  return uniqueTarget(folder, sanitizeFileName(name), normalizeExtension(extension));
+}
+
+/** Renames an existing take so disk contents match user-edited labels. */
+export async function renameTakeFile(
+  uri: string,
+  newName: string,
+  extension?: string
+): Promise<string | null> {
+  if (!uri || !isInTakesFolder(uri)) return null;
+
+  const stem = sanitizeFileName(newName);
+  const ext = normalizeExtension(extension ?? '') || extractExtension(uri);
+  if (!stem) return null;
+
+  const folder = getTakesFolderUri();
+  const target = await uniqueTarget(folder, stem, ext);
+  if (target === uri) return uri;
+
+  try {
+    await FileSystem.moveAsync({ from: uri, to: target });
+    return target;
+  } catch {
+    try {
+      await FileSystem.copyAsync({ from: uri, to: target });
+      await FileSystem.deleteAsync(uri, { idempotent: true });
+      return target;
+    } catch (copyError) {
+      console.warn('[recordingPaths] Failed to rename take:', copyError);
+      return null;
+    }
+  }
+}
+
+/** Relocates finished files with an EXDEV copy+delete fallback. */
+export async function moveIntoTakesFolder(
+  sourceUri: string | null | undefined,
+  name: string,
+  extension: string
+): Promise<RelocateResult> {
+  if (!sourceUri) return { uri: null, sizeBytes: 0, relocated: false };
+
+  const sizeBytes = await getFileSize(sourceUri);
+  const folder = await ensureTakesFolder();
+  const ext = normalizeExtension(extension);
+  const target = await uniqueTarget(folder, sanitizeFileName(name), ext);
+
+  if (target === sourceUri) {
+    return { uri: sourceUri, sizeBytes, relocated: true };
+  }
+
+  try {
+    await FileSystem.moveAsync({ from: sourceUri, to: target });
+    return { uri: target, sizeBytes, relocated: true };
+  } catch (moveError) {
+    console.warn('[recordingPaths] moveAsync failed, falling back to copy:', moveError);
+  }
+
+  try {
+    await FileSystem.copyAsync({ from: sourceUri, to: target });
+    await FileSystem.deleteAsync(sourceUri, { idempotent: true });
+    return { uri: target, sizeBytes, relocated: true };
+  } catch (copyError) {
+    console.warn('[recordingPaths] Failed to relocate take:', copyError);
+    return { uri: sourceUri, sizeBytes, relocated: false };
   }
 }
 

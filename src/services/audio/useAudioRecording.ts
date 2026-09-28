@@ -3,7 +3,7 @@ import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
 import { onWavMetering } from '../../../modules/audio-hardware-router/src';
-import { PresetKey, AudioPresetConfig } from './types';
+import { PresetKey, AudioPresetConfig, EngineKind } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
 import {
   UnifiedRecorder,
@@ -13,6 +13,13 @@ import {
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export const BAR_COUNT = 156;
+export interface RecordingStopOutcome {
+  uri: string | null;
+  durationMs: number;
+  sizeBytes: number;
+  degradationNote?: string;
+  engine: EngineKind;
+}
 
 const formatTimecode = (ms: number) => {
   const totalSeconds = Math.floor(ms / 1000);
@@ -226,12 +233,13 @@ export function useAudioRecording() {
 
           SessionJournal.startSession({
             sessionId,
-            fileUri: stripToFileUri(rawUri) ?? '',
+            fileUri: rawUri ?? '',
             formatPreset: currentConfig.key,
             sampleRate: currentConfig.sampleRate,
             channels: currentConfig.channels as 1 | 2,
             startedAt: Date.now() - initialDurationMs,
           });
+
 
           await engine.start();
         } catch (error) {
@@ -296,44 +304,67 @@ export function useAudioRecording() {
     );
   }, [getEngine]);
 
-  const stopRecording = useCallback(async (): Promise<string | null> => {
-    if (
-      engineStateRef.current !== 'RECORDING' &&
-      engineStateRef.current !== 'PAUSED'
-    ) {
-      return fileUriRef.current;
-    }
+  
+  const stopRecording = useCallback(async (): Promise<RecordingStopOutcome> => {
+  const preset = activePresetRef.current;
+  const fallbackDuration = telemetry.current.durationMs;
 
-    engineStateRef.current = 'STOPPED';
-    isCapturingRef.current = false;
-    telemetry.current.isPaused = true;
-    setEngineState('STOPPED');
+  if (
+    engineStateRef.current !== 'RECORDING' &&
+    engineStateRef.current !== 'PAUSED'
+  ) {
+    return {
+      uri: fileUriRef.current,
+      durationMs: fallbackDuration,
+      sizeBytes: 0,
+      engine: preset.engine,
+    };
+  }
 
-    let finalUri: string | null = fileUriRef.current;
+  engineStateRef.current = 'STOPPED';
+  isCapturingRef.current = false;
+  telemetry.current.isPaused = true;
+  setEngineState('STOPPED');
 
-    try {
-      const engine = getEngine();
-      const result = await engine.stop(
-        `Take ${new Date().toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-        })}`,
-        activePresetRef.current.extension
-      );
-      finalUri = result.uri ?? finalUri;
-      if (result.degraded && result.degradationNote) {
-        console.warn('[useAudioRecording] ' + result.degradationNote);
-      }
-    } catch (error) {
-      console.warn('[useAudioRecording] engine.stop caught exception:', error);
-    }
+  let finalUri: string | null = fileUriRef.current;
+  let durationMs = fallbackDuration;
+  let sizeBytes = 0;
+  let degradationNote: string | undefined;
 
-    fileUriRef.current = finalUri;
-    SessionJournal.setStatus('FINALIZED');
-    SessionJournal.clearSession();
-    return finalUri;
-  }, [getEngine]);
+  try {
+    const engine = getEngine();
+    const stamp = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    const result = await engine.stop(`Take ${stamp}`, preset.extension);
+
+    finalUri = result.uri ?? finalUri;
+    if (result.durationMs > 0) durationMs = result.durationMs;
+    sizeBytes = result.sizeBytes;
+    degradationNote = result.degradationNote;
+  } catch (error: any) {
+    console.warn('[useAudioRecording] engine.stop caught exception:', error);
+    degradationNote = error?.message
+      ? `Capture ended with an error: ${error.message}`
+      : 'Capture ended with an unknown error.';
+  }
+
+  fileUriRef.current = finalUri;
+  SessionJournal.setStatus('FINALIZED');
+  SessionJournal.clearSession();
+
+  return {
+    uri: finalUri,
+    durationMs,
+    sizeBytes,
+    degradationNote,
+    engine: preset.engine,
+  };
+}, [getEngine]);
+
 
   const resetEngine = useCallback(async () => {
     if (

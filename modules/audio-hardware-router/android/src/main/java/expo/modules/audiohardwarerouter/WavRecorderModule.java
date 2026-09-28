@@ -100,6 +100,11 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
             boolean wantFloat = options.hasKey("bitDepth")
                     && options.getInt("bitDepth") == 32;
             String path = options.hasKey("filePath") ? options.getString("filePath") : null;
+            path = normalizeToFilesystemPath(path);
+            if (path.isEmpty()) {
+                throw new IllegalArgumentException("filePath is required");
+            }
+
 
             if (sr <= 0) {
                 throw new IllegalArgumentException("sampleRate must be greater than 0");
@@ -625,4 +630,30 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         teardown();
         super.invalidate();
     }
+
+        /**
+     * Accepts either a bare filesystem path or a file:// URI and always returns
+     * an absolute filesystem path. java.io.File resolves relative-looking paths
+     * against the process CWD, which turns a file:// URI into
+     * "<cwd>/file:/data/..." and fails with ENOENT.
+     */
+    private static String normalizeToFilesystemPath(String raw) {
+        String p = raw == null ? "" : raw.trim();
+        if (p.startsWith("file://")) {
+            p = p.substring("file://".length());
+        }
+        if (p.isEmpty()) {
+            return "";
+        }
+        if (!p.startsWith("/")) {
+            p = "/" + p;
+        }
+        try {
+            p = java.net.URLDecoder.decode(p, "UTF-8");
+        } catch (Exception ignored) {
+            // keep the raw form if it isn't valid percent-encoding
+        }
+        return p;
+    }
+
 }
