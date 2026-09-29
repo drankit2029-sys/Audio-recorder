@@ -26,10 +26,49 @@ export interface UnifiedStopResult {
   degradationNote?: string;
 }
 
+/**
+ * M8: the RIFF data chunk is capped just below 2 GiB, so the "how long can I
+ * record" answer depends on the preset. The old message hard-coded "6 hours",
+ * which is only true for 48 kHz/16-bit mono — a 96 kHz 32-bit float stereo
+ * preset fills the container in about 1.5 hours.
+ */
+export const WAV_MAX_DATA_BYTES = 0x7ffffff0;
+
+function formatDuration(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) return `${minutes} min`;
+  if (minutes === 0) return `${hours} h`;
+  return `${hours} h ${minutes} min`;
+}
+
+export function wavSizeLimitMs(preset: AudioPresetConfig): number {
+  const bytesPerSecond =
+    preset.sampleRate * preset.channels * (preset.bitDepth === 32 ? 4 : 2);
+  if (bytesPerSecond <= 0) return Number.POSITIVE_INFINITY;
+  return (WAV_MAX_DATA_BYTES / bytesPerSecond) * 1000;
+}
+
+/**
+ * A take recovered from the crash journal: the PCM that is already on disk.
+ * Only the AudioRecord engine can continue it — MediaRecorder always produces a
+ * new file, so those presets fall back to starting over.
+ */
+export interface ResumePoint {
+  dataBytes: number;
+  durationMs: number;
+}
+
 export interface UnifiedRecorder {
   readonly kind: EngineKind;
   readonly rawUri: string | null;
-  prepare(preset: AudioPresetConfig, displayName: string, inputDeviceId: number): Promise<void>;
+  prepare(
+    preset: AudioPresetConfig,
+    displayName: string,
+    inputDeviceId: number,
+    resume?: ResumePoint
+  ): Promise<void>;
   start(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
@@ -63,7 +102,8 @@ class MediaRecorderEngine implements UnifiedRecorder {
   async prepare(
     preset: AudioPresetConfig,
     _displayName: string,
-    _inputDeviceId: number
+    _inputDeviceId: number,
+    _resume?: ResumePoint
   ): Promise<void> {
     try {
       await this.recorder.stop();
@@ -89,6 +129,8 @@ class MediaRecorderEngine implements UnifiedRecorder {
   }
 
   async stop(displayName: string, extension: string): Promise<UnifiedStopResult> {
+    // Read the duration BEFORE stopping: expo-audio resets the status once the
+    // recorder is torn down, and the take would otherwise be saved as 0:00.
     let durationMs = 0;
     try {
       const status = this.recorder.getStatus();
@@ -165,17 +207,18 @@ class AudioRecordEngine implements UnifiedRecorder {
   /** prepare()-time substitutions. Logged for diagnosis, never shown to the user. */
   private prepareNotes: string[] = [];
   private active = false;
+  private lastSizeLimitMs = Number.POSITIVE_INFINITY;
 
   get rawUri(): string | null {
-    const status = WavRecorder.getStatus();
-    const path = status?.filePath ?? null;
+    const path = WavRecorder.getStatusSync().filePath;
     return path ? `file://${path}` : null;
   }
 
   async prepare(
     preset: AudioPresetConfig,
     displayName: string,
-    inputDeviceId: number
+    inputDeviceId: number,
+    resume?: ResumePoint
   ): Promise<void> {
     WavRecorder.release();
 
@@ -183,13 +226,19 @@ class AudioRecordEngine implements UnifiedRecorder {
     // reserveNativeTakePath() strips file:// so java.io.File gets an absolute path.
     await ensureTakesFolder();
     const filePath = await reserveNativeTakePath(displayName, preset.extension);
+    this.lastSizeLimitMs = wavSizeLimitMs(preset);
 
+    // M9: when resuming, append to the recovered PCM instead of truncating the
+    // file the user still expects to be there.
     const result = await WavRecorder.prepare({
       filePath,
       sampleRate: preset.sampleRate,
       numberOfChannels: preset.channels,
       bitDepth: (preset.bitDepth === 32 ? 32 : 16) as 16 | 32,
       inputDeviceId,
+      append: Boolean(resume && resume.dataBytes > 0),
+      existingDataBytes: resume?.dataBytes ?? 0,
+      initialDurationMs: resume?.durationMs ?? 0,
     });
 
     const notes: string[] = [];
@@ -247,10 +296,12 @@ class AudioRecordEngine implements UnifiedRecorder {
     const uri = result.filePath ? `file://${result.filePath}` : null;
 
     // Only the container ceiling is user-actionable here. A take that silently
-    // stops short at the RIFF 32-bit limit is precisely the failure a label
-    // cannot convey, so it must be reported.
+    // stops short at the RIFF limit is precisely the failure a label cannot
+    // convey, so it must be reported — with the real timing for this preset.
     const note = result.truncated
-      ? 'Recording stopped early: the WAV container reached its 32-bit size limit (about 6 hours at 48 kHz / 16-bit). The take is truncated but valid.'
+      ? `Recording stopped early: the WAV container reached its 2 GB size limit (about ${formatDuration(
+          this.lastSizeLimitMs
+        )} for this preset). The take is truncated but valid.`
       : undefined;
 
     return {
@@ -264,12 +315,12 @@ class AudioRecordEngine implements UnifiedRecorder {
 
   getMetering(): number | null {
     if (!this.active) return null;
-    const status = WavRecorder.getStatus();
-    return typeof status?.metering === 'number' ? status.metering : null;
+    const { metering } = WavRecorder.getStatusSync();
+    return typeof metering === 'number' ? metering : null;
   }
 
   getDurationMs(): number {
-    return WavRecorder.getStatus()?.durationMs ?? 0;
+    return WavRecorder.getStatusSync().durationMs ?? 0;
   }
 
   release(): void {

@@ -139,7 +139,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const [exportTarget, setExportTarget] = useState<ExportTarget | null>(null);
 
   const [toastData, setToastData] = useState<AppToastData | null>(null);
-  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const showToast = useCallback(
     (
@@ -170,7 +170,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const playerRef = useRef(player);
   playerRef.current = player;
 
-  const progressPollRef = useRef<NodeJS.Timeout | null>(null);
+  const progressPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!player || !activeRecording) return;

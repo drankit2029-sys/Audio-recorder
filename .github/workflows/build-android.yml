@@ -18,6 +18,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # M4: the workflow used to go straight from `npm ci` to a Gradle build, so
+      # a broken type, a bad config plugin or an Expo version mismatch only
+      # showed up as a confusing Gradle/Kotlin failure (or not at all).
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Expo doctor
+        run: npx expo-doctor
+        continue-on-error: true
+
       - name: Prebuild Native Project
         run: npx expo prebuild --platform android --clean
 

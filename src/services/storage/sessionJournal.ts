@@ -16,7 +16,19 @@ export interface ActiveSessionRecord {
   channels: 1 | 2;
   startedAt: number;
   lastHeartbeatTimestamp: number;
-  byteOffsetEstimate: number;
+  /**
+   * Recorded duration in milliseconds.
+   *
+   * M9: this used to be called `byteOffsetEstimate` and was fed the duration,
+   * which made the name a lie and left the recovery path without the byte
+   * count it actually needs to patch the RIFF header.
+   */
+  durationMs: number;
+  /**
+   * Bytes of PCM written so far. Needed by WavRecorder.repair() to rebuild a
+   * valid RIFF header after the process died mid-take.
+   */
+  dataBytes: number;
   status: RecordingStatus;
   waveformSnapshot?: number[];
   prompterOffset?: number;
@@ -24,34 +36,68 @@ export interface ActiveSessionRecord {
 
 const ACTIVE_SESSION_KEY = 'active_recording_session';
 
+/** Journals written by earlier builds used `byteOffsetEstimate` for the duration. */
+interface LegacySessionRecord extends Omit<ActiveSessionRecord, 'durationMs' | 'dataBytes'> {
+  byteOffsetEstimate?: number;
+  durationMs?: number;
+  dataBytes?: number;
+}
+
+function normalize(raw: string): ActiveSessionRecord {
+  const record = (JSON.parse(raw) ?? {}) as LegacySessionRecord;
+  return {
+    ...record,
+    durationMs: record.durationMs ?? record.byteOffsetEstimate ?? 0,
+    dataBytes: record.dataBytes ?? 0,
+  } as ActiveSessionRecord;
+}
+
+export interface HeartbeatPatch {
+  durationMs?: number;
+  dataBytes?: number;
+  waveformSnapshot?: number[];
+  prompterOffset?: number;
+}
+
 export const SessionJournal = {
-  startSession(record: Omit<ActiveSessionRecord, 'lastHeartbeatTimestamp' | 'byteOffsetEstimate' | 'status'>): void {
+  startSession(
+    record: Omit<
+      ActiveSessionRecord,
+      'lastHeartbeatTimestamp' | 'durationMs' | 'dataBytes' | 'status'
+    >
+  ): void {
     const fullRecord: ActiveSessionRecord = {
       ...record,
       lastHeartbeatTimestamp: Date.now(),
-      byteOffsetEstimate: 0,
+      durationMs: 0,
+      dataBytes: 0,
       status: 'RECORDING',
     };
     sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(fullRecord));
   },
 
-  updateHeartbeat(
-    byteOffset: number,
-    waveformSnapshot?: number[],
-    prompterOffset?: number
-  ): void {
+  /**
+   * M9: named arguments — the old positional signature is what let a duration
+   * be stored in a field called `byteOffsetEstimate`.
+   */
+  updateHeartbeat(patch: HeartbeatPatch): void {
     const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
     if (!raw) return;
 
     try {
-      const record: ActiveSessionRecord = JSON.parse(raw);
+      const record = normalize(raw);
       record.lastHeartbeatTimestamp = Date.now();
-      record.byteOffsetEstimate = byteOffset;
-      if (waveformSnapshot && waveformSnapshot.length > 0) {
-        record.waveformSnapshot = waveformSnapshot;
+      if (typeof patch.durationMs === 'number') {
+        record.durationMs = patch.durationMs;
       }
-      if (typeof prompterOffset === 'number') {
-        record.prompterOffset = prompterOffset;
+      if (typeof patch.dataBytes === 'number') {
+        record.dataBytes = patch.dataBytes;
+      }
+      if (patch.waveformSnapshot && patch.waveformSnapshot.length > 0) {
+        record.waveformSnapshot = patch.waveformSnapshot;
+      }
+      if (typeof patch.prompterOffset === 'number') {
+        record.prompterOffset = patch.prompterOffset;
       }
       sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
@@ -62,7 +108,7 @@ export const SessionJournal = {
     if (!raw) return;
 
     try {
-      const record: ActiveSessionRecord = JSON.parse(raw);
+      const record = normalize(raw);
       record.status = status;
       sessionStorage.set(ACTIVE_SESSION_KEY, JSON.stringify(record));
     } catch {}
@@ -73,7 +119,7 @@ export const SessionJournal = {
       const raw = sessionStorage.getString(ACTIVE_SESSION_KEY);
       if (!raw) return null;
 
-      const record: ActiveSessionRecord = JSON.parse(raw);
+      const record = normalize(raw);
       if (record.status !== 'FINALIZED') {
         return record;
       }
@@ -85,5 +131,5 @@ export const SessionJournal = {
 
   clearSession(): void {
     sessionStorage.remove(ACTIVE_SESSION_KEY);
-  }
+  },
 };

@@ -1,10 +1,8 @@
 // src/components/studio/LiveWaveform.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
-import { Canvas, Path, Skia, BlurMask } from '@shopify/react-native-skia';
+import { Canvas, Path, Skia } from '@shopify/react-native-skia';
 import { EngineState } from '../../services/audio/useAudioRecording';
-
-// In src/components/studio/LiveWaveform.tsx
 
 interface LiveWaveformProps {
   telemetry: React.MutableRefObject<{
@@ -21,6 +19,15 @@ const BASELINE_AMPLITUDE = 0.00;
 const NOISE_FLOOR_DB = -40;
 const PEAK_DB = 0;
 const GLOW_PADDING = 24;
+
+/**
+ * Metering only arrives about 30 times a second, so the tape is driven by a
+ * 30 Hz timer rather than requestAnimationFrame: the old per-frame loop
+ * rebuilt a 156-segment Skia path 60 times a second — on top of the timer's own
+ * loop — and burned a GPU blur on every frame, which is what made low-end
+ * devices stutter while recording. (M3)
+ */
+const PUSH_INTERVAL_MS = 33;
 
 export const LiveWaveform: React.FC<LiveWaveformProps> = ({
   telemetry,
@@ -57,16 +64,9 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
       return;
     }
 
-    let frameId: number;
-    let lastPushTime = Date.now();
+    const step = () => {
+      if (telemetry.current.isPaused) return;
 
-    const tick = () => {
-      if (telemetry.current.isPaused) {
-        frameId = requestAnimationFrame(tick);
-        return;
-      }
-
-      const now = Date.now();
       const rawDb = telemetry.current.meteringDb;
 
       let targetAmp = BASELINE_AMPLITUDE;
@@ -87,27 +87,21 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
         glowRef.current += (targetAmp - glowRef.current) * 0.035;
       }
 
-      if (now - lastPushTime >= 34) {
-        lastPushTime = now;
-        historyRef.current.push(currentAmpRef.current);
-        if (historyRef.current.length > BAR_COUNT) {
-          historyRef.current.shift();
-        }
-        // Mirror the active tape into the telemetry ref for session journaling
-        telemetry.current.waveformHistory = historyRef.current;
+      historyRef.current.push(currentAmpRef.current);
+      if (historyRef.current.length > BAR_COUNT) {
+        historyRef.current.shift();
       }
+      // Mirror the active tape into the telemetry ref for session journaling
+      telemetry.current.waveformHistory = historyRef.current;
 
       setTick((t) => (t + 1) % 10000);
-      frameId = requestAnimationFrame(tick);
     };
 
-    frameId = requestAnimationFrame(tick);
+    const intervalId = setInterval(step, PUSH_INTERVAL_MS);
     return () => {
-      if (frameId) cancelAnimationFrame(frameId);
+      clearInterval(intervalId);
     };
   }, [engineState, telemetry]);
-
-  // ... rest of LiveWaveform layout and Skia canvas paths remain unchanged
 
   const onLayout = (e: LayoutChangeEvent) => {
     const w = Math.round(e.nativeEvent.layout.width);
@@ -146,7 +140,9 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
           height: height + GLOW_PADDING * 2,
         }}
       >
-        {/* Soft Ambient White Glow */}
+        {/* Ambient glow: a wide, soft stroke. A BlurMask used to be applied to
+            this path on every frame — far too expensive to run during capture
+            on low-end hardware, for an effect that is barely visible. (M3) */}
         {isActive && glow > 0.01 ? (
           <Path
             path={path}
@@ -154,10 +150,8 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
             strokeWidth={barWidth + 8}
             strokeCap="round"
             color="#FFFFFF"
-            opacity={Math.min(0.7, Math.max(0.12, glow * 0.85))}
-          >
-            <BlurMask blur={18} style="normal" />
-          </Path>
+            opacity={Math.min(0.28, Math.max(0.06, glow * 0.3))}
+          />
         ) : null}
 
         {/* Sharp Solid White Waveform Bars */}

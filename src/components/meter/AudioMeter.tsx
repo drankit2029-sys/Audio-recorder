@@ -20,6 +20,8 @@ import { EngineState } from '../../services/audio/useAudioRecording';
 interface AudioMeterProps {
   telemetry: React.MutableRefObject<{ meteringDb: number }>;
   engineState: EngineState;
+  /** Track height in dp — shortened on compact screens so the transport fits. */
+  height?: number;
 }
 
 const DB_TICKS = [0, -6, -12, -18, -24, -36, -48, -60];
@@ -46,13 +48,13 @@ function dbToNorm(db: number): number {
   }
 }
 
-export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }) => {
+export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState, height = 140 }) => {
   const barWidth = 9;
-  const layoutHeight = 140;
+  const layoutHeight = height;
 
   const meterLevel = useSharedValue(0);
   const peakHoldLevel = useSharedValue(0);
-  const peakDecayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const peakDecayTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (engineState === 'IDLE' || engineState === 'STOPPED') {
@@ -71,9 +73,10 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
       return;
     }
 
-    let frameId: number;
     let lastDb = -999;
 
+    // M3: metering updates roughly 30 times a second, so polling at 30 Hz is
+    // indistinguishable from a per-frame loop and costs half the wake-ups.
     const tick = () => {
       const rawDb = telemetry.current.meteringDb;
       if (rawDb !== lastDb) {
@@ -95,12 +98,11 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
           }, 900);
         }
       }
-      frameId = requestAnimationFrame(tick);
     };
 
-    frameId = requestAnimationFrame(tick);
+    const intervalId = setInterval(tick, 33);
     return () => {
-      cancelAnimationFrame(frameId);
+      clearInterval(intervalId);
       if (peakDecayTimeoutRef.current) clearTimeout(peakDecayTimeoutRef.current);
     };
   }, [engineState, telemetry, meterLevel, peakHoldLevel]);
@@ -143,6 +145,7 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState }
                 isSweet ? styles.sweetSpotText : null,
                 isClip ? styles.clipTickText : null,
               ]}
+              maxFontSizeMultiplier={1.4}
             >
               {label}
             </Text>

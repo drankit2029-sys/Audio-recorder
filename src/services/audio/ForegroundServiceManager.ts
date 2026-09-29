@@ -58,9 +58,11 @@ class ForegroundServiceManagerImpl {
     if (!this.isRunning) return;
 
     const timecode = this.lastTimerText;
-    const body = this.isPaused
-      ? `${timecode}  ·  paused, tap to return to the studio`
-      : `${timecode}  ·  recording, tap to return to the studio`;
+    // Notifee 9 dropped `subText`, so the format badge is folded into the body
+    // rather than being silently discarded.
+    const body = `${timecode}  ·  ${this.currentPresetBadge}  ·  ${
+      this.isPaused ? 'paused, tap to return to the studio' : 'recording, tap to return to the studio'
+    }`;
 
     try {
       await notifee.displayNotification({
@@ -78,10 +80,8 @@ class ForegroundServiceManagerImpl {
           ongoing: true,
           autoCancel: false,
           onlyAlertOnce: true,
-          enableVibration: false,
-          showWhen: false,
+          showTimestamp: true,
           timestamp: this.lastStartTime,
-          subText: this.currentPresetBadge,
           ticker: this.isPaused ? 'Recording paused' : 'Recording started',
           pressAction: { id: 'default', launchActivity: 'default' },
           actions: this.buildActions(),
@@ -185,9 +185,14 @@ class ForegroundServiceManagerImpl {
     this.actionQueue = this.actionQueue.then(async () => {
       if (!this.isRunning) return;
 
+      // A service that is torn down immediately after being started can trip
+      // Android's "foreground service did not start in time" check, so a very
+      // short take still waits a moment. 300 ms is enough and, unlike the
+      // previous 500 ms blanket sleep, is not felt on a normal stop.
+      const MIN_VISIBLE_MS = 300;
       const elapsed = Date.now() - this.lastStartTime;
-      if (elapsed < 500) {
-        await new Promise((res) => setTimeout(res, 500 - elapsed));
+      if (elapsed < MIN_VISIBLE_MS) {
+        await new Promise((res) => setTimeout(res, MIN_VISIBLE_MS - elapsed));
       }
 
       try {

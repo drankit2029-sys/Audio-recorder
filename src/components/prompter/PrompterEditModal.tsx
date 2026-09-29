@@ -52,7 +52,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
 
   const textRef = useRef(initialScript);
   const prevVisibleRef = useRef(false);
-  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<TextInput | null>(null);
   const isSavingRef = useRef(false);
 

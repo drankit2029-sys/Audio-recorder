@@ -7,6 +7,7 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Process;
+import android.util.Log;
 import android.os.SystemClock;
 
 import androidx.annotation.NonNull;
@@ -37,15 +38,18 @@ import java.nio.ByteOrder;
 public class WavRecorderModule extends ReactContextBaseJavaModule {
 
     private static final String EVENT_METERING = "wavRecorderMetering";
+    private static final String EVENT_ERROR = "wavRecorderError";
 
     private static final int READ_FRAMES = 2048;
     private static final long METER_INTERVAL_MS = 33L;
 
     /**
-     * RIFF chunk sizes are unsigned 32-bit. Stop a little early so the patched
-     * header never overflows. At 48 kHz/16-bit mono this is roughly 6 hours.
+     * M8: capped just below 2 GiB. The RIFF size fields are unsigned 32-bit, but
+     * a great many decoders (including Android's own MediaPlayer and several
+     * desktop DAWs) read them as signed ints, so anything above 2^31-1 is read
+     * as a negative length and the file is rejected or plays as silence.
      */
-    private static final long MAX_DATA_BYTES = 0xF0000000L;
+    private static final long MAX_DATA_BYTES = 0x7FFFFFF0L;
 
     private final ReactApplicationContext reactContext;
     private final AudioManager audioManager;
@@ -67,6 +71,9 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
     private long dataBytes = 0L;
     private long capturedMs = 0L;
     private long segmentStartMs = 0L;
+    /** True while a pause-able segment is open, so time is never double counted. */
+    private boolean segmentOpen = false;
+    private volatile String lastError = null;
 
     private double lastMeterDb = -160.0;
     private long lastMeterEmitMs = 0L;
@@ -202,11 +209,31 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
             }
 
             this.outputFile = file;
-            this.stream = new BufferedOutputStream(new FileOutputStream(file), 1 << 16);
-            writePlaceholderHeader();
 
-            this.dataBytes = 0L;
-            this.capturedMs = 0L;
+            // M9: resuming a take that survived a process death means appending
+            // to the PCM that is already on disk. The RIFF header is rewritten
+            // from `dataBytes` on stop(), so it is simply left alone here.
+            boolean append = options.hasKey("append") && options.getBoolean("append");
+            long existingBytes = append && options.hasKey("existingDataBytes")
+                    ? (long) options.getDouble("existingDataBytes")
+                    : 0L;
+            boolean resuming = append && file.exists() && existingBytes > 0L;
+
+            this.stream = new BufferedOutputStream(
+                    new FileOutputStream(file, resuming), 1 << 16);
+
+            if (resuming) {
+                this.dataBytes = existingBytes;
+                this.capturedMs = options.hasKey("initialDurationMs")
+                        ? (long) options.getDouble("initialDurationMs")
+                        : 0L;
+            } else {
+                writePlaceholderHeader();
+                this.dataBytes = 0L;
+                this.capturedMs = 0L;
+            }
+            this.segmentOpen = false;
+            this.lastError = null;
             this.lastMeterDb = -160.0;
             this.sizeLimitHit = false;
             this.prepared = true;
@@ -239,6 +266,7 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
             running = true;
             capturing = true;
             segmentStartMs = SystemClock.elapsedRealtime();
+            segmentOpen = true;
 
             worker = new Thread(this::captureLoop, "AudioRecorder-WAV");
             worker.setPriority(Thread.MAX_PRIORITY);
@@ -259,7 +287,7 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
             return;
         }
         capturing = false;
-        capturedMs += SystemClock.elapsedRealtime() - segmentStartMs;
+        closeSegment();
         try {
             if (audioRecord != null) {
                 audioRecord.stop();
@@ -269,16 +297,23 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         promise.resolve(null);
     }
 
+    /**
+     * C2: the old guard was `!prepared || running || ...`, but pause() leaves
+     * `running` true (only `capturing` goes false), so resume() always bailed
+     * out and the take never restarted. Gate on `capturing` instead.
+     */
     @ReactMethod
     public void resume(Promise promise) {
-        if (!prepared || running || audioRecord == null) {
+        if (!prepared || capturing || audioRecord == null) {
             promise.resolve(null);
             return;
         }
         try {
             audioRecord.startRecording();
             segmentStartMs = SystemClock.elapsedRealtime();
+            segmentOpen = true;
             capturing = true;
+            running = true;
             promise.resolve(null);
         } catch (Throwable t) {
             promise.reject("E_WAV_RESUME", t.getMessage(), t);
@@ -287,9 +322,7 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void stop(Promise promise) {
-        if (capturing) {
-            capturedMs += SystemClock.elapsedRealtime() - segmentStartMs;
-        }
+        closeSegment();
         capturing = false;
         running = false;
 
@@ -326,25 +359,27 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         promise.resolve(result);
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    public WritableMap getStatus() {
+    /**
+     * H3: synchronous @ReactMethod calls are not supported under the New
+     * Architecture (bridgeless/TurboModules), so this is Promise-based now.
+     * JS keeps a live cache fed by the metering event for per-frame reads.
+     */
+    @ReactMethod
+    public void getStatus(Promise promise) {
         WritableMap status = Arguments.createMap();
         boolean isRecording = capturing && running;
         status.putBoolean("isRecording", isRecording);
         status.putBoolean("isPaused", prepared && !capturing);
         status.putBoolean("canRecord", prepared);
-
-        long duration = capturedMs;
-        if (capturing) {
-            duration += SystemClock.elapsedRealtime() - segmentStartMs;
-        }
-        status.putDouble("durationMs", (double) duration);
+        status.putDouble("durationMs", (double) currentDurationMs());
         status.putDouble("metering", lastMeterDb);
+        status.putDouble("sizeBytes", (double) dataBytes);
+        status.putString("lastError", lastError);
         status.putString(
                 "filePath",
                 outputFile != null ? outputFile.getAbsolutePath() : null
         );
-        return status;
+        promise.resolve(status);
     }
 
     @ReactMethod
@@ -395,6 +430,7 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
                 if (!capturing) {
                     continue;
                 }
+                abortCapture("Audio capture failed: " + t.getMessage());
                 return;
             }
 
@@ -402,11 +438,13 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
                 if (!capturing) {
                     continue;
                 }
-                if (read == AudioRecord.ERROR_INVALID_OPERATION
-                        || read == AudioRecord.ERROR_BAD_VALUE) {
-                    return;
-                }
-                continue;
+                // C3: every non-positive result used to `continue` (spinning a core
+                // at 100% and never telling JS) or `return` while still reporting
+                // isRecording=true. Any of them now aborts cleanly.
+                abortCapture(read == AudioRecord.ERROR_DEAD_OBJECT
+                        ? "The audio input device disconnected during capture."
+                        : "AudioRecord stopped delivering data (error code " + read + ").");
+                return;
             }
 
             try {
@@ -420,14 +458,46 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
                     emitMetering(lastMeterDb, (double) dataBytes);
                 }
             } catch (IOException e) {
+                // Disk full / unwritable: the header never gets patched, so the
+                // take is unplayable. Tell JS instead of dying quietly. (C3)
+                abortCapture("Could not write audio to storage: " + e.getMessage());
                 return;
             }
 
             if (dataBytes >= MAX_DATA_BYTES) {
                 sizeLimitHit = true;
-                running = false;
-                capturing = false;
+                abortCapture("The WAV container reached its size limit; the take was truncated.");
             }
+        }
+    }
+
+    private long currentDurationMs() {
+        return capturedMs + (segmentOpen ? SystemClock.elapsedRealtime() - segmentStartMs : 0L);
+    }
+
+    private void closeSegment() {
+        if (segmentOpen) {
+            capturedMs += SystemClock.elapsedRealtime() - segmentStartMs;
+            segmentOpen = false;
+        }
+    }
+
+    /**
+     * Stops capture after an unrecoverable error, keeps the accumulated time and
+     * tells JS so the UI can finalise instead of showing a frozen "recording".
+     */
+    private void abortCapture(String message) {
+        closeSegment();
+        capturing = false;
+        running = false;
+        lastError = message;
+        Log.e(TAG, message);
+        if (reactContext != null && reactContext.hasActiveReactInstance()) {
+            WritableMap payload = Arguments.createMap();
+            payload.putString("message", message);
+            reactContext
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                    .emit(EVENT_ERROR, payload);
         }
     }
 
@@ -475,6 +545,7 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         WritableMap payload = Arguments.createMap();
         payload.putDouble("metering", db);
         payload.putDouble("sizeBytes", bytes);
+        payload.putDouble("durationMs", (double) currentDurationMs());
         reactContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                 .emit(EVENT_METERING, payload);
@@ -579,11 +650,75 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
         stream.flush();
 
         long riffSize = 36L + dataBytes;
-        try (RandomAccessFile raf = new RandomAccessFile(outputFile, "rw")) {
-            raf.seek(4);
-            raf.write((int) Math.min(riffSize, 0xFFFFFFFFL));
-            raf.seek(40);
-            raf.write((int) Math.min(dataBytes, 0xFFFFFFFFL));
+        writeLe32(outputFile, 4, riffSize);
+        writeLe32(outputFile, 40, dataBytes);
+    }
+
+    /**
+     * RIFF sizes are little-endian uint32. RandomAccessFile.write(int) writes a
+     * single byte and writeInt() writes big-endian, so the bytes are packed by
+     * hand. (C1: previously this wrote one byte and produced invalid files.)
+     */
+    private static void writeLe32(File file, long offset, long value) throws IOException {
+        ByteBuffer b = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+        b.putInt((int) Math.min(Math.max(value, 0L), 0xFFFFFFFFL));
+        try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
+            raf.seek(offset);
+            raf.write(b.array());
+        }
+    }
+
+    /**
+     * Patches the RIFF header of a take whose process died before stop() ran.
+     * The journal records the byte count, so the file can be made playable.
+     */
+    @ReactMethod
+    public void repair(ReadableMap options, Promise promise) {
+        try {
+            String path = normalizeToFilesystemPath(
+                    options.hasKey("filePath") ? options.getString("filePath") : null);
+            long bytes = options.hasKey("dataBytes") ? (long) options.getDouble("dataBytes") : 0L;
+            if (path.isEmpty() || bytes <= 0) {
+                promise.reject("E_WAV_REPAIR", "filePath and dataBytes are required");
+                return;
+            }
+            File file = new File(path);
+            if (!file.exists()) {
+                promise.reject("E_WAV_REPAIR", "File does not exist: " + path);
+                return;
+            }
+            long onDisk = file.length() - 44L;
+            if (onDisk <= 0L) {
+                promise.reject("E_WAV_REPAIR", "File is too short to contain PCM data");
+                return;
+            }
+
+            // The journal is written every 200 ms and the writer buffers up to
+            // 64 KB, so the recorded byte count can sit slightly ahead of what
+            // actually reached the disk. Trust the smaller of the two, floored
+            // to a whole frame so no partial sample is ever described.
+            int frame = options.hasKey("frameSize") ? options.getInt("frameSize") : 1;
+            long target = Math.min(bytes, onDisk);
+            if (frame > 1) {
+                target -= target % frame;
+            }
+            if (target <= 0L) {
+                promise.reject("E_WAV_REPAIR", "No complete audio frames were written");
+                return;
+            }
+
+            try (java.io.FileChannel channel = new java.io.FileOutputStream(file, true).getChannel()) {
+                channel.truncate(44L + target);
+            }
+            writeLe32(file, 4, 36L + target);
+            writeLe32(file, 40, target);
+            WritableMap result = Arguments.createMap();
+            result.putString("filePath", file.getAbsolutePath());
+            result.putDouble("dataBytes", (double) target);
+            result.putBoolean("truncatedToFrame", target != bytes);
+            promise.resolve(result);
+        } catch (Throwable t) {
+            promise.reject("E_WAV_REPAIR", t.getMessage(), t);
         }
     }
 

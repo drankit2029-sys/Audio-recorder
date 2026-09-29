@@ -2,10 +2,18 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAudioRecorder } from 'expo-audio';
 import { SessionJournal } from '../storage/sessionJournal';
 import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
-import { onWavMetering } from '../../../modules/audio-hardware-router/src';
+import {
+  onWavMetering,
+  onWavError,
+  WavRecorder,
+} from '../../../modules/audio-hardware-router/src';
 import { PresetKey, AudioPresetConfig, EngineKind } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
-import { UnifiedRecorder, createUnifiedRecorder } from './recordingEngine';
+import {
+  UnifiedRecorder,
+  ResumePoint,
+  createUnifiedRecorder,
+} from './recordingEngine';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export const BAR_COUNT = 156;
@@ -48,7 +56,20 @@ export function generateResumedWaveform(barCount: number = BAR_COUNT): number[] 
   return bars;
 }
 
-export function useAudioRecording() {
+/**
+ * A capture pipeline can die without telling JS (mic unplugged, another app
+ * stealing the input, disk full, the process being restarted). The hook now
+ * notices and reports it so the UI can finalise the take instead of showing a
+ * frozen "RECORDING" forever.
+ */
+export interface UseAudioRecordingOptions {
+  onCaptureLost?: (reason: string) => void;
+}
+
+/** How long the native capture may go silent before it counts as lost. */
+const CAPTURE_WATCHDOG_MS = 3000;
+
+export function useAudioRecording(options: UseAudioRecordingOptions = {}) {
   const [engineState, setEngineState] = useState<EngineState>('IDLE');
   const engineStateRef = useRef<EngineState>('IDLE');
 
@@ -68,8 +89,8 @@ export function useAudioRecording() {
   const smoothedDbRef = useRef(-60);
   const lastNotifTimeRef = useRef(0);
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const meterPollingRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const meterPollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileUriRef = useRef<string | null>(null);
   const engineRef = useRef<UnifiedRecorder | null>(null);
   const meteringSubscriptionRef = useRef<{ remove: () => void } | null>(null);
@@ -82,6 +103,11 @@ export function useAudioRecording() {
     isPaused: false,
     waveformHistory: new Array<number>(BAR_COUNT).fill(0),
   });
+
+  const captureLostRef = useRef(false);
+  const watchdogRef = useRef({ lastProgressAt: 0, lastDuration: -1 });
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   const processMeterDb = useCallback((rawDb: number) => {
     if (!isCapturingRef.current) return;
@@ -98,19 +124,40 @@ export function useAudioRecording() {
 
   const mediaRecorder = useAudioRecorder(activePreset.options);
 
+  const reportCaptureLost = useCallback((reason: string) => {
+    if (captureLostRef.current) return;
+    captureLostRef.current = true;
+    isCapturingRef.current = false;
+    console.warn('[useAudioRecording] capture lost:', reason);
+    optionsRef.current.onCaptureLost?.(reason);
+  }, []);
+
   useEffect(() => {
     if (activePreset.engine !== 'audiorecord') return;
-    const sub = onWavMetering((event) => {
+    const meteringSub = onWavMetering((event) => {
       if (typeof event?.metering === 'number') {
         processMeterDb(event.metering);
       }
     });
-    meteringSubscriptionRef.current = sub;
+    // C3: the native capture thread now reports fatal errors (device
+    // disconnected, disk full, AudioRecord failure). Without this the UI would
+    // keep showing RECORDING and the user would lose the take.
+    const errorSub = onWavError((event) => {
+      if (
+        engineStateRef.current !== 'RECORDING' &&
+        engineStateRef.current !== 'PAUSED'
+      ) {
+        return;
+      }
+      reportCaptureLost(event.message || 'The audio capture stopped unexpectedly.');
+    });
+    meteringSubscriptionRef.current = meteringSub;
     return () => {
-      sub?.remove();
+      meteringSub?.remove();
+      errorSub?.remove();
       meteringSubscriptionRef.current = null;
     };
-  }, [activePreset.engine, processMeterDb]);
+  }, [activePreset.engine, processMeterDb, reportCaptureLost]);
 
   const getEngine = useCallback((): UnifiedRecorder => {
     if (!engineRef.current) {
@@ -144,10 +191,47 @@ export function useAudioRecording() {
   useEffect(() => {
     if (engineState === 'RECORDING') {
       timerRef.current = setInterval(() => {
-        const total = telemetry.current.durationMs;
-        SessionJournal.updateHeartbeat(total, telemetry.current.waveformHistory);
-
         const now = Date.now();
+
+        // The clock lives here, not in the timer component: requestAnimationFrame
+        // is paused whenever the app is backgrounded or the UI is occluded, which
+        // froze both the on-screen timer AND the notification timecode during a
+        // background take on the old code.
+        if (!telemetry.current.isPaused) {
+          telemetry.current.durationMs =
+            telemetry.current.accumulatedMs + Math.max(0, now - telemetry.current.startTime);
+        }
+        const total = telemetry.current.durationMs;
+
+        SessionJournal.updateHeartbeat({
+          durationMs: total,
+          dataBytes:
+            activePresetRef.current.engine === 'audiorecord'
+              ? WavRecorder.getStatusSync().sizeBytes
+              : 0,
+          waveformSnapshot: telemetry.current.waveformHistory,
+        });
+
+        // Watchdog: the engines report their own duration. If it stops
+        // advancing while we believe we are capturing, the pipeline is dead
+        // (mic unplugged, input stolen by a phone call, process restart).
+        if (!telemetry.current.isPaused && !captureLostRef.current) {
+          const nativeDuration = getEngine().getDurationMs();
+          const watchdog = watchdogRef.current;
+          if (nativeDuration <= 0) {
+            // Still waiting for the first samples: preparing AudioRecord can
+            // take a second or more on slow hardware, so this is not a stall.
+            watchdog.lastProgressAt = now;
+          } else if (nativeDuration > watchdog.lastDuration + 50) {
+            watchdog.lastDuration = nativeDuration;
+            watchdog.lastProgressAt = now;
+          } else if (watchdog.lastProgressAt > 0 && now - watchdog.lastProgressAt > CAPTURE_WATCHDOG_MS) {
+            reportCaptureLost(
+              'The microphone stopped delivering audio. The take has been saved up to this point.'
+            );
+          }
+        }
+
         if (now - lastNotifTimeRef.current >= 1000) {
           lastNotifTimeRef.current = now;
           ForegroundServiceManager.updateProgress(
@@ -171,6 +255,8 @@ export function useAudioRecording() {
       if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
 
       if (engineState === 'IDLE' || engineState === 'STOPPED') {
+        captureLostRef.current = false;
+        watchdogRef.current = { lastProgressAt: 0, lastDuration: -1 };
         smoothedDbRef.current = -60;
         telemetry.current.meteringDb = -60;
         telemetry.current.accumulatedMs = 0;
@@ -183,7 +269,7 @@ export function useAudioRecording() {
       if (timerRef.current) clearInterval(timerRef.current);
       if (meterPollingRef.current) clearTimeout(meterPollingRef.current);
     };
-  }, [engineState, pollMetering]);
+  }, [engineState, pollMetering, getEngine, reportCaptureLost]);
 
   const getExactDurationMs = useCallback(
     () => telemetry.current.durationMs,
@@ -195,7 +281,8 @@ export function useAudioRecording() {
       initialDurationMs: number = 0,
       initialWaveform?: number[],
       displayName?: string,
-      inputDeviceId: number = -1
+      inputDeviceId: number = -1,
+      resumePoint?: ResumePoint
     ): Promise<void> => {
       if (engineStateRef.current === 'RECORDING') return;
 
@@ -205,6 +292,8 @@ export function useAudioRecording() {
       telemetry.current.accumulatedMs = initialDurationMs;
       telemetry.current.startTime = Date.now();
       isCapturingRef.current = true;
+      captureLostRef.current = false;
+      watchdogRef.current = { lastProgressAt: Date.now(), lastDuration: -1 };
       smoothedDbRef.current = -60;
       telemetry.current.meteringDb = -60;
 
@@ -223,7 +312,8 @@ export function useAudioRecording() {
           await engine.prepare(
             currentConfig,
             displayName ?? `Take ${new Date().toISOString()}`,
-            inputDeviceId
+            inputDeviceId,
+            resumePoint
           );
 
           const rawUri = engine.rawUri;

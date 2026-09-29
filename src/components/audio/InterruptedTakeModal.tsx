@@ -48,9 +48,11 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
 
   if (!session) return null;
 
+  // M9: `byteOffsetEstimate` was the recorded *duration* under a misleading
+  // name; the journal now calls it what it is.
   const durationMs =
-    session.byteOffsetEstimate > 0
-      ? session.byteOffsetEstimate
+    session.durationMs > 0
+      ? session.durationMs
       : Math.max(1000, session.lastHeartbeatTimestamp - session.startedAt);
 
   const presetBadge =

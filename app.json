@@ -3,11 +3,10 @@
     "name": "AudioRecorder",
     "slug": "audio-recorder",
     "version": "1.0.0",
-    "orientation": "default",
-    "newArchEnabled": true,
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
     "android": {
       "package": "com.audiorecorder.app",
-      "supportsTablet": true,
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.FOREGROUND_SERVICE",
@@ -15,12 +14,13 @@
         "android.permission.WAKE_LOCK",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.POST_NOTIFICATIONS",
-        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_CONNECT"
       ]
     },
     "plugins": [
       "./plugins/withNotifeeForegroundService",
       "./plugins/withBluetoothMaxSdk",
+      "./plugins/withAndroidLargeScreenOptOut",
       [
         "expo-audio",
         {
@@ -39,7 +39,8 @@
           }
         }
       ],
-      "./plugins/withAndroidAudioForegroundService"
+      "expo-asset",
+      "expo-sharing"
     ]
   }
 }

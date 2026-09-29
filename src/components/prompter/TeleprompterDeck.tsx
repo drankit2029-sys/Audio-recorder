@@ -452,15 +452,21 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   return (
     <View style={styles.deckContainer}>
       <View style={styles.topControlStrip}>
-        <TouchableOpacity style={styles.solidPillBtn} onPress={() => setEditModalVisible(true)} activeOpacity={0.7}>
+        <TouchableOpacity
+          style={styles.solidPillBtn}
+          onPress={() => setEditModalVisible(true)}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+        >
           <FileText size={12} color="#FFFFFF" strokeWidth={2.2} />
-          <Text style={styles.solidPillBtnText}>Script</Text>
+          <Text style={styles.solidPillBtnText} maxFontSizeMultiplier={1.3}>Script</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.solidPillBtn, isAutoScrolling && styles.solidPillBtnActive]}
           onPress={handleToggleAutoScroll}
           activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
         >
           {isAutoScrolling ? (
             <Pause size={12} color="#FFFFFF" strokeWidth={2.2} />
@@ -472,15 +478,21 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
           </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.solidPillBtn} onPress={handleReset} activeOpacity={0.7}>
+        <TouchableOpacity
+          style={styles.solidPillBtn}
+          onPress={handleReset}
+          activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+        >
           <RotateCcw size={12} color="#FFFFFF" strokeWidth={2.2} />
-          <Text style={styles.solidPillBtnText}>Reset</Text>
+          <Text style={styles.solidPillBtnText} maxFontSizeMultiplier={1.3}>Reset</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.solidPillBtn, isMirrored && styles.solidPillBtnActive]}
           onPress={handleToggleMirror}
           activeOpacity={0.7}
+          hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
         >
           <FlipHorizontal size={12} color={isMirrored ? '#FFFFFF' : '#FFFFFF'} strokeWidth={2.2} />
           <Text style={[styles.solidPillBtnText, isMirrored && styles.solidPillBtnTextActive]}>
@@ -549,7 +561,7 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 
           <GestureDetector gesture={fontScrubGesture}>
             <Animated.View style={[styles.stepperValTouch, fontPillAnimStyle]}>
-              <Text style={styles.stepperVal}>{safeFontSize} px</Text>
+              <Text style={styles.stepperVal} maxFontSizeMultiplier={1.3}>{safeFontSize} px</Text>
             </Animated.View>
           </GestureDetector>
 
@@ -576,7 +588,7 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 
           <GestureDetector gesture={speedScrubGesture}>
             <Animated.View style={[styles.stepperValTouch, speedPillAnimStyle]}>
-              <Text style={styles.stepperVal}>{speed}</Text>
+              <Text style={styles.stepperVal} maxFontSizeMultiplier={1.3}>{speed}</Text>
             </Animated.View>
           </GestureDetector>
 
@@ -783,7 +795,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   loadingPlaceholder: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#060608',
   },
   bottomControlStrip: {

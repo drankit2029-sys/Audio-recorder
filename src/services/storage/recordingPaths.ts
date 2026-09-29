@@ -4,6 +4,14 @@ export const TAKES_FOLDER_NAME = 'AudioRecorder';
 
 /** Kept in sync with maxLength on the rename inputs. */
 export const MAX_TAKE_NAME_LENGTH = 80;
+/**
+ * M6: Android file names are limited to 255 BYTES, not characters. An 80
+ * character name made of emoji (4 bytes each) or Devanagari (3 bytes each)
+ * overflows that and the capture fails with ENAMETOOLONG after the take has
+ * already been recorded. The budget leaves room for the " (12)" collision
+ * suffix and the extension.
+ */
+export const MAX_TAKE_NAME_BYTES = 200;
 
 let cachedFolderUri: string | null = null;
 
@@ -105,6 +113,49 @@ export async function reserveNativeTakePath(
   return toNativePath(await reserveTakeFilePath(name, extension));
 }
 
+/**
+ * UTF-8 length in bytes. TextEncoder is not guaranteed to exist on Hermes, so
+ * this is counted directly (and counts a surrogate pair as one 4-byte scalar).
+ */
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4; // high surrogate: consumes the low surrogate too
+      i += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+/** Cuts a string down to a byte budget without splitting a surrogate pair. */
+function truncateToBytes(value: string, maxBytes: number): string {
+  if (utf8ByteLength(value) <= maxBytes) return value;
+
+  let out = '';
+  let bytes = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    let width = 3;
+    if (code < 0x80) width = 1;
+    else if (code < 0x800) width = 2;
+    else if (code >= 0xd800 && code <= 0xdbff) width = 4;
+
+    if (bytes + width > maxBytes) break;
+    bytes += width;
+    out += width === 4 ? value.substr(i, 2) : value[i];
+    if (width === 4) i += 1;
+  }
+  return out;
+}
+
 /** Strips characters that are illegal or hostile in Android/SAF file names. */
 export function sanitizeFileName(name: string): string {
   const safe = String(name ?? '')
@@ -116,9 +167,13 @@ export function sanitizeFileName(name: string): string {
     .trim();
 
   if (safe.length === 0) return 'Take';
-  return safe.length > MAX_TAKE_NAME_LENGTH
-    ? safe.slice(0, MAX_TAKE_NAME_LENGTH).trim()
-    : safe;
+
+  const clipped =
+    safe.length > MAX_TAKE_NAME_LENGTH
+      ? safe.slice(0, MAX_TAKE_NAME_LENGTH).trim()
+      : safe;
+
+  return truncateToBytes(clipped, MAX_TAKE_NAME_BYTES).trim() || 'Take';
 }
 
 export function normalizeExtension(extension: string): string {

@@ -12,35 +12,38 @@ interface StudioTimerProps {
   }>;
   engineState: EngineState;
   isTablet?: boolean;
+  /** Short screens / split-screen: shrink the type so the transport still fits. */
+  compact?: boolean;
 }
 
+/**
+ * The timer is a *display*, not the clock.
+ *
+ * The duration is owned by useAudioRecording, which ticks on a timer instead of
+ * requestAnimationFrame: rAF is paused whenever the app is backgrounded or the
+ * UI is occluded, which used to freeze the on-screen readout AND the
+ * notification timecode during a background take.
+ */
+const REDRAW_INTERVAL_MS = 50;
 
 export const StudioTimer: React.FC<StudioTimerProps> = ({
   telemetry,
   engineState,
   isTablet = false,
+  compact = false,
 }) => {
   const [displayMs, setDisplayMs] = useState(telemetry.current.durationMs || 0);
 
   useEffect(() => {
-    let frameId: number;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
 
-    const tick = () => {
-      if (telemetry.current.isPaused || engineState === 'PAUSED') {
-        return;
-      }
-
-      if (engineState === 'RECORDING') {
-        const currentSegment = Date.now() - telemetry.current.startTime;
-        const total = telemetry.current.accumulatedMs + Math.max(0, currentSegment);
-        telemetry.current.durationMs = total;
-        setDisplayMs(total);
-        frameId = requestAnimationFrame(tick);
-      }
-    };
+    const sync = () => setDisplayMs(telemetry.current.durationMs);
 
     if (engineState === 'RECORDING' && !telemetry.current.isPaused) {
-      frameId = requestAnimationFrame(tick);
+      sync();
+      // 20 fps is plenty for a hundredths readout and costs a fifth of the
+      // renders the old per-frame loop did. (M3)
+      intervalId = setInterval(sync, REDRAW_INTERVAL_MS);
     } else if (engineState === 'PAUSED') {
       setDisplayMs(telemetry.current.durationMs);
     } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
@@ -48,10 +51,9 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
     }
 
     return () => {
-      if (frameId) cancelAnimationFrame(frameId);
+      if (intervalId) clearInterval(intervalId);
     };
   }, [engineState, telemetry]);
-
 
 
   const totalSeconds = Math.floor(displayMs / 1000);
@@ -69,11 +71,23 @@ export const StudioTimer: React.FC<StudioTimerProps> = ({
   return (
     <View style={styles.container}>
       <Text
-        style={[styles.timerMain, isTablet ? styles.timerMainTablet : null]}
+        style={[
+          styles.timerMain,
+          isTablet ? styles.timerMainTablet : null,
+          compact ? styles.timerMainCompact : null,
+        ]}
         adjustsFontSizeToFit
         numberOfLines={1}
+        maxFontSizeMultiplier={1.2}
       >{mainTime}</Text>
-      <Text style={[styles.timerFrames, isTablet ? styles.timerFramesTablet : null]}>{frameTime}</Text>
+      <Text
+        style={[
+          styles.timerFrames,
+          isTablet ? styles.timerFramesTablet : null,
+          compact ? styles.timerFramesCompact : null,
+        ]}
+        maxFontSizeMultiplier={1.2}
+      >{frameTime}</Text>
     </View>
   );
 };
@@ -97,6 +111,10 @@ const styles = StyleSheet.create({
   timerMainTablet: {
     fontSize: 64,
   },
+  timerMainCompact: {
+    fontSize: 34,
+    letterSpacing: -0.5,
+  },
   timerFrames: {
     fontSize: 17,
     fontWeight: '300',
@@ -106,5 +124,8 @@ const styles = StyleSheet.create({
   },
   timerFramesTablet: {
     fontSize: 24,
+  },
+  timerFramesCompact: {
+    fontSize: 14,
   },
 });

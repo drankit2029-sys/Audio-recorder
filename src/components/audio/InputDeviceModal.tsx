@@ -28,6 +28,8 @@ interface InputDeviceModalProps {
   selectedDeviceId: number | null;
   onSelectDevice: (deviceId: number) => void;
   engineState: EngineState;
+  /** H4: what Android is actually capturing from right now. */
+  activeDevice?: AudioInputDevice | null;
 }
 
 export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
@@ -37,6 +39,7 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
   selectedDeviceId,
   onSelectDevice,
   engineState,
+  activeDevice = null,
 }) => {
   const { isTablet } = useResponsive();
   const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
@@ -91,8 +94,20 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
 
             <Text style={styles.sectionTitle}>AUDIO INPUT CAPSULES</Text>
 
+            {devices.length === 0 ? (
+              <View style={styles.lockNotice}>
+                <Text style={styles.lockNoticeTitle}>NO CAPSULES REPORTED</Text>
+                <Text style={styles.lockNoticeText}>
+                  Android reported no audio input devices. On a custom build this
+                  usually means the native module is not linked; otherwise, plug in
+                  a microphone and pull this sheet down to refresh.
+                </Text>
+              </View>
+            ) : null}
+
             {devices.map((device) => {
               const isSelected = selectedDeviceId === device.id;
+              const isActive = activeDevice?.id === device.id;
               const { label, Icon } = getTypeMeta(device.type);
 
               return (
@@ -116,6 +131,8 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
                           <Text style={styles.typeBadgeText}>{label}</Text>
                         </View>
                         <Text style={styles.idBadge}>PORT #{device.id}</Text>
+                        {isActive ? <Text style={styles.liveBadge}>LIVE</Text> : null}
+                        {device.isSink ? <Text style={styles.sinkBadge}>OUTPUT ONLY</Text> : null}
                       </View>
                     </View>
 
@@ -125,13 +142,22 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
                   </View>
 
                   <View style={styles.specsRow}>
+                    {/* M12: most devices report no rates at all. Presenting the
+                        guesses as facts made the compatibility check reject
+                        perfectly good presets, so they are labelled as guesses. */}
                     <Text style={styles.specItem}>
                       Rates:{' '}
                       {device.sampleRates.length > 0
                         ? device.sampleRates.map((r) => `${r / 1000}k`).join(', ')
-                        : 'System Native'}
+                        : 'Not reported by the device'}
                     </Text>
                   </View>
+                  {device.isSink ? (
+                    <Text style={styles.specHint}>
+                      Playback-only endpoint. Recording will fall back to the phone
+                      microphone unless it exposes a capture profile.
+                    </Text>
+                  ) : null}
                 </TouchableOpacity>
               );
             })}
@@ -200,6 +226,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: '#2A2A32',
+  },
+  liveBadge: {
+    color: '#34D399',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(52, 211, 153, 0.12)',
+    overflow: 'hidden',
+  },
+  sinkBadge: {
+    color: '#FBBF24',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(251, 191, 36, 0.12)',
+    overflow: 'hidden',
+  },
+  specHint: {
+    color: '#71717A',
+    fontSize: 10,
+    lineHeight: 14,
+    marginTop: 6,
   },
   content: {
     padding: 16,

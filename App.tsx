@@ -23,6 +23,7 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import * as FileSystem from 'expo-file-system/legacy';
+import { StatusBar } from 'expo-status-bar';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
   Sliders,
@@ -36,6 +37,8 @@ import {
 } from 'lucide-react-native';
 
 import { SessionJournal, ActiveSessionRecord } from './src/services/storage/sessionJournal';
+import { AUDIO_PRESETS } from './src/services/audio/types';
+import { ResumePoint, stripToFileUri } from './src/services/audio/recordingEngine';
 import { RecordingLibrary, SavedRecording } from './src/services/storage/recordingLibrary';
 import { useAudioRecording, generateResumedWaveform } from './src/services/audio/useAudioRecording';
 import { StudioTimer } from './src/components/studio/StudioTimer';
@@ -51,7 +54,12 @@ import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices'
 import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 import { useResponsive } from './src/hooks/useResponsive';
 import { LibraryScreen } from './src/screens/LibraryScreen';
-import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
+import { setAudioModeAsync } from 'expo-audio';
+import { WavRecorder } from './modules/audio-hardware-router/src';
+import {
+  ensureCapturePermissions,
+  describeMissingPermissions,
+} from './src/services/audio/permissions';
 import { ensureTakesFolder, renameTakeFile } from './src/services/storage/recordingPaths';
 import {
   AppToast,
@@ -71,7 +79,17 @@ interface PendingTake {
   warning?: string;
 }
 
-const MIN_PROMPTER_HEIGHT = 150;
+/**
+ * M1: the prompter used to be sized by `flex` plus a hard 150pt floor, which
+ * pushed the transport off the bottom of any screen shorter than roughly
+ * 500dp — small phones, split-screen, and landscape windows on tablets that
+ * Android 16 refuses to keep in portrait. The prompter now gets exactly the
+ * space that is left over and is the first thing to go when there is none.
+ */
+const MIN_PROMPTER_HEIGHT = 120;
+/** Header + spacing + cockpit + transport clearance. */
+const STUDIO_CHROME_REGULAR = 356;
+const STUDIO_CHROME_COMPACT = 322;
 
 function AudioRecorderApp() {
   const [, setIsReady] = useState(false);
@@ -93,15 +111,28 @@ function AudioRecorderApp() {
   const [interruptedModalVisible, setInterruptedModalVisible] = useState(false);
   const [resumedDurationMs, setResumedDurationMs] = useState(0);
 
-  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTransportBusyRef = useRef(false);
   const isAppForegroundRef = useRef(true);
 
-  const { isTablet, maxContentWidth, insets } = useResponsive();
+  const {
+    isTablet,
+    maxContentWidth,
+    insets,
+    contentHeight,
+    isCompactHeight,
+  } = useResponsive();
 
   const toastTop = getToastTop(insets.top);
   const transportBottom = insets.bottom + 24;
   const transportClearance = insets.bottom + 112;
+
+  const prompterHeight = Math.max(
+    0,
+    contentHeight - (isCompactHeight ? STUDIO_CHROME_COMPACT : STUDIO_CHROME_REGULAR)
+  );
+  const prompterVisible = showPrompter && prompterHeight >= MIN_PROMPTER_HEIGHT;
+  const waveformHeight = isCompactHeight ? 42 : isTablet ? 72 : 54;
 
   const showToast = (
     title: string,
@@ -126,8 +157,16 @@ function AudioRecorderApp() {
     return () => sub.remove();
   }, []);
 
+  /**
+   * C3 / watchdog: the capture pipeline can die without warning (mic unplugged,
+   * a phone call stealing the input, disk full). Finalise the take instead of
+   * sitting on a frozen "RECORDING" and losing everything.
+   */
+  const captureLostHandlerRef = useRef<(reason: string) => void>(() => {});
+
   const {
     devices,
+    activeDevice,
     selectedDeviceId,
     selectedDevice,
     selectDevice,
@@ -148,7 +187,11 @@ function AudioRecorderApp() {
     resumeRecording,
     stopRecording,
     resetEngine,
-  } = useAudioRecording();
+  } = useAudioRecording({
+    // Routed through a ref: the real handler needs handleStopPress, which is
+    // defined below. The hook reads the latest options on every render.
+    onCaptureLost: (reason) => captureLostHandlerRef.current(reason),
+  });
 
   const isSessionActive = engineState === 'RECORDING' || engineState === 'PAUSED';
 
@@ -322,6 +365,13 @@ function AudioRecorderApp() {
   const handleStopPressRef = useRef(handleStopPress);
   handleStopPressRef.current = handleStopPress;
 
+  captureLostHandlerRef.current = (reason: string) => {
+    showToast('Capture Stopped', reason, { variant: 'warning', detail: reason });
+    if (engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PAUSED') {
+      void handleStopPressRef.current(true);
+    }
+  };
+
   const handleFinalizeTake = (chosenName: string) => {
     if (!pendingTake) return;
     const take = pendingTake;
@@ -377,13 +427,21 @@ function AudioRecorderApp() {
   const handleResumeInterruptedTake = async () => {
     if (!orphanedSession) return;
 
+    // M9: `byteOffsetEstimate` actually held a duration. The field is now
+    // called `durationMs`, and the journal carries the real byte count that
+    // the recovery path needs to rebuild the RIFF header.
     const durationMs =
-      orphanedSession.byteOffsetEstimate > 0
-        ? orphanedSession.byteOffsetEstimate
+      orphanedSession.durationMs > 0
+        ? orphanedSession.durationMs
         : Math.max(1000, orphanedSession.lastHeartbeatTimestamp - orphanedSession.startedAt);
 
     const oldFileUri = orphanedSession.fileUri;
     const targetPresetKey = orphanedSession.formatPreset;
+    const targetPreset = AUDIO_PRESETS[targetPresetKey] ?? activePreset;
+    const frameSize =
+      targetPreset.sampleRate > 0
+        ? targetPreset.channels * (targetPreset.bitDepth === 32 ? 4 : 2)
+        : 2;
 
     const restoredWaveform =
       orphanedSession.waveformSnapshot && orphanedSession.waveformSnapshot.length > 0
@@ -403,18 +461,64 @@ function AudioRecorderApp() {
 
     try {
       isTransportBusyRef.current = true;
+
+      const gate = await ensureCapturePermissions({
+        blockOnNotifications: activePreset.engine === 'mediarecorder',
+      });
+      if (!gate.granted) {
+        Alert.alert('Permission needed', describeMissingPermissions(gate.missing, gate.canAskAgain));
+        return;
+      }
+
       activateHardwareRoutingRef.current();
       await activateKeepAwakeAsync();
 
-      await ForegroundServiceManager.startService(activePreset.badge);
-      const note = await startRecording(
+      // Only the WAV engine keeps its own foreground service; expo-audio
+      // starts one itself, and two services meant two notifications. (H2)
+      if (activePreset.engine === 'audiorecord') {
+        await ForegroundServiceManager.startService(activePreset.badge);
+      }
+
+      // Continue the recovered take instead of throwing its audio away.
+      // Only safe when the preset the engine will actually run matches the one
+      // the orphan was recorded with: `setPresetKey` above only takes effect on
+      // the next render, so appending with a different sample rate or bit depth
+      // would splice incompatible PCM onto the end of the old file.
+      let resumePoint: ResumePoint | undefined;
+      const presetMatchesOrphan = !targetPresetKey || targetPresetKey === activePreset.key;
+      if (activePreset.engine === 'audiorecord' && presetMatchesOrphan && oldFileUri) {
+        const path = stripToFileUri(oldFileUri);
+        if (path) {
+          const repaired = await WavRecorder.repair(
+            path,
+            orphanedSession.dataBytes > 0
+              ? orphanedSession.dataBytes
+              : // No byte count in the journal (older build): derive it from the
+                // duration the journal did record.
+                Math.max(
+                  0,
+                  Math.floor((durationMs / 1000) * targetPreset.sampleRate) * frameSize
+                ),
+            frameSize
+          );
+          if (repaired.ok && repaired.dataBytes > 0) {
+            resumePoint = { dataBytes: repaired.dataBytes, durationMs };
+          }
+        }
+      }
+
+      await startRecording(
         durationMs,
         restoredWaveform,
         `Take Resumed`,
-        selectedDeviceId ?? -1
+        selectedDeviceId ?? -1,
+        resumePoint
       );
 
-      if (oldFileUri) {
+      // The old file only disappears once it has really been continued. If the
+      // append could not be honoured, the engine started a fresh take, so the
+      // orphan is deleted to avoid leaving a stray silent file behind.
+      if (oldFileUri && !resumePoint) {
         try {
           await FileSystem.deleteAsync(oldFileUri, { idempotent: true });
         } catch {}
@@ -427,8 +531,10 @@ function AudioRecorderApp() {
         .padStart(2, '0')}`;
 
       showToast('Take Resumed', `Continuing from ${timeFormatted}`, {
-        variant: note ? 'warning' : 'success',
-        detail: note,
+        variant: resumePoint ? 'success' : 'warning',
+        detail: resumePoint
+          ? undefined
+          : 'The recovered audio could not be appended, so this take starts a new file (the clock still resumes at the recorded time).',
       });
     } catch (e: any) {
       await deactivateKeepAwake();
@@ -468,18 +574,11 @@ function AudioRecorderApp() {
       try {
         await ForegroundServiceManager.initialize();
 
-        const { granted } = await requestRecordingPermissionsAsync();
-        if (!granted) {
-          console.warn('[bootstrap] Microphone permission was denied.');
-        }
-
-        if (Platform.Version >= 31) {
-          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
-        }
-        if (Platform.Version >= 33) {
-          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-        }
-
+        // M10: nothing is requested here any more. The old bootstrap fired the
+        // microphone, notification and Bluetooth dialogs back to back on the
+        // very first launch, before the user had asked for anything, and a
+        // denial was never explained or re-requested. Permissions are now
+        // requested by ensureCapturePermissions() the moment they are needed.
         await setAudioModeAsync({
           playsInSilentMode: true,
           interruptionMode: 'doNotMix',
@@ -532,24 +631,38 @@ function AudioRecorderApp() {
         resumeRecording();
       } else {
         isTransportBusyRef.current = true;
+
+        // M10: ask right before the first capture, and explain a denial.
+        const gate = await ensureCapturePermissions({
+          blockOnNotifications: activePreset.engine === 'mediarecorder',
+        });
+        if (!gate.granted) {
+          Alert.alert(
+            'Permission needed',
+            describeMissingPermissions(gate.missing, gate.canAskAgain)
+          );
+          return;
+        }
+
         setResumedDurationMs(0);
         activateHardwareRoutingRef.current();
         activateKeepAwakeAsync();
 
-        await ForegroundServiceManager.startService(activePreset.badge);
+        // H2: expo-audio starts its own foreground service as soon as a
+        // MediaRecorder recorder is prepared (allowsBackgroundRecording: true),
+        // so running Notifee's service as well produced two permanent
+        // notifications. Each engine now owns exactly one.
+        if (activePreset.engine === 'audiorecord') {
+          await ForegroundServiceManager.startService(activePreset.badge);
+        }
         const stamp = new Date().toLocaleTimeString([], {
           hour: '2-digit',
           minute: '2-digit',
           second: '2-digit',
         });
-        const note = await startRecording(0, undefined, `Take ${stamp}`, selectedDeviceId ?? -1);
-
-        if (note) {
-          showToast('Capture Notice', 'Recording with substituted parameters', {
-            variant: 'warning',
-            detail: note,
-          });
-        }
+        // The engine only logs prepare-time substitutions (the format selector
+        // already blocks those presets), so there is no note to surface here.
+        await startRecording(0, undefined, `Take ${stamp}`, selectedDeviceId ?? -1);
       }
     } catch (e: any) {
       deactivateKeepAwake();
@@ -580,6 +693,9 @@ function AudioRecorderApp() {
 
   const handleOpenDeviceModal = () => {
     if (isSessionActive) return;
+    // Bluetooth is only needed to name a BT capsule, so it is asked for here
+    // rather than at launch.
+    void ensureCapturePermissions({ needsBluetooth: true });
     refreshDevices();
     setDeviceModalVisible(true);
   };
@@ -625,6 +741,10 @@ function AudioRecorderApp() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
+      {/* H5: target SDK 36 forces edge-to-edge, so the bar is drawn over the
+          app. Only the icon tint is set here; the colour comes from styles.xml. */}
+      <StatusBar style="light" />
+
       <View style={styles.screensContainer}>
         {currentScreen === 'library' ? (
           <Animated.View
@@ -667,12 +787,14 @@ function AudioRecorderApp() {
                 </TouchableOpacity>
               </View>
 
-              <View style={[styles.studioBody, !showPrompter && styles.studioBodyNoPrompter]}>
-                {showPrompter ? (
+              <View
+                style={[styles.studioBody, !prompterVisible && styles.studioBodyNoPrompter]}
+              >
+                {prompterVisible ? (
                   <Animated.View
                     entering={FadeIn.duration(220)}
                     exiting={FadeOut.duration(160)}
-                    style={[styles.prompterFlex, { minHeight: MIN_PROMPTER_HEIGHT }]}
+                    style={[styles.prompterFlex, { height: prompterHeight }]}
                   >
                     <TeleprompterDeck
                       engineState={engineState}
@@ -684,12 +806,21 @@ function AudioRecorderApp() {
 
                 <View style={styles.cockpitRow}>
                   <View style={styles.cockpitLeft}>
-                    <AudioMeter telemetry={telemetry} engineState={engineState} />
+                    <AudioMeter
+                      telemetry={telemetry}
+                      engineState={engineState}
+                      height={isCompactHeight ? 112 : 140}
+                    />
                   </View>
 
                   <View style={styles.cockpitCenter}>
-                    <LiveWaveform telemetry={telemetry} engineState={engineState} height={54} />
-                    <StudioTimer telemetry={telemetry} engineState={engineState} isTablet={isTablet} />
+                    <LiveWaveform telemetry={telemetry} engineState={engineState} height={waveformHeight} />
+                    <StudioTimer
+                      telemetry={telemetry}
+                      engineState={engineState}
+                      isTablet={isTablet}
+                      compact={isCompactHeight}
+                    />
 
                     <View style={styles.optionsHorizontalRow}>
                       <TouchableOpacity
@@ -697,12 +828,17 @@ function AudioRecorderApp() {
                         onPress={handleOpenDeviceModal}
                         disabled={isSessionActive}
                         activeOpacity={0.6}
+                        hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
                       >
                         <DeviceIcon
                           size={11}
                           color={selectedDevice && selectedDevice.type !== 'builtin_mic' ? '#E4E4E7' : '#8E8E93'}
                         />
-                        <Text style={styles.cleanOptionText} numberOfLines={1}>{micLabel}</Text>
+                        <Text
+                          style={styles.cleanOptionText}
+                          numberOfLines={1}
+                          maxFontSizeMultiplier={1.3}
+                        >{micLabel}</Text>
                       </TouchableOpacity>
 
                       <TouchableOpacity
@@ -710,19 +846,34 @@ function AudioRecorderApp() {
                         onPress={() => setSettingsVisible(true)}
                         disabled={isSessionActive}
                         activeOpacity={0.6}
+                        hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
                       >
                         <Radio size={11} color="#A1A1AA" />
-                        <Text style={styles.cleanOptionText} numberOfLines={1}>{formatLabel}</Text>
+                        <Text
+                          style={styles.cleanOptionText}
+                          numberOfLines={1}
+                          maxFontSizeMultiplier={1.3}
+                        >{formatLabel}</Text>
                       </TouchableOpacity>
 
                       <TouchableOpacity
-                        style={[styles.cleanOptionBtn, showPrompter ? styles.cleanOptionBtnActive : null]}
+                        style={[
+                          styles.cleanOptionBtn,
+                          prompterVisible ? styles.cleanOptionBtnActive : null,
+                        ]}
                         onPress={togglePrompter}
                         activeOpacity={0.6}
+                        hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
                       >
-                        <AlignLeft size={11} color={showPrompter ? '#FFFFFF' : '#8E8E93'} />
-                        <Text style={[styles.cleanOptionText, showPrompter ? styles.cleanOptionTextActive : null]}>
-                          {showPrompter ? 'Hide' : 'Script'}
+                        <AlignLeft size={11} color={prompterVisible ? '#FFFFFF' : '#8E8E93'} />
+                        <Text
+                          style={[
+                            styles.cleanOptionText,
+                            prompterVisible ? styles.cleanOptionTextActive : null,
+                          ]}
+                          maxFontSizeMultiplier={1.3}
+                        >
+                          {prompterVisible ? 'Hide' : 'Script'}
                         </Text>
                       </TouchableOpacity>
                     </View>
@@ -750,7 +901,9 @@ function AudioRecorderApp() {
               pointerEvents={isSessionActive ? 'auto' : 'none'}
             >
               <Pressable
-                onPress={handleStopPress}
+                // Wrapped on purpose: passing the handler directly fed the
+                // press event in as the `autoSave` flag, which is always truthy.
+                onPress={() => handleStopPress()}
                 disabled={!isSessionActive}
                 style={({ pressed }) => [styles.stopOuterBtn, pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] }]}
                 hitSlop={10}
@@ -783,7 +936,9 @@ function AudioRecorderApp() {
       <ActiveRecordingWarningModal
         visible={warningModalVisible}
         onClose={() => setWarningModalVisible(false)}
-        onStopAndExit={handleStopPress}
+        onStopAndExit={() => {
+          void handleStopPress();
+        }}
       />
 
       <InterruptedTakeModal
@@ -814,6 +969,7 @@ function AudioRecorderApp() {
         selectedDeviceId={selectedDeviceId}
         onSelectDevice={handleSelectDevice}
         engineState={engineState}
+        activeDevice={activeDevice}
       />
 
       <AudioSettingsModal

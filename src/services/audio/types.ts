@@ -125,7 +125,18 @@ export function checkDeviceCompatibility(
   }
 
   // ---- Hardware channel capabilities -------------------------------------
-  if (device.channelCounts && device.channelCounts.length > 0) {
+  // M12: AudioDeviceInfo.getSampleRates()/getChannelCounts() return an empty
+  // array on the overwhelming majority of devices, which means "unknown", not
+  // "nothing but these". The native side now flags that explicitly; anything
+  // that does report is still checked, but silence is no longer treated as a
+  // verdict. (The real capability is probed with AudioRecord.getMinBufferSize()
+  // at prepare time, which is the only reliable test.)
+  const channelCountsKnown =
+    device.channelCountsKnown !== false && (device.channelCounts?.length ?? 0) > 0;
+  const sampleRatesKnown =
+    device.sampleRatesKnown !== false && (device.sampleRates?.length ?? 0) > 0;
+
+  if (channelCountsKnown) {
     if (!device.channelCounts.includes(preset.channels)) {
       const sup = device.channelCounts.map(channelLabel).join(', ');
       reasons.push(
@@ -135,7 +146,7 @@ export function checkDeviceCompatibility(
   }
 
   // ---- Hardware sample-rate clocking -------------------------------------
-  if (device.sampleRates && device.sampleRates.length > 0) {
+  if (sampleRatesKnown) {
     if (!device.sampleRates.includes(preset.sampleRate)) {
       if (preset.sampleRate > AMBITERIOUS_RATE_LIMIT && !isUsb) {
         reasons.push(

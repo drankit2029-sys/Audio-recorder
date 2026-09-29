@@ -17,6 +17,7 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 
 import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.Promise;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
@@ -25,8 +26,10 @@ import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
@@ -96,7 +99,10 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
 
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    reactContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED);
+                    // RECEIVER_NOT_EXPORTED: this receiver is internal, so it must
+                    // not be reachable by other apps. RECEIVER_EXPORTED only exists
+                    // to support the legacy behaviour on older platforms.
+                    reactContext.registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
                 } else {
                     reactContext.registerReceiver(bluetoothReceiver, filter);
                 }
@@ -206,7 +212,11 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
 
         WritableArray rates = Arguments.createArray();
         int[] sampleRates = info.getSampleRates();
-        if (sampleRates != null && sampleRates.length > 0) {
+        // M12: most devices report an empty list, which does NOT mean "only these
+        // rates work". The guesses below are only used for display, so the list is
+        // flagged as unknown and the compatibility check probes for real instead.
+        boolean sampleRatesKnown = sampleRates != null && sampleRates.length > 0;
+        if (sampleRatesKnown) {
             for (int r : sampleRates) {
                 rates.pushInt(r);
             }
@@ -215,25 +225,38 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             rates.pushInt(48000);
         }
         map.putArray("sampleRates", rates);
+        map.putBoolean("sampleRatesKnown", sampleRatesKnown);
 
         WritableArray channels = Arguments.createArray();
         int[] channelCounts = info.getChannelCounts();
-        if (channelCounts != null && channelCounts.length > 0) {
+        boolean channelCountsKnown = channelCounts != null && channelCounts.length > 0;
+        if (channelCountsKnown) {
             for (int c : channelCounts) {
                 channels.pushInt(c);
             }
         } else {
             channels.pushInt(1);
+            channels.pushInt(2);
         }
         map.putArray("channelCounts", channels);
+        map.putBoolean("channelCountsKnown", channelCountsKnown);
+        // True when the device can only play audio (e.g. an A2DP speaker).
+        map.putBoolean("isSink", !info.isSource());
 
         return map;
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    public WritableArray getAvailableInputs() {
+    /**
+     * H3: synchronous @ReactMethod calls are unsupported under the New
+     * Architecture, so every probe is Promise-based now.
+     */
+    @ReactMethod
+    public void getAvailableInputs(Promise promise) {
         WritableArray array = Arguments.createArray();
-        if (audioManager == null) return array;
+        if (audioManager == null) {
+            promise.resolve(array);
+            return;
+        }
 
         List<AudioDeviceInfo> rawList = new ArrayList<>();
         boolean foundBluetoothEndpoint = false;
@@ -284,30 +307,53 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             } catch (Exception ignored) {}
         }
 
-        // 4. Deduplicate by product name so earpods only appear as a single entry
-        Set<String> seenNames = new HashSet<>();
+        // 4. Deduplicate. M7: the old code de-duplicated by *display name*, which
+        // hid a second USB interface or a second Bluetooth mic that happened to
+        // report the same name (very common: "" or "Built-in Microphone").
+        // Devices are now keyed by their unique id, and repeated names are only
+        // disambiguated for the user's benefit.
+        Set<Integer> seenIds = new HashSet<>();
+        Map<String, Integer> nameUse = new HashMap<>();
         for (AudioDeviceInfo d : rawList) {
             try {
+                if (!seenIds.add(d.getId())) {
+                    continue;
+                }
                 WritableMap map = mapDeviceInfo(d);
                 String name = map.getString("name");
-
-                if (seenNames.add(name)) {
-                    array.pushMap(map);
+                if (name != null) {
+                    Integer used = nameUse.get(name);
+                    if (used == null) {
+                        nameUse.put(name, 1);
+                    } else {
+                        nameUse.put(name, used + 1);
+                        map.putString("name", name + " (" + (used + 1) + ")");
+                    }
                 }
+                array.pushMap(map);
             } catch (Exception ignored) {}
         }
 
-        return array;
+        promise.resolve(array);
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    public boolean setPreferredInputDevice(int deviceId) {
-        if (audioManager == null) return false;
+    /**
+     * H3: async. M7: the old Bluetooth branch matched *any* Bluetooth device, so
+     * picking "Earpods" could silently route through a car kit that was also
+     * connected. It now prefers the exact device, then the exact same type, and
+     * gives up otherwise.
+     */
+    @ReactMethod
+    public void setPreferredInputDevice(int deviceId, Promise promise) {
+        if (audioManager == null) {
+            promise.resolve(false);
+            return;
+        }
 
         try {
             AudioDeviceInfo target = null;
-            // Use bitwise mask to retrieve all devices cleanly
-            AudioDeviceInfo[] all = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS | AudioManager.GET_DEVICES_OUTPUTS);
+            AudioDeviceInfo[] all = audioManager.getDevices(
+                    AudioManager.GET_DEVICES_INPUTS | AudioManager.GET_DEVICES_OUTPUTS);
             if (all != null) {
                 for (AudioDeviceInfo d : all) {
                     if (d != null && d.getId() == deviceId) {
@@ -324,17 +370,44 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     List<AudioDeviceInfo> comms = audioManager.getAvailableCommunicationDevices();
-                    if (comms != null) {
+                    if (comms != null && comms.size() > 0) {
+                        // 1) the exact device the user picked
+                        AudioDeviceInfo exact = null;
+                        AudioDeviceInfo sameType = null;
+                        AudioDeviceInfo anyBluetooth = null;
                         for (AudioDeviceInfo comm : comms) {
-                            if (comm != null && (comm.getId() == deviceId || isBluetoothDevice(comm.getType()))) {
-                                return audioManager.setCommunicationDevice(comm);
+                            if (comm == null) {
+                                continue;
+                            }
+                            if (comm.getId() == deviceId) {
+                                exact = comm;
+                                break;
+                            }
+                            if (sameType == null && comm.getType() == target.getType()) {
+                                sameType = comm;
+                            }
+                            if (anyBluetooth == null && isBluetoothDevice(comm.getType())) {
+                                anyBluetooth = comm;
                             }
                         }
+                        AudioDeviceInfo chosen = exact != null ? exact
+                                : (sameType != null ? sameType : anyBluetooth);
+                        if (chosen != null) {
+                            promise.resolve(audioManager.setCommunicationDevice(chosen));
+                            return;
+                        }
+                        Log.w(TAG, "No Bluetooth communication device available for id " + deviceId);
+                        promise.resolve(false);
+                        return;
                     }
                 } else {
+                    // Pre-Android 12: startBluetoothSco() is asynchronous and the
+                    // routing only takes effect once the SCO link is up, so this
+                    // reports success optimistically and the UI warns about it.
                     audioManager.startBluetoothSco();
                     audioManager.setBluetoothScoOn(true);
-                    return true;
+                    promise.resolve(true);
+                    return;
                 }
             } else {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -343,17 +416,21 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
                 audioManager.stopBluetoothSco();
                 audioManager.setBluetoothScoOn(false);
                 audioManager.setMode(AudioManager.MODE_NORMAL);
-                return true;
+                promise.resolve(true);
+                return;
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to set input device: " + deviceId, e);
         }
-        return false;
+        promise.resolve(false);
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    public boolean clearPreferredInputDevice() {
-        if (audioManager == null) return false;
+    @ReactMethod
+    public void clearPreferredInputDevice(Promise promise) {
+        if (audioManager == null) {
+            promise.resolve(false);
+            return;
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager.clearCommunicationDevice();
@@ -361,14 +438,50 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
             audioManager.stopBluetoothSco();
             audioManager.setBluetoothScoOn(false);
             audioManager.setMode(AudioManager.MODE_NORMAL);
-            return true;
-        } catch (Exception ignored) {}
-        return false;
+            promise.resolve(true);
+        } catch (Exception ignored) {
+            promise.resolve(false);
+        }
     }
 
-    @ReactMethod(isBlockingSynchronousMethod = true)
-    public WritableMap getActiveInputDevice() {
-        return null;
+    /**
+     * H4: this used to be `return null`, so the UI never knew what was actually
+     * capturing. On Android 12+ the communication device is authoritative; below
+     * that we can only report the SCO state and fall back to the built-in mic.
+     */
+    @ReactMethod
+    public void getActiveInputDevice(Promise promise) {
+        if (audioManager == null) {
+            promise.resolve(null);
+            return;
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                AudioDeviceInfo comm = audioManager.getCommunicationDevice();
+                if (comm != null) {
+                    WritableMap map = mapDeviceInfo(comm);
+                    map.putBoolean("found", true);
+                    promise.resolve(map);
+                    return;
+                }
+            }
+            WritableMap map = Arguments.createMap();
+            map.putBoolean("found", false);
+            map.putInt("id", -1);
+            if (audioManager.isBluetoothScoOn()) {
+                map.putString("name", "Bluetooth headset");
+                map.putString("type", "bluetooth_sco");
+                map.putInt("typeCode", AudioDeviceInfo.TYPE_BLUETOOTH_SCO);
+            } else {
+                map.putString("name", "Built-in Microphone");
+                map.putString("type", "builtin_mic");
+                map.putInt("typeCode", AudioDeviceInfo.TYPE_BUILTIN_MIC);
+            }
+            promise.resolve(map);
+        } catch (Exception e) {
+            Log.w(TAG, "getActiveInputDevice failed", e);
+            promise.resolve(null);
+        }
     }
 
     @ReactMethod
