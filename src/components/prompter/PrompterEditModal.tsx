@@ -14,47 +14,41 @@ import {
   LayoutRectangle,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Animated, {
-  FadeInDown,
-  FadeOutUp,
-  Easing,
-} from 'react-native-reanimated';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import {
-  X,
-  Check,
-  Pencil,
-  FileUp,
-  AlertCircle,
-} from 'lucide-react-native';
+import { X, Check, Pencil, FileUp } from 'lucide-react-native';
 
 import { useResponsive } from '../../hooks/useResponsive';
+import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
+import {
+  AppToast,
+  AppToastData,
+  ToastVariant,
+  getToastTop,
+} from '../../components/common/AppToast';
 
 interface PrompterEditModalProps {
   visible: boolean;
   initialScript: string;
+  topInset?: number;
   onSave: (newScript: string) => void;
   onClose: () => void;
-}
-
-interface BannerToast {
-  type: 'error' | 'success';
-  message: string;
 }
 
 export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
   visible,
   initialScript,
+  topInset = 0,
   onSave,
   onClose,
 }) => {
   const { isTablet } = useResponsive();
+  const { offset: keyboardOffset, isVisible: keyboardVisible } = useKeyboardViewport();
+
   const [text, setText] = useState(initialScript);
   const [savedBaseline, setSavedBaseline] = useState(initialScript);
   const [isEditing, setIsEditing] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const [toast, setToast] = useState<BannerToast | null>(null);
+  const [toast, setToast] = useState<AppToastData | null>(null);
 
   const textRef = useRef(initialScript);
   const prevVisibleRef = useRef(false);
@@ -62,7 +56,6 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
   const inputRef = useRef<TextInput | null>(null);
   const isSavingRef = useRef(false);
 
-  // Layout rectangles for hit-testing touches outside the input
   const headerRightLayoutRef = useRef<LayoutRectangle | null>(null);
   const cancelBtnLayoutRef = useRef<LayoutRectangle | null>(null);
   const saveBtnLayoutRef = useRef<LayoutRectangle | null>(null);
@@ -74,27 +67,9 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
       setSavedBaseline(initialScript);
       setIsEditing(false);
       setToast(null);
-      setKeyboardHeight(0);
     }
     prevVisibleRef.current = visible;
   }, [visible, initialScript]);
-
-  useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      setKeyboardHeight(e.endCoordinates?.height || 0);
-    });
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      setKeyboardHeight(0);
-    });
-
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -102,12 +77,10 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
     };
   }, []);
 
-  const showToast = (type: 'error' | 'success', message: string) => {
+  const showToast = (message: string, variant: ToastVariant = 'success') => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setToast({ type, message });
-    toastTimerRef.current = setTimeout(() => {
-      setToast(null);
-    }, 3000);
+    setToast({ title: message, variant });
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000);
   };
 
   const handleTextChange = (val: string) => {
@@ -136,7 +109,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
 
     const trimmed = textRef.current.trim();
     if (trimmed.length === 0) {
-      showToast('error', 'Script cannot be blank');
+      showToast('Script cannot be blank', 'error');
       isSavingRef.current = false;
       return;
     }
@@ -148,14 +121,13 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
     setSavedBaseline(trimmed);
     onSave(trimmed);
     setIsEditing(false);
-    showToast('success', 'Changes saved');
+    showToast('Changes saved');
 
     setTimeout(() => {
       isSavingRef.current = false;
     }, 400);
   };
 
-  // Direct hit-test interceptor on the TopBar
   const handleTopBarTouchStart = (e: GestureResponderEvent) => {
     if (!isEditing) return;
 
@@ -165,20 +137,16 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
     const cancelLayout = cancelBtnLayoutRef.current;
 
     if (headerRight && saveLayout) {
-      const saveLeftInTopBar = headerRight.x + saveLayout.x;
-      const saveRightInTopBar = saveLeftInTopBar + saveLayout.width;
-
-      if (locationX >= saveLeftInTopBar - 10 && locationX <= saveRightInTopBar + 10) {
+      const left = headerRight.x + saveLayout.x;
+      if (locationX >= left - 10 && locationX <= left + saveLayout.width + 10) {
         handleSave();
         return;
       }
     }
 
     if (headerRight && cancelLayout) {
-      const cancelLeftInTopBar = headerRight.x + cancelLayout.x;
-      const cancelRightInTopBar = cancelLeftInTopBar + cancelLayout.width;
-
-      if (locationX >= cancelLeftInTopBar - 10 && locationX <= cancelRightInTopBar + 10) {
+      const left = headerRight.x + cancelLayout.x;
+      if (locationX >= left - 10 && locationX <= left + cancelLayout.width + 10) {
         handleCancelEditing();
         return;
       }
@@ -199,7 +167,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
 
       const isTxt = fileName.toLowerCase().endsWith('.txt') || file.mimeType === 'text/plain';
       if (!isTxt) {
-        showToast('error', 'Select a plain .txt file');
+        showToast('Select a plain .txt file', 'error');
         return;
       }
 
@@ -207,7 +175,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
       const cleanContent = content.trim();
 
       if (cleanContent.length === 0) {
-        showToast('error', 'Selected file is empty');
+        showToast('Selected file is empty', 'error');
         return;
       }
 
@@ -216,9 +184,9 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
       setSavedBaseline(cleanContent);
       onSave(cleanContent);
       setIsEditing(false);
-      showToast('success', 'Changes saved');
+      showToast('Changes saved');
     } catch (err: any) {
-      showToast('error', err?.message || 'Failed to read file');
+      showToast(err?.message || 'Failed to read file', 'error');
     }
   };
 
@@ -228,14 +196,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
 
   const cardContent = (
     <View style={[styles.dialogCard, isTablet && styles.dialogCardTablet]}>
-      {/* 
-        Top Header Bar: 
-        Left-Aligned Title, Synchronous Touch-Interception for Save & Cancel 
-      */}
-      <View
-        style={styles.topBar}
-        onTouchStart={handleTopBarTouchStart}
-      >
+      <View style={styles.topBar} onTouchStart={handleTopBarTouchStart}>
         <View style={styles.headerLeft}>
           <Text style={styles.headerTitle} numberOfLines={1}>
             {isEditing ? 'Edit Script' : 'Script'}
@@ -250,7 +211,6 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
         >
           {isEditing ? (
             <>
-              {/* Cancel Button with direct touch detection */}
               <View
                 onLayout={(e) => {
                   cancelBtnLayoutRef.current = e.nativeEvent.layout;
@@ -267,7 +227,6 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
                 </TouchableOpacity>
               </View>
 
-              {/* Save Button with direct touch detection */}
               <View
                 onLayout={(e) => {
                   saveBtnLayoutRef.current = e.nativeEvent.layout;
@@ -320,40 +279,19 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
         </View>
       </View>
 
-      {/* Floating Save Toast Notification: Matching the Take Saved layout */}
-      {toast ? (
-        <View style={styles.toastOverlay} pointerEvents="none">
-          <Animated.View
-            entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))}
-            exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))}
-            style={styles.toastCard}
-          >
-            <View
-              style={[
-                styles.toastIconCircle,
-                toast.type === 'error' && styles.toastIconCircleError,
-              ]}
-            >
-              {toast.type === 'error' ? (
-                <AlertCircle size={14} color="#FFFFFF" strokeWidth={2.5} />
-              ) : (
-                <Check size={14} color="#000000" strokeWidth={3} />
-              )}
-            </View>
-            <Text style={styles.toastSingleText}>{toast.message}</Text>
-          </Animated.View>
-        </View>
-      ) : null}
+      {toast ? <AppToast data={toast} top={getToastTop(topInset)} /> : null}
 
-      {/* Workspace Area */}
       {isEditing ? (
         <ScrollView
           style={styles.scrollArea}
           contentContainerStyle={[
             styles.editorScrollContent,
-            { paddingBottom: keyboardHeight > 0 ? keyboardHeight + 80 : 80 },
+            {
+              paddingBottom: Math.max(keyboardOffset, 0) + 80,
+            },
           ]}
           keyboardShouldPersistTaps="always"
+          keyboardDismissMode="on-drag"
           showsVerticalScrollIndicator={true}
         >
           <TextInput
@@ -366,6 +304,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
             onChangeText={handleTextChange}
             placeholder="Paste or type your script here..."
             placeholderTextColor="#3F3F46"
+            underlineColorAndroid="transparent"
           />
         </ScrollView>
       ) : (
@@ -403,7 +342,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
         <View
           style={[
             styles.backdrop,
-            keyboardHeight > 0 && { justifyContent: 'flex-start', paddingTop: 36 },
+            keyboardVisible && { justifyContent: 'flex-start', paddingTop: 36 },
           ]}
         >
           <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={onClose} />
@@ -445,8 +384,6 @@ const styles = StyleSheet.create({
     borderColor: '#1C1C22',
     overflow: 'hidden',
   },
-
-  /* Fixed 54dp Header with Left-Aligned Title */
   topBar: {
     height: 54,
     flexDirection: 'row',
@@ -477,8 +414,6 @@ const styles = StyleSheet.create({
     gap: 8,
     height: 34,
   },
-
-  /* Matched 34dp Height Controls (Zero Vertical Baseline Offset) */
   closeBtn: {
     width: 34,
     height: 34,
@@ -554,52 +489,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.1,
     includeFontPadding: false,
   },
-
-  /* Floating Toast Notification (Take Saved Style) */
-  toastOverlay: {
-    position: 'absolute',
-    top: 68,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 9999,
-    elevation: 99,
-  },
-  toastCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    borderRadius: 30,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    gap: 10,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  toastIconCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#10B981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toastIconCircleError: {
-    backgroundColor: '#EF4444',
-  },
-  toastSingleText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '600',
-    letterSpacing: 0.1,
-  },
-
-  /* Content & Editor Regions */
   scrollArea: {
     flex: 1,
   },
@@ -631,8 +520,6 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
     fontWeight: '400',
   },
-
-  /* Telemetry Footer */
   telemetryFooter: {
     paddingHorizontal: 16,
     paddingVertical: 9,

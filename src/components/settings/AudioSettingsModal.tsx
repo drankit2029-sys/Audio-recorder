@@ -90,7 +90,19 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
     setEditorVisible(false);
     setEditingTarget(null);
 
-    // Auto-select newly created or updated preset
+    const resolved = customPresetToAudioPreset(config);
+    const compatibility = checkDeviceCompatibility(resolved, selectedDevice);
+
+    if (!compatibility.isSupported) {
+      Alert.alert(
+        'Saved, but not activated',
+        `"${config.name}" was saved but is not compatible with ${
+          selectedDevice?.name || 'the active capsule'
+        }.\n\n${compatibility.reasons.join('\n\n')}\n\nPick a different profile, or connect a capsule that supports it.`
+      );
+      return;
+    }
+
     onSelectPreset(config.id);
   };
 
@@ -118,33 +130,22 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
             <View style={styles.titleCol}>
               <View style={styles.titleRow}>
                 <Text style={styles.presetLabel}>{preset.label}</Text>
-                {!compatibility.isSupported && (
+                {!compatibility.isSupported ? (
                   <View style={styles.unsupportedBadge}>
                     <Text style={styles.unsupportedBadgeText}>UNSUPPORTED</Text>
                   </View>
-                )}
+                ) : null}
               </View>
 
               <View style={styles.badgeRow}>
-                <View
-                  style={[
-                    styles.badge,
-                    customConfig ? styles.customChip : null,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.badgeText,
-                      customConfig ? styles.customChipText : null,
-                    ]}
-                  >
+                <View style={[styles.badge, customConfig ? styles.customChip : null]}>
+                  <Text style={[styles.badgeText, customConfig ? styles.customChipText : null]}>
                     {preset.badge}
                   </Text>
                 </View>
               </View>
             </View>
 
-            {/* Radio Circle or Disabled Lock */}
             <View
               style={[
                 styles.radioOuter,
@@ -162,13 +163,13 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
 
           <Text style={styles.presetDescription}>{preset.description}</Text>
 
-          {/* Explicit Error Box for Incompatible Formats */}
-          {!compatibility.isSupported && (
+          {!compatibility.isSupported ? (
             <View style={styles.hardwareWarningBox}>
-              <AlertTriangle size={13} color="#F59E0B" style={{ marginTop: 1 }} />
+              <AlertTriangle size={13} color="#F59E0B" strokeWidth={2.2} style={{ marginTop: 1 }} />
               <View style={styles.hardwareWarningCol}>
                 <Text style={styles.hardwareWarningTitle}>
-                  FORMAT INCOMPATIBLE WITH {selectedDevice?.name?.toUpperCase() || 'CURRENT CAPSULE'}
+                  FORMAT INCOMPATIBLE WITH{' '}
+                  {(selectedDevice?.name || 'CURRENT CAPSULE').toUpperCase()}
                 </Text>
                 {compatibility.reasons.map((reason, idx) => (
                   <Text key={idx} style={styles.hardwareWarningText}>
@@ -177,19 +178,22 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                 ))}
               </View>
             </View>
-          )}
+          ) : null}
         </TouchableOpacity>
 
-        {/* Custom Edit / Delete Actions */}
-        {customConfig && (
+        {customConfig ? (
           <View style={styles.customFooterRow}>
             <View style={styles.specsRow}>
-              <Text style={styles.specItem}>Format: {preset.extension.toUpperCase()}</Text>
+              <Text style={styles.specItem}>{preset.extension.toUpperCase()}</Text>
               <Text style={styles.specDot}>•</Text>
               <Text style={styles.specItem}>{(preset.sampleRate / 1000).toFixed(1)} kHz</Text>
+              <Text style={styles.specDot}>•</Text>
+              <Text style={styles.specItem}>
+                {preset.engine === 'audiorecord' ? 'PCM' : 'MediaRecorder'}
+              </Text>
             </View>
 
-            {!isLocked && (
+            {!isLocked ? (
               <View style={styles.customActionsGroup}>
                 <TouchableOpacity
                   style={styles.actionIconBtn}
@@ -208,9 +212,9 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
                   <Trash2 size={13} color="#EF4444" />
                 </TouchableOpacity>
               </View>
-            )}
+            ) : null}
           </View>
-        )}
+        ) : null}
       </View>
     );
   };
@@ -220,8 +224,8 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
       <Modal
         visible={visible}
         animationType="fade"
-        transparent={true}
-        statusBarTranslucent={true}
+        transparent
+        statusBarTranslucent
         onRequestClose={onClose}
       >
         <View style={styles.backdrop}>
@@ -229,10 +233,10 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
 
           <View style={[styles.dialogCard, isTablet && styles.dialogCardTablet]}>
             <View style={styles.topBar}>
-              <View>
+              <View style={styles.topBarTextCol}>
                 <Text style={styles.heading}>Format Settings</Text>
-                <Text style={styles.subheading}>
-                  Active Capsule: {selectedDevice?.name || 'Built-in Mic'}
+                <Text style={styles.subheading} numberOfLines={1}>
+                  Active capsule: {selectedDevice?.name || 'Built-in Mic'}
                 </Text>
               </View>
               <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.7}>
@@ -241,40 +245,33 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
             </View>
 
             <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-              {isLocked && (
+              {isLocked ? (
                 <View style={styles.lockNotice}>
                   <Text style={styles.lockNoticeTitle}>FORMAT LOCKED</Text>
                   <Text style={styles.lockNoticeText}>
                     Encoding presets cannot be altered during capture. Stop recording to select profiles.
                   </Text>
                 </View>
-              )}
+              ) : null}
 
-              {/* 1. Factory Profiles */}
               <Text style={styles.sectionTitle}>BUILT-IN FACTORY PROFILES</Text>
               {factoryPresetsList.map((p) => renderPresetCard(p))}
 
-              {/* 2. Custom User Profiles */}
-              {customPresets.length > 0 && (
+              {customPresets.length > 0 ? (
                 <>
                   <Text style={[styles.sectionTitle, { marginTop: 14 }]}>CUSTOM USER PROFILES</Text>
                   {customPresets.map((c) => renderPresetCard(customPresetToAudioPreset(c), c))}
                 </>
-              )}
+              ) : null}
 
-              {/* 3. Add Custom Preset Button */}
-              {!isLocked && (
-                <TouchableOpacity
-                  style={styles.addCustomBtn}
-                  onPress={handleOpenCreate}
-                  activeOpacity={0.75}
-                >
+              {!isLocked ? (
+                <TouchableOpacity style={styles.addCustomBtn} onPress={handleOpenCreate} activeOpacity={0.75}>
                   <View style={styles.addIconCircle}>
-                    <Plus size={14} color="#38BDF8" strokeWidth={2.5} />
+                    <Plus size={14} color="#FFFFFF" strokeWidth={2.5} />
                   </View>
                   <Text style={styles.addCustomBtnText}>CREATE CUSTOM PRESET</Text>
                 </TouchableOpacity>
-              )}
+              ) : null}
             </ScrollView>
           </View>
         </View>
@@ -331,6 +328,10 @@ const styles = StyleSheet.create({
     paddingBottom: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#1E1E24',
+  },
+  topBarTextCol: {
+    flex: 1,
+    marginRight: 10,
   },
   heading: {
     color: '#FFFFFF',
@@ -452,12 +453,12 @@ const styles = StyleSheet.create({
     letterSpacing: 0.4,
   },
   customChip: {
-    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
     borderWidth: 1,
-    borderColor: 'rgba(56, 189, 248, 0.3)',
+    borderColor: 'rgba(255, 255, 255, 0.25)',
   },
   customChipText: {
-    color: '#38BDF8',
+    color: '#FFFFFF',
     fontSize: 10,
     fontWeight: '700',
   },
@@ -562,9 +563,9 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 14,
     borderRadius: 16,
-    backgroundColor: 'rgba(56, 189, 248, 0.07)',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(56, 189, 248, 0.22)',
+    borderColor: 'rgba(255, 255, 255, 0.2)',
     marginTop: 6,
     marginBottom: 8,
   },
@@ -572,12 +573,12 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 11,
-    backgroundColor: 'rgba(56, 189, 248, 0.15)',
+    backgroundColor: 'rgba(255, 255, 255, 0.12)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   addCustomBtnText: {
-    color: '#38BDF8',
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '700',
     letterSpacing: 0.6,

@@ -1,3 +1,4 @@
+// src/components/library/RenameRecordingModal.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Modal,
@@ -24,7 +25,6 @@ import {
 interface RenameRecordingModalProps {
   visible: boolean;
   initialName: string;
-  /** Optional: enables the on-disk filename preview. */
   fileUri?: string;
   onSave: (name: string) => void;
   onClose: () => void;
@@ -67,7 +67,6 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   const trimmed = name.trim();
   const canSave = trimmed.length > 0;
 
-  // Preview of the real file on disk once the rename is applied.
   const previewFileName =
     fileUri && canSave
       ? `${sanitizeFileName(trimmed)}${extractExtension(fileUri)}`
@@ -110,7 +109,6 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
           >
             <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
               <View style={[styles.card, isTablet && styles.cardTablet]}>
-                {/* Header */}
                 <View style={styles.headerRow}>
                   <View style={styles.iconCircle}>
                     <Pencil size={16} color="#FFFFFF" strokeWidth={2} />
@@ -121,7 +119,6 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                   </View>
                 </View>
 
-                {/* Input Section */}
                 <View style={styles.fieldSection}>
                   <View style={styles.labelRow}>
                     <Text style={styles.fieldLabel}>RECORDING NAME</Text>
@@ -130,12 +127,7 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                     </Text>
                   </View>
 
-                  <View
-                    style={[
-                      styles.inputShell,
-                      isFocused && styles.inputShellFocused,
-                    ]}
-                  >
+                  <View style={[styles.inputShell, isFocused && styles.inputShellFocused]}>
                     <TextInput
                       ref={inputRef}
                       style={styles.input}
@@ -152,7 +144,7 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                       underlineColorAndroid="transparent"
                       onSubmitEditing={handleSave}
                     />
-                    {name.length > 0 && (
+                    {name.length > 0 ? (
                       <TouchableOpacity
                         style={styles.clearBtn}
                         onPress={() => setName('')}
@@ -161,7 +153,7 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                       >
                         <X size={13} color="#8E8E93" />
                       </TouchableOpacity>
-                    )}
+                    ) : null}
                   </View>
 
                   {previewFileName ? (
@@ -174,13 +166,8 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                   ) : null}
                 </View>
 
-                {/* Actions */}
                 <View style={styles.actionRow}>
-                  <TouchableOpacity
-                    style={styles.cancelBtn}
-                    onPress={handleCancel}
-                    activeOpacity={0.75}
-                  >
+                  <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel} activeOpacity={0.75}>
                     <Text style={styles.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
 
@@ -307,8 +294,12 @@ const styles = StyleSheet.create({
     height: 48,
   },
   inputShellFocused: {
-    borderColor: '#38BDF8',
-    backgroundColor: '#0A0E14',
+    borderColor: '#FFFFFF',
+    backgroundColor: '#0D0D0F',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    elevation: 6,
   },
   input: {
     flex: 1,
@@ -341,7 +332,7 @@ const styles = StyleSheet.create({
   },
   previewName: {
     flex: 1,
-    color: '#34D399',
+    color: '#E4E4E7',
     fontSize: 10.5,
     fontWeight: '600',
   },

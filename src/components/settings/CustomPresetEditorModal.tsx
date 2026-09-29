@@ -15,9 +15,11 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Check, Disc, HardDrive, Radio, Layers, AlertTriangle } from 'lucide-react-native';
+
 import { CustomPresetConfig, AudioFormatType } from '../../services/audio/types';
 import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
 import { useResponsive } from '../../hooks/useResponsive';
+import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 
 interface CustomPresetEditorModalProps {
   visible: boolean;
@@ -43,8 +45,6 @@ const FORMAT_OPTIONS: { id: AudioFormatType; label: string; tag: string }[] = [
   { id: 'amr_nb', label: 'AMR-NB', tag: '8 kHz voice' },
 ];
 
-
-
 export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = ({
   visible,
   initialPreset,
@@ -55,40 +55,18 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const { height: windowHeight } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const { isTablet } = useResponsive();
+  const { offset: keyboardOffset, isVisible: keyboardVisible } = useKeyboardViewport();
 
   const isEditing = Boolean(initialPreset);
 
   const [name, setName] = useState('');
   const [format, setFormat] = useState<AudioFormatType>('wav');
 
-  // Typable string states for arbitrary input
   const [sampleRateStr, setSampleRateStr] = useState('48000');
   const [channelsStr, setChannelsStr] = useState('1');
   const [bitDepthStr, setBitDepthStr] = useState('16');
   const [bitRateKbpsStr, setBitRateKbpsStr] = useState('256');
   const [description, setDescription] = useState('');
-
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-  
-  useEffect(() => {
-    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
-      const kh = e.endCoordinates?.height || 0;
-      if (kh > 0) {
-        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-        setKeyboardHeight(kh);
-      }
-    });
-
-    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      setKeyboardHeight(0);
-    });
-
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
 
   useEffect(() => {
     if (visible) {
@@ -119,11 +97,17 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
   const parsedBitRateBps = parsedBitRateKbps * 1000;
 
   const isCompressed = format !== 'wav';
-  // Hardware Checks for Active Microphone
+
   const isUsb =
     selectedDevice?.type === 'usb_device' ||
     selectedDevice?.type === 'usb_headset' ||
     selectedDevice?.type === 'usb_accessory';
+
+  const effectiveChannels: 1 | 2 = parsedChannels === 2 ? 2 : 1;
+  const channelsWereClamped = parsedChannels !== effectiveChannels;
+
+  const effectiveBitDepth: 16 | 32 = parsedBitDepth === 32 ? 32 : 16;
+  const bitDepthWasCoerced = parsedBitDepth !== effectiveBitDepth;
 
   const checkRateSupported = (rate: number): boolean => {
     if (format === 'amr_nb') return rate === 8000;
@@ -140,7 +124,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     if (selectedDevice?.channelCounts && selectedDevice.channelCounts.length > 0) {
       return selectedDevice.channelCounts.includes(ch);
     }
-    return ch === 1; // Default phone HAL is mono
+    return ch === 1;
   };
 
   const checkDepthSupported = (depth: number): boolean => {
@@ -149,27 +133,37 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     return true;
   };
 
-  // Live warnings on the currently configured values
+  const deviceName = selectedDevice?.name || 'Selected Mic';
+
   const currentWarnings: string[] = [];
+
   if (!checkRateSupported(parsedRate)) {
     if (parsedRate > 48000 && !isUsb) {
       currentWarnings.push(
-        `• ${(parsedRate / 1000).toFixed(1)} kHz high-res rate requires an external USB Audio Interface. "${selectedDevice?.name || 'Selected Mic'}" DAC clock is locked to 48.0 kHz.`
+        `• ${(parsedRate / 1000).toFixed(1)} kHz high-res capture requires an external USB Audio Interface. "${deviceName}" is clocked to 48.0 kHz.`
       );
     } else {
       currentWarnings.push(
-        `• "${selectedDevice?.name || 'Selected Mic'}" does not report native hardware clocking at ${(parsedRate / 1000).toFixed(1)} kHz. Android will attempt software resampling.`
+        `• "${deviceName}" does not report native hardware clocking at ${(parsedRate / 1000).toFixed(1)} kHz. Android will resample in software.`
       );
     }
   }
 
   if (!checkChannelsSupported(parsedChannels)) {
     currentWarnings.push(
-      `• "${selectedDevice?.name || 'Selected Mic'}" only reports single-channel Mono support. Capturing at ${parsedChannels} channels may fail or duplicate channels.`
+      `• "${deviceName}" only reports single-channel Mono support. Capturing at ${parsedChannels} channels may fail or duplicate channels.`
     );
   }
 
-  if (!checkDepthSupported(parsedBitDepth)) {
+  if (!isCompressed && bitDepthWasCoerced) {
+    currentWarnings.push(
+      parsedBitDepth < 16
+        ? `• The Android WAV pipeline does not write 8-bit PCM. This profile will record as 16-bit.`
+        : `• The Android WAV pipeline does not write 24-bit PCM. This profile will record as 16-bit.`
+    );
+  }
+
+  if (!isCompressed && parsedBitDepth > 16 && !isUsb) {
     currentWarnings.push(
       `• ${parsedBitDepth}-bit PCM requires a class-compliant USB Audio Interface. Built-in Android microphones are limited to 16-bit integer PCM.`
     );
@@ -181,42 +175,47 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     currentWarnings.push('• AMR-WB is strictly constrained to 16.0 kHz Mono voice telephony.');
   }
 
+  if (channelsWereClamped && format === 'wav') {
+    currentWarnings.push(
+      `• The RIFF writer only supports Mono or Stereo. This profile will record as ${effectiveChannels === 2 ? 'Stereo' : 'Mono'}.`
+    );
+  }
+
   const calculateRateEstimate = () => {
     if (!isCompressed) {
-      const bytesPerSample = (parsedBitDepth || 16) / 8;
-      const bytesPerSec = parsedRate * bytesPerSample * parsedChannels;
+      const bytesPerSample = effectiveBitDepth / 8;
+      const bytesPerSec = parsedRate * bytesPerSample * effectiveChannels;
       const mbPerMin = (bytesPerSec * 60) / (1024 * 1024);
       return {
         bandwidthStr: `${((bytesPerSec * 8) / 1000).toFixed(0)} kbps`,
         sizePerMinStr: `~${mbPerMin.toFixed(1)} MB/min`,
       };
-    } else {
-      const mbPerMin = ((parsedBitRateBps / 8) * 60) / (1024 * 1024);
-      return {
-        bandwidthStr: `${parsedBitRateKbps} kbps`,
-        sizePerMinStr: `~${mbPerMin.toFixed(1)} MB/min`,
-      };
     }
+    const mbPerMin = ((parsedBitRateBps / 8) * 60) / (1024 * 1024);
+    return {
+      bandwidthStr: `${parsedBitRateKbps} kbps`,
+      sizePerMinStr: `~${mbPerMin.toFixed(1)} MB/min`,
+    };
   };
 
   const { bandwidthStr, sizePerMinStr } = calculateRateEstimate();
 
   const handleSave = () => {
     const formatName = format.toUpperCase();
-    const chLabel = parsedChannels === 1 ? 'Mono' : parsedChannels === 2 ? 'Stereo' : `${parsedChannels}Ch`;
+    const chLabel = effectiveChannels === 1 ? 'Mono' : 'Stereo';
     const defaultName = `${formatName} ${(parsedRate / 1000).toFixed(1)}k ${chLabel}`;
 
     const config: CustomPresetConfig = {
-  id: initialPreset?.id || `custom_${Date.now()}`,
-  name: name.trim().length > 0 ? name.trim() : defaultName,
-  format,
-  sampleRate: parsedRate,
-  channels: parsedChannels as 1 | 2,
-  bitDepth: !isCompressed ? (parsedBitDepth === 32 ? 32 : 16) : undefined,
-  bitRate: isCompressed ? parsedBitRateBps : undefined,
-  description: description.trim().length > 0 ? description.trim() : undefined,
-  createdAt: initialPreset?.createdAt || Date.now(),
-};
+      id: initialPreset?.id || `custom_${Date.now()}`,
+      name: name.trim().length > 0 ? name.trim() : defaultName,
+      format,
+      sampleRate: parsedRate,
+      channels: effectiveChannels,
+      bitDepth: !isCompressed ? effectiveBitDepth : undefined,
+      bitRate: isCompressed ? parsedBitRateBps : undefined,
+      description: description.trim().length > 0 ? description.trim() : undefined,
+      createdAt: initialPreset?.createdAt || Date.now(),
+    };
 
     Keyboard.dismiss();
     onSave(config);
@@ -226,8 +225,8 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     <Modal
       visible={visible}
       animationType="fade"
-      transparent={true}
-      statusBarTranslucent={true}
+      transparent
+      statusBarTranslucent
       onRequestClose={onClose}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
@@ -238,14 +237,19 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
             style={[
               styles.dialogCard,
               isTablet && styles.dialogCardTablet,
-              keyboardHeight > 0 && { maxHeight: windowHeight - keyboardHeight - insets.top - 20 },
+              keyboardVisible && {
+                maxHeight: windowHeight - keyboardOffset - insets.top - insets.bottom - 32,
+              },
             ]}
           >
-            {/* Header */}
             <View style={styles.topBar}>
-              <View>
-                <Text style={styles.heading}>{isEditing ? 'Edit Profile' : 'New Format Profile'}</Text>
-                <Text style={styles.subheading}>Android Audio Hardware & Encoder Parameters</Text>
+              <View style={styles.topBarTextCol}>
+                <Text style={styles.heading}>
+                  {isEditing ? 'Edit Profile' : 'New Format Profile'}
+                </Text>
+                <Text style={styles.subheading} numberOfLines={1}>
+                  Android audio hardware & encoder parameters
+                </Text>
               </View>
               <TouchableOpacity style={styles.closeBtn} onPress={onClose} activeOpacity={0.7}>
                 <X size={15} color="#FFFFFF" />
@@ -256,8 +260,8 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
               contentContainerStyle={styles.scrollContent}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
             >
-              {/* Profile Name Field */}
               <View style={styles.fieldSection}>
                 <Text style={styles.sectionLabel}>PROFILE NAME</Text>
                 <View style={styles.inputWrapper}>
@@ -268,8 +272,10 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     placeholder="e.g. Master Studio 96k"
                     placeholderTextColor="#52525B"
                     returnKeyType="done"
+                    blurOnSubmit
+                    underlineColorAndroid="transparent"
                   />
-                  {name.length > 0 && (
+                  {name.length > 0 ? (
                     <TouchableOpacity
                       style={styles.clearBtn}
                       onPress={() => setName('')}
@@ -277,11 +283,10 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     >
                       <X size={12} color="#8E8E93" />
                     </TouchableOpacity>
-                  )}
+                  ) : null}
                 </View>
               </View>
 
-              {/* Real-time Hardware Calculation Card */}
               <View style={styles.specCard}>
                 <View style={styles.specCardTop}>
                   <View style={styles.specPill}>
@@ -304,13 +309,12 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                   <View style={styles.specStatItem}>
                     <Layers size={11} color="#71717A" />
                     <Text style={styles.specStatVal}>
-                      {(parsedRate / 1000).toFixed(1)}kHz • {parsedChannels}Ch
+                      {(parsedRate / 1000).toFixed(1)}kHz • {effectiveChannels}Ch
                     </Text>
                   </View>
                 </View>
               </View>
 
-              {/* 1. Encoding Architecture Grid */}
               <View style={styles.fieldSection}>
                 <Text style={styles.sectionLabel}>ENCODING ARCHITECTURE</Text>
                 <View style={styles.formatGrid}>
@@ -319,27 +323,31 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       key={opt.id}
                       style={[styles.formatBtn, format === opt.id && styles.formatBtnActive]}
                       onPress={() => {
-                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                          setFormat(opt.id);
-                          if (opt.id === 'amr_nb') {
-                            setSampleRateStr('8000');
-                            setChannelsStr('1');
-                          } else if (opt.id === 'amr_wb') {
-                            setSampleRateStr('16000');
-                            setChannelsStr('1');
-                          } else if (opt.id === 'wav') {
-                            setBitDepthStr('16');
-                          }
-                        }}
+                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        setFormat(opt.id);
+                        if (opt.id === 'amr_nb') {
+                          setSampleRateStr('8000');
+                          setChannelsStr('1');
+                        } else if (opt.id === 'amr_wb') {
+                          setSampleRateStr('16000');
+                          setChannelsStr('1');
+                        } else if (opt.id === 'wav') {
+                          setBitDepthStr('16');
+                        }
+                      }}
                       activeOpacity={0.7}
                     >
                       <View style={styles.formatHeader}>
                         <Disc size={12} color={format === opt.id ? '#000000' : '#8E8E93'} />
-                        <Text style={[styles.formatBtnText, format === opt.id && styles.formatBtnTextActive]}>
+                        <Text
+                          style={[styles.formatBtnText, format === opt.id && styles.formatBtnTextActive]}
+                        >
                           {opt.label}
                         </Text>
                       </View>
-                      <Text style={[styles.formatTagText, format === opt.id && styles.formatTagTextActive]}>
+                      <Text
+                        style={[styles.formatTagText, format === opt.id && styles.formatTagTextActive]}
+                      >
                         {opt.tag}
                       </Text>
                     </TouchableOpacity>
@@ -347,7 +355,6 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                 </View>
               </View>
 
-              {/* 2. Sample Rate (Arbitrary Typable Field + Comprehensive Pills) */}
               <View style={styles.fieldSection}>
                 <View style={styles.labelWithInputRow}>
                   <Text style={styles.sectionLabel}>SAMPLING RATE (HZ)</Text>
@@ -358,6 +365,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       onChangeText={setSampleRateStr}
                       keyboardType="number-pad"
                       maxLength={7}
+                      underlineColorAndroid="transparent"
                     />
                     <Text style={styles.unitSuffix}>Hz</Text>
                   </View>
@@ -386,7 +394,9 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                             !isSupported && styles.quickPillTextUnsupported,
                           ]}
                         >
-                          {rate >= 1000 ? `${(rate / 1000).toFixed(rate % 1000 === 0 ? 0 : 1)}k` : `${rate}Hz`}
+                          {rate >= 1000
+                            ? `${(rate / 1000).toFixed(rate % 1000 === 0 ? 0 : 1)}k`
+                            : `${rate}Hz`}
                           {!isSupported ? ' •' : ''}
                         </Text>
                       </TouchableOpacity>
@@ -395,7 +405,6 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                 </View>
               </View>
 
-              {/* 3. Audio Channels (Arbitrary Typable Field + Channel Pills) */}
               <View style={styles.fieldSection}>
                 <View style={styles.labelWithInputRow}>
                   <Text style={styles.sectionLabel}>CHANNELS (COUNT)</Text>
@@ -406,6 +415,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       onChangeText={setChannelsStr}
                       keyboardType="number-pad"
                       maxLength={2}
+                      underlineColorAndroid="transparent"
                     />
                     <Text style={styles.unitSuffix}>Ch</Text>
                   </View>
@@ -415,7 +425,8 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                   {[1, 2, 4].map((ch) => {
                     const isSupported = checkChannelsSupported(ch);
                     const isSelected = parsedChannels === ch;
-                    const chLabel = ch === 1 ? '1 Ch (Mono)' : ch === 2 ? '2 Ch (Stereo)' : `${ch} Ch (Multi)`;
+                    const chLabel =
+                      ch === 1 ? '1 Ch (Mono)' : ch === 2 ? '2 Ch (Stereo)' : `${ch} Ch (Multi)`;
 
                     return (
                       <TouchableOpacity
@@ -445,7 +456,6 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                 </View>
               </View>
 
-              {/* 4. Bit Depth (PCM/FLAC) or Bitrate (AAC/OPUS/AMR) */}
               {!isCompressed ? (
                 <View style={styles.fieldSection}>
                   <View style={styles.labelWithInputRow}>
@@ -457,6 +467,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                         onChangeText={setBitDepthStr}
                         keyboardType="number-pad"
                         maxLength={2}
+                        underlineColorAndroid="transparent"
                       />
                       <Text style={styles.unitSuffix}>bit</Text>
                     </View>
@@ -486,7 +497,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                               !isSupported && styles.quickPillTextUnsupported,
                             ]}
                           >
-                            {depth}-bit {depth === 32 ? 'Float' : 'Linear'}
+                            {depth}-bit
                             {!isSupported ? ' •' : ''}
                           </Text>
                         </TouchableOpacity>
@@ -505,6 +516,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                         onChangeText={setBitRateKbpsStr}
                         keyboardType="number-pad"
                         maxLength={4}
+                        underlineColorAndroid="transparent"
                       />
                       <Text style={styles.unitSuffix}>kbps</Text>
                     </View>
@@ -530,8 +542,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                 </View>
               )}
 
-              {/* Dynamic Non-Blocking Hardware Warnings */}
-              {currentWarnings.length > 0 && (
+              {currentWarnings.length > 0 ? (
                 <View style={styles.hardwareAdvisoryBox}>
                   <View style={styles.warningHeader}>
                     <AlertTriangle size={13} color="#F59E0B" />
@@ -543,12 +554,12 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     </Text>
                   ))}
                   <Text style={styles.warningFooterNote}>
-                    You can still save this preset, but it will be disabled in the format selector whenever an incompatible microphone is active.
+                    You can still save this preset. It will be disabled in the format selector whenever an
+                    incompatible microphone is active.
                   </Text>
                 </View>
-              )}
+              ) : null}
 
-              {/* Engineering Notes */}
               <View style={styles.fieldSection}>
                 <Text style={styles.sectionLabel}>ENGINEERING NOTES (OPTIONAL)</Text>
                 <View style={styles.notesWrapper}>
@@ -559,19 +570,21 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     placeholder="e.g. Master uncompressed capture for external DAW post-production."
                     placeholderTextColor="#52525B"
                     multiline
+                    underlineColorAndroid="transparent"
                   />
                 </View>
               </View>
             </ScrollView>
 
-            {/* Bottom Actions */}
             <View style={styles.bottomBar}>
               <TouchableOpacity style={styles.cancelBtn} onPress={onClose} activeOpacity={0.7}>
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.saveBtn} onPress={handleSave} activeOpacity={0.8}>
                 <Check size={14} color="#000000" strokeWidth={3} />
-                <Text style={styles.saveBtnText}>{isEditing ? 'Save Changes' : 'Create Preset'}</Text>
+                <Text style={styles.saveBtnText}>
+                  {isEditing ? 'Save Changes' : 'Create Preset'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -618,6 +631,10 @@ const styles = StyleSheet.create({
     paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#1E1E24',
+  },
+  topBarTextCol: {
+    flex: 1,
+    marginRight: 10,
   },
   heading: {
     color: '#FFFFFF',
@@ -669,7 +686,7 @@ const styles = StyleSheet.create({
     height: 28,
   },
   inlineNumericInput: {
-    color: '#38BDF8',
+    color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '700',
     padding: 0,
@@ -721,7 +738,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   specPill: {
-    backgroundColor: '#38BDF8',
+    backgroundColor: '#FFFFFF',
     paddingHorizontal: 7,
     paddingVertical: 2,
     borderRadius: 6,
@@ -771,7 +788,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: 'rgba(255, 255, 255, 0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
     gap: 2,
   },
   formatBtnActive: {
@@ -810,7 +827,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     backgroundColor: 'rgba(255, 255, 255, 0.04)',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
+    borderColor: 'rgba(255, 255, 255, 0.08)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -818,8 +835,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   quickPillActive: {
-    backgroundColor: '#38BDF8',
-    borderColor: '#38BDF8',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: 0.3,
+    shadowRadius: 9,
+    elevation: 6,
   },
   quickPillUnsupported: {
     backgroundColor: 'rgba(255, 255, 255, 0.015)',

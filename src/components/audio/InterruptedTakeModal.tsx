@@ -1,4 +1,3 @@
-// src/components/audio/InterruptedTakeModal.tsx
 import React from 'react';
 import {
   Modal,
@@ -6,10 +5,12 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
+  TouchableWithoutFeedback,
 } from 'react-native';
-import { Play, Trash2, Clock, HardDrive, AlertTriangle } from 'lucide-react-native';
+import { AlertTriangle, Trash2, Play } from 'lucide-react-native';
+
 import { ActiveSessionRecord } from '../../services/storage/sessionJournal';
-import { AUDIO_PRESETS } from '../../services/audio/types';
+import { AudioSettingsStorage } from '../../services/storage/audioSettingsStorage';
 import { useResponsive } from '../../hooks/useResponsive';
 
 interface InterruptedTakeModalProps {
@@ -19,6 +20,22 @@ interface InterruptedTakeModalProps {
   onDiscard: () => void;
   onResume: () => void;
 }
+
+const formatDuration = (ms: number) => {
+  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return hrs > 0
+    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
+const formatSize = (bytes: number) => {
+  if (bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+};
 
 export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
   visible,
@@ -34,29 +51,10 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
   const durationMs =
     session.byteOffsetEstimate > 0
       ? session.byteOffsetEstimate
-      : Math.max(0, session.lastHeartbeatTimestamp - session.startedAt);
+      : Math.max(1000, session.lastHeartbeatTimestamp - session.startedAt);
 
-  const formatDuration = (ms: number) => {
-    const totalSeconds = Math.floor(ms / 1000);
-    const mins = Math.floor(totalSeconds / 60);
-    const secs = totalSeconds % 60;
-    const centis = Math.floor((ms % 1000) / 10);
-    return `${mins.toString().padStart(2, '0')}:${secs
-      .toString()
-      .padStart(2, '0')}.${centis.toString().padStart(2, '0')}`;
-  };
-
-  const formatSize = (bytes: number) => {
-    if (bytes <= 0) return '0 KB';
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  };
-
-  const presetBadge = AUDIO_PRESETS[session.formatPreset]?.badge ?? 'WAV Master';
-  const startedTime = new Date(session.startedAt).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const presetBadge =
+    AudioSettingsStorage.getResolvedPreset(session.formatPreset)?.badge ?? 'WAV Master';
 
   return (
     <Modal
@@ -66,66 +64,60 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
       statusBarTranslucent
       onRequestClose={onDiscard}
     >
-      <View style={styles.backdrop}>
-        <View style={[styles.card, isTablet && styles.cardTablet]}>
-          <View style={styles.iconCircle}>
-            <AlertTriangle size={24} color="#F59E0B" strokeWidth={2.2} />
-          </View>
-
-          <Text style={styles.title}>Interrupted Take Detected</Text>
-          <Text style={styles.description}>
-            The app closed during active audio capture. You can resume this recording from where it was left off or permanently discard it.
-          </Text>
-
-          <View style={styles.metaBox}>
-            <View style={styles.metaRow}>
-              <View style={styles.metaItem}>
-                <Clock size={12} color="#71717A" />
-                <Text style={styles.metaLabel}>Started at {startedTime}</Text>
+      <TouchableWithoutFeedback onPress={onDiscard}>
+        <View style={styles.backdrop}>
+          <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
+            <View style={[styles.card, isTablet && styles.cardTablet]}>
+              <View style={styles.iconCircle}>
+                <AlertTriangle size={20} color="#F59E0B" strokeWidth={2.4} />
               </View>
-              <View style={styles.formatBadge}>
-                <Text style={styles.formatBadgeText}>{presetBadge}</Text>
-              </View>
-            </View>
 
-            <View style={styles.divider} />
+              <Text style={styles.title}>Interrupted Take Detected</Text>
+              <Text style={styles.description}>
+                The app closed during active audio capture. Continue the session from
+                where it stopped, or discard the partial recording permanently.
+              </Text>
 
-            <View style={styles.statsRow}>
-              <View style={styles.statCol}>
-                <Text style={styles.statLabel}>DURATION</Text>
-                <Text style={styles.statValue}>{formatDuration(durationMs)}</Text>
-              </View>
-              <View style={styles.statCol}>
-                <Text style={styles.statLabel}>SIZE ON DISK</Text>
-                <View style={styles.sizeRow}>
-                  <HardDrive size={11} color="#A1A1AA" />
-                  <Text style={styles.statValue}>{formatSize(sizeBytes)}</Text>
+              <View style={styles.metaBox}>
+                <View style={styles.metaRow}>
+                  <Text style={styles.metaLabel}>RECOVERED TIME</Text>
+                  <Text style={styles.metaVal}>{formatDuration(durationMs)}</Text>
+                </View>
+                <View style={styles.metaDivider} />
+                <View style={styles.metaRow}>
+                  <Text style={styles.metaLabel}>CAPTURED FILE</Text>
+                  <Text style={styles.metaVal}>{formatSize(sizeBytes)}</Text>
+                </View>
+                <View style={styles.metaDivider} />
+                <View style={styles.metaRow}>
+                  <Text style={styles.metaLabel}>FORMAT</Text>
+                  <Text style={styles.metaVal}>{presetBadge}</Text>
                 </View>
               </View>
+
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.discardBtn}
+                  onPress={onDiscard}
+                  activeOpacity={0.75}
+                >
+                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                  <Text style={styles.discardBtnText}>Discard</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.resumeBtn}
+                  onPress={onResume}
+                  activeOpacity={0.8}
+                >
+                  <Play size={13} color="#000000" fill="#000000" />
+                  <Text style={styles.resumeBtnText}>CONTINUE TAKE</Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-
-          <View style={styles.actionsRow}>
-            <TouchableOpacity
-              style={styles.discardBtn}
-              onPress={onDiscard}
-              activeOpacity={0.7}
-            >
-              <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
-              <Text style={styles.discardBtnText}>DISCARD</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.resumeBtn}
-              onPress={onResume}
-              activeOpacity={0.8}
-            >
-              <Play size={13} color="#000000" fill="#000000" />
-              <Text style={styles.resumeBtnText}>RESUME TAKE</Text>
-            </TouchableOpacity>
-          </View>
+          </TouchableWithoutFeedback>
         </View>
-      </View>
+      </TouchableWithoutFeedback>
     </Modal>
   );
 };
@@ -140,31 +132,27 @@ const styles = StyleSheet.create({
   },
   card: {
     width: '100%',
-    maxWidth: 390,
-    backgroundColor: '#131316',
+    maxWidth: 380,
+    backgroundColor: '#121215',
     borderRadius: 24,
     borderWidth: 1,
     borderColor: '#24242A',
-    paddingHorizontal: 22,
-    paddingTop: 24,
-    paddingBottom: 20,
+    padding: 22,
     alignItems: 'center',
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.6,
     shadowRadius: 20,
-    elevation: 16,
+    elevation: 18,
   },
   cardTablet: {
     maxWidth: 440,
-    paddingHorizontal: 28,
-    paddingTop: 28,
-    paddingBottom: 24,
+    padding: 26,
   },
   iconCircle: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(245, 158, 11, 0.12)',
     borderWidth: 1,
     borderColor: 'rgba(245, 158, 11, 0.28)',
@@ -174,124 +162,89 @@ const styles = StyleSheet.create({
   },
   title: {
     color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
-    letterSpacing: -0.3,
-    marginBottom: 6,
+    letterSpacing: -0.2,
     textAlign: 'center',
   },
   description: {
     color: '#8E8E93',
-    fontSize: 13,
+    fontSize: 12.5,
     lineHeight: 18,
     textAlign: 'center',
-    marginBottom: 18,
-    paddingHorizontal: 4,
+    marginTop: 6,
+    marginBottom: 16,
   },
   metaBox: {
     width: '100%',
     backgroundColor: '#09090C',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: '#1F1F24',
-    padding: 12,
-    marginBottom: 20,
+    borderColor: '#1C1C22',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginBottom: 18,
   },
   metaRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  metaItem: {
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    paddingVertical: 4,
   },
   metaLabel: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontWeight: '500',
-  },
-  formatBadge: {
-    backgroundColor: '#1E1E24',
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  formatBadgeText: {
-    color: '#E4E4E7',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.3,
-  },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: '#1C1C22',
-    marginVertical: 10,
-  },
-  statsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  statCol: {
-    gap: 3,
-  },
-  statLabel: {
     color: '#71717A',
-    fontSize: 9,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-  },
-  statValue: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  sizeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  actionsRow: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  discardBtn: {
-    flex: 1,
-    height: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    borderRadius: 22,
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.25)',
-  },
-  discardBtnText: {
-    color: '#EF4444',
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
   },
-  resumeBtn: {
-    flex: 1.3,
-    height: 44,
+  metaVal: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  metaDivider: {
+    height: 1,
+    backgroundColor: '#15151A',
+    marginVertical: 2,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+  },
+  discardBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.24)',
+  },
+  discardBtnText: {
+    color: '#EF4444',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  resumeBtn: {
+    flex: 1.25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 44,
     borderRadius: 22,
     backgroundColor: '#FFFFFF',
   },
   resumeBtnText: {
     color: '#000000',
     fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.5,
+    fontWeight: '800',
+    letterSpacing: 0.4,
   },
 });

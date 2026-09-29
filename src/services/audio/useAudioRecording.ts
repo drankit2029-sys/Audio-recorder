@@ -5,18 +5,19 @@ import { AudioSettingsStorage } from '../storage/audioSettingsStorage';
 import { onWavMetering } from '../../../modules/audio-hardware-router/src';
 import { PresetKey, AudioPresetConfig, EngineKind } from './types';
 import { ForegroundServiceManager } from './ForegroundServiceManager';
-import {
-  UnifiedRecorder,
-  createUnifiedRecorder,
-  stripToFileUri,
-} from './recordingEngine';
+import { UnifiedRecorder, createUnifiedRecorder } from './recordingEngine';
 
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'STOPPED' | 'ERROR';
 export const BAR_COUNT = 156;
+
 export interface RecordingStopOutcome {
   uri: string | null;
   durationMs: number;
   sizeBytes: number;
+  /**
+   * Set only for issues the format selector cannot prevent: container
+   * truncation, failed relocation, or a throw while stopping.
+   */
   degradationNote?: string;
   engine: EngineKind;
 }
@@ -118,21 +119,18 @@ export function useAudioRecording() {
     return engineRef.current;
   }, [mediaRecorder]);
 
-  const changePreset = useCallback(
-    (key: string) => {
-      if (
-        engineStateRef.current === 'RECORDING' ||
-        engineStateRef.current === 'PAUSED'
-      ) {
-        throw new Error('Cannot change format preset while capture is in progress.');
-      }
-      engineRef.current?.release();
-      engineRef.current = null;
-      setPresetKeyState(key);
-      AudioSettingsStorage.setPreset(key);
-    },
-    []
-  );
+  const changePreset = useCallback((key: string) => {
+    if (
+      engineStateRef.current === 'RECORDING' ||
+      engineStateRef.current === 'PAUSED'
+    ) {
+      throw new Error('Cannot change format preset while capture is in progress.');
+    }
+    engineRef.current?.release();
+    engineRef.current = null;
+    setPresetKeyState(key);
+    AudioSettingsStorage.setPreset(key);
+  }, []);
 
   const pollMetering = useCallback(() => {
     if (!isCapturingRef.current) return;
@@ -198,7 +196,7 @@ export function useAudioRecording() {
       initialWaveform?: number[],
       displayName?: string,
       inputDeviceId: number = -1
-    ) => {
+    ): Promise<void> => {
       if (engineStateRef.current === 'RECORDING') return;
 
       engineStateRef.current = 'RECORDING';
@@ -231,6 +229,8 @@ export function useAudioRecording() {
           const rawUri = engine.rawUri;
           fileUriRef.current = rawUri;
 
+          // Store the URI, not a stripped path: the recovery path feeds this
+          // back into FileSystem.getInfoAsync / deleteAsync, which need a URI.
           SessionJournal.startSession({
             sessionId,
             fileUri: rawUri ?? '',
@@ -239,7 +239,6 @@ export function useAudioRecording() {
             channels: currentConfig.channels as 1 | 2,
             startedAt: Date.now() - initialDurationMs,
           });
-
 
           await engine.start();
         } catch (error) {
@@ -304,67 +303,66 @@ export function useAudioRecording() {
     );
   }, [getEngine]);
 
-  
   const stopRecording = useCallback(async (): Promise<RecordingStopOutcome> => {
-  const preset = activePresetRef.current;
-  const fallbackDuration = telemetry.current.durationMs;
+    const preset = activePresetRef.current;
+    const fallbackDuration = telemetry.current.durationMs;
 
-  if (
-    engineStateRef.current !== 'RECORDING' &&
-    engineStateRef.current !== 'PAUSED'
-  ) {
+    if (
+      engineStateRef.current !== 'RECORDING' &&
+      engineStateRef.current !== 'PAUSED'
+    ) {
+      return {
+        uri: fileUriRef.current,
+        durationMs: fallbackDuration,
+        sizeBytes: 0,
+        engine: preset.engine,
+      };
+    }
+
+    engineStateRef.current = 'STOPPED';
+    isCapturingRef.current = false;
+    telemetry.current.isPaused = true;
+    setEngineState('STOPPED');
+
+    let finalUri: string | null = fileUriRef.current;
+    let durationMs = fallbackDuration;
+    let sizeBytes = 0;
+    let degradationNote: string | undefined;
+
+    try {
+      const engine = getEngine();
+      const stamp = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      const result = await engine.stop(`Take ${stamp}`, preset.extension);
+
+      finalUri = result.uri ?? finalUri;
+      if (result.durationMs > 0) durationMs = result.durationMs;
+      sizeBytes = result.sizeBytes;
+      degradationNote = result.degradationNote;
+    } catch (error: any) {
+      // The take is still recoverable from fileUriRef.current. Report, don't throw.
+      console.warn('[useAudioRecording] engine.stop caught exception:', error);
+      degradationNote = error?.message
+        ? `Capture ended with an error: ${error.message}`
+        : 'Capture ended with an unknown error. The take was recovered from the partial file.';
+    }
+
+    fileUriRef.current = finalUri;
+    SessionJournal.setStatus('FINALIZED');
+    SessionJournal.clearSession();
+
     return {
-      uri: fileUriRef.current,
-      durationMs: fallbackDuration,
-      sizeBytes: 0,
+      uri: finalUri,
+      durationMs,
+      sizeBytes,
+      degradationNote,
       engine: preset.engine,
     };
-  }
-
-  engineStateRef.current = 'STOPPED';
-  isCapturingRef.current = false;
-  telemetry.current.isPaused = true;
-  setEngineState('STOPPED');
-
-  let finalUri: string | null = fileUriRef.current;
-  let durationMs = fallbackDuration;
-  let sizeBytes = 0;
-  let degradationNote: string | undefined;
-
-  try {
-    const engine = getEngine();
-    const stamp = new Date().toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-
-    const result = await engine.stop(`Take ${stamp}`, preset.extension);
-
-    finalUri = result.uri ?? finalUri;
-    if (result.durationMs > 0) durationMs = result.durationMs;
-    sizeBytes = result.sizeBytes;
-    degradationNote = result.degradationNote;
-  } catch (error: any) {
-    console.warn('[useAudioRecording] engine.stop caught exception:', error);
-    degradationNote = error?.message
-      ? `Capture ended with an error: ${error.message}`
-      : 'Capture ended with an unknown error.';
-  }
-
-  fileUriRef.current = finalUri;
-  SessionJournal.setStatus('FINALIZED');
-  SessionJournal.clearSession();
-
-  return {
-    uri: finalUri,
-    durationMs,
-    sizeBytes,
-    degradationNote,
-    engine: preset.engine,
-  };
-}, [getEngine]);
-
+  }, [getEngine]);
 
   const resetEngine = useCallback(async () => {
     if (

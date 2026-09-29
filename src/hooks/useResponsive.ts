@@ -1,4 +1,3 @@
-// src/hooks/useResponsive.ts
 import { useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -13,9 +12,6 @@ export function useResponsive() {
 
   // Max width constraint to prevent unreadable stretching on large tablets
   const maxContentWidth = isTablet ? 840 : 480;
-  
-  // Adaptive heights for teleprompter viewing window
-  const prompterHeight = isTablet ? 240 : height < 700 ? 110 : 140;
 
   return {
     width,
@@ -24,6 +20,5 @@ export function useResponsive() {
     isTablet,
     isLandscape,
     maxContentWidth,
-    prompterHeight,
   };
 }

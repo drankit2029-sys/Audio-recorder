@@ -7,12 +7,21 @@ import {
   ensureTakesFolder,
 } from '../storage/recordingPaths';
 
-
 export interface UnifiedStopResult {
   uri: string | null;
   durationMs: number;
   sizeBytes: number;
-  /** True when the engine silently substituted different parameters. */
+  /**
+   * Raised ONLY for conditions the format selector structurally cannot catch:
+   *   - the WAV container hit its unsigned 32-bit size ceiling
+   *   - the finished file could not be placed in the takes folder
+   *   - the engine threw while stopping (recovered from the pre-stop URI)
+   *
+   * Parameter substitutions detected in prepare() (sample rate, bit depth,
+   * channel count) are deliberately NOT surfaced: checkDeviceCompatibility()
+   * blocks those presets before they can be selected, so reporting them again
+   * could only ever produce a false alarm. They are logged instead.
+   */
   degraded: boolean;
   degradationNote?: string;
 }
@@ -103,6 +112,9 @@ class MediaRecorderEngine implements UnifiedRecorder {
       return { uri: null, durationMs, sizeBytes: 0, degraded: false };
     }
 
+    // A finished take must never be lost because relocation failed: on error we
+    // still hand the original file back and report it, since a take sitting in
+    // the cache instead of AudioRecorder/ is exactly what the user must know.
     const result = await moveIntoTakesFolder(raw, displayName, extension);
 
     return {
@@ -112,7 +124,7 @@ class MediaRecorderEngine implements UnifiedRecorder {
       degraded: !result.relocated,
       degradationNote: result.relocated
         ? undefined
-        : 'The take could not be moved into the AudioRecorder folder; it is still readable from the app cache.',
+        : `The take could not be moved into the AudioRecorder folder. It is still saved and playable, but stored in the app cache instead.`,
     };
   }
 
@@ -150,7 +162,8 @@ class MediaRecorderEngine implements UnifiedRecorder {
 class AudioRecordEngine implements UnifiedRecorder {
   readonly kind: EngineKind = 'audiorecord';
 
-  private degradationNote: string | undefined;
+  /** prepare()-time substitutions. Logged for diagnosis, never shown to the user. */
+  private prepareNotes: string[] = [];
   private active = false;
 
   get rawUri(): string | null {
@@ -159,7 +172,7 @@ class AudioRecordEngine implements UnifiedRecorder {
     return path ? `file://${path}` : null;
   }
 
-    async prepare(
+  async prepare(
     preset: AudioPresetConfig,
     displayName: string,
     inputDeviceId: number
@@ -167,7 +180,7 @@ class AudioRecordEngine implements UnifiedRecorder {
     WavRecorder.release();
 
     // Write straight into the dedicated folder - no cache round-trip.
-    // toNativePath() strips file:// so java.io.File gets an absolute path.
+    // reserveNativeTakePath() strips file:// so java.io.File gets an absolute path.
     await ensureTakesFolder();
     const filePath = await reserveNativeTakePath(displayName, preset.extension);
 
@@ -181,19 +194,37 @@ class AudioRecordEngine implements UnifiedRecorder {
 
     const notes: string[] = [];
 
+    // Units must match: WavPrepareResult.bitDepth is BITS per sample (16 | 32),
+    // the same unit as preset.bitDepth. Multiplying either side by 8 would
+    // make every comparison mismatch (16 vs 128) and fire a false warning.
+    const requestedBitDepth = preset.bitDepth === 32 ? 32 : 16;
+
     if (result.sampleRate !== preset.sampleRate) {
       notes.push(`Hardware delivered ${result.sampleRate} Hz instead of ${preset.sampleRate} Hz.`);
     }
-    if (result.bitDepth !== (preset.bitDepth === 32 ? 32 : 16) * 8) {
-      notes.push(`Hardware delivered ${result.bitDepth}-bit instead of ${preset.bitDepth}-bit.`);
+    if (result.bitDepth !== requestedBitDepth) {
+      notes.push(
+        `Hardware delivered ${result.bitDepth}-bit instead of ${requestedBitDepth}-bit.`
+      );
     }
     if (result.numberOfChannels !== preset.channels) {
-      notes.push(`Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`);
+      notes.push(
+        `Hardware delivered ${result.numberOfChannels} channel(s) instead of ${preset.channels}.`
+      );
     }
 
-    this.degradationNote = notes.length > 0 ? notes.join(' ') : undefined;
-  }
+    this.prepareNotes = notes;
 
+    if (notes.length > 0) {
+      // Reaching here means the preset slipped past checkDeviceCompatibility().
+      // The user cannot act on this mid-take, and the format selector already
+      // shows the same information in the right place, so log only.
+      console.warn(
+        '[recordingEngine] Preset not honoured by this capsule, yet the format selector allowed it (compatibility gap):',
+        notes.join(' ')
+      );
+    }
+  }
 
   async start(): Promise<void> {
     await WavRecorder.start();
@@ -211,11 +242,16 @@ class AudioRecordEngine implements UnifiedRecorder {
   async stop(_displayName: string, _extension: string): Promise<UnifiedStopResult> {
     const result: WavStopResult = await WavRecorder.stop();
     this.active = false;
+    this.prepareNotes = [];
 
     const uri = result.filePath ? `file://${result.filePath}` : null;
+
+    // Only the container ceiling is user-actionable here. A take that silently
+    // stops short at the RIFF 32-bit limit is precisely the failure a label
+    // cannot convey, so it must be reported.
     const note = result.truncated
-      ? 'Recording stopped early: the WAV container 32-bit size field was reached.'
-      : this.degradationNote;
+      ? 'Recording stopped early: the WAV container reached its 32-bit size limit (about 6 hours at 48 kHz / 16-bit). The take is truncated but valid.'
+      : undefined;
 
     return {
       uri,

@@ -61,7 +61,10 @@ export const LiveWaveform: React.FC<LiveWaveformProps> = ({
     let lastPushTime = Date.now();
 
     const tick = () => {
-      if (telemetry.current.isPaused) return;
+      if (telemetry.current.isPaused) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
 
       const now = Date.now();
       const rawDb = telemetry.current.meteringDb;

@@ -1,4 +1,3 @@
-// src/components/prompter/TeleprompterDeck.tsx
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
@@ -54,8 +53,9 @@ import { EngineState } from '../../services/audio/useAudioRecording';
 
 export interface TeleprompterDeckProps {
   engineState: EngineState;
-  customHeight?: number;
-  initialDurationMs?: number; // Target time offset when resuming an interrupted take
+  /** Status-bar inset, forwarded so the in-modal toast clears the notch. */
+  topInset?: number;
+  initialDurationMs?: number;
 }
 
 const FALLBACK_SCRIPT = `Welcome to the studio. This is your synchronized teleprompter.
@@ -70,10 +70,11 @@ const MAX_FONT_SIZE = 34;
 const ALL_FONT_SIZES = Array.from({ length: MAX_FONT_SIZE }, (_, i) => i + 1);
 const ALL_SPEEDS = Array.from({ length: 201 }, (_, i) => i);
 const ITEM_ROW_HEIGHT = 44;
+const FALLBACK_VIEWPORT = 160;
 
 export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   engineState,
-  customHeight,
+  topInset = 0,
   initialDurationMs = 0,
 }) => {
   const [script, setScript] = useState(() => {
@@ -92,16 +93,14 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   const [keyboardEditType, setKeyboardEditType] = useState<'font' | 'speed' | null>(null);
   const [keyboardInputVal, setKeyboardInputVal] = useState('');
 
-  const initialHeight = Math.max(120, customHeight ?? 150);
-  const [containerHeight, setContainerHeight] = useState(initialHeight);
-  const [canvasLayout, setCanvasLayout] = useState({ width: 360, height: initialHeight });
+  const [canvasLayout, setCanvasLayout] = useState({
+    width: 360,
+    height: FALLBACK_VIEWPORT,
+  });
 
   const hasRestoredPrompterRef = useRef(false);
-  
-  const activeViewportHeight = Math.max(
-    120,
-    customHeight && customHeight > 0 ? customHeight : containerHeight
-  );
+
+  const activeViewportHeight = Math.max(72, canvasLayout.height);
 
   const safeFontSize = Math.min(
     MAX_FONT_SIZE,
@@ -122,12 +121,23 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
     }
   }, [safeFontSize]);
 
-  const chunkHeight = Math.max(
-    Math.round(safeFontSize * 1.6),
-    Math.floor(activeViewportHeight / 3)
+  const linesTarget = useMemo(() => {
+    const h = activeViewportHeight;
+    if (h < 190) return 3;
+    if (h < 300) return 4;
+    if (h < 420) return 5;
+    return 6;
+  }, [activeViewportHeight]);
+
+  const chunkHeight = useMemo(
+    () =>
+      Math.max(
+        Math.round(safeFontSize * 1.7),
+        Math.floor(activeViewportHeight / linesTarget)
+      ),
+    [activeViewportHeight, linesTarget, safeFontSize]
   );
 
-  // Divide script into whole-word chunks
   const chunks = useMemo(() => {
     if (!script) return [''];
     if (!skiaFont) return script.split('\n');
@@ -163,15 +173,12 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
         }
       }
 
-      if (currentLine) {
-        lines.push(currentLine);
-      }
+      if (currentLine) lines.push(currentLine);
     }
 
     return lines.length > 0 ? lines : [''];
   }, [script, skiaFont, canvasLayout.width]);
 
-  // Pre-calculate line coordinates
   const preparedChunks = useMemo(() => {
     const baselineOffset = chunkHeight / 2 + safeFontSize * 0.35;
     return chunks.map((text, i) => {
@@ -184,7 +191,6 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
 
   const maxScroll = Math.max(0, (chunks.length - 1) * chunkHeight);
 
-  // UI-Thread Worklet State
   const translateY = useSharedValue(0);
   const startDragY = useSharedValue(0);
   const isDraggingShared = useSharedValue(false);
@@ -193,38 +199,21 @@ export const TeleprompterDeck: React.FC<TeleprompterDeckProps> = ({
   const fontSizeShared = useSharedValue(safeFontSize);
   const isAutoScrollingShared = useSharedValue(false);
 
-  // Scrubber Shared States
   const startFontScrub = useSharedValue(safeFontSize);
   const isScrubbingFont = useSharedValue(false);
   const startSpeedScrub = useSharedValue(speed);
   const isScrubbingSpeed = useSharedValue(false);
 
-  useEffect(() => {
-    maxScrollShared.value = maxScroll;
-  }, [maxScroll, maxScrollShared]);
+  useEffect(() => { maxScrollShared.value = maxScroll; }, [maxScroll, maxScrollShared]);
+  useEffect(() => { speedShared.value = speed; }, [speed, speedShared]);
+  useEffect(() => { fontSizeShared.value = safeFontSize; }, [safeFontSize, fontSizeShared]);
+  useEffect(() => { isAutoScrollingShared.value = isAutoScrolling; }, [isAutoScrolling, isAutoScrollingShared]);
 
   useEffect(() => {
-    speedShared.value = speed;
-  }, [speed, speedShared]);
-
-  useEffect(() => {
-    fontSizeShared.value = safeFontSize;
-  }, [safeFontSize, fontSizeShared]);
-
-  useEffect(() => {
-    isAutoScrollingShared.value = isAutoScrolling;
-  }, [isAutoScrolling, isAutoScrollingShared]);
-
-  // Sync scroll state with audio recording engine lifecycle
-useEffect(() => {
     if (engineState === 'RECORDING') {
-      // If resuming with elapsed duration, pre-position scroll down the script
       if (initialDurationMs > 0 && !hasRestoredPrompterRef.current) {
         const elapsedSeconds = initialDurationMs / 1000;
-        const targetScrollPx = Math.min(
-          maxScrollShared.value,
-          speedShared.value * elapsedSeconds
-        );
+        const targetScrollPx = Math.min(maxScrollShared.value, speedShared.value * elapsedSeconds);
         translateY.value = -targetScrollPx;
         hasRestoredPrompterRef.current = true;
       } else if (translateY.value <= -maxScrollShared.value + 2) {
@@ -237,75 +226,50 @@ useEffect(() => {
       setIsAutoScrolling(false);
       hasRestoredPrompterRef.current = false;
       cancelAnimation(translateY);
-      translateY.value = withTiming(0, {
-        duration: 250,
-        easing: Easing.out(Easing.quad),
-      });
+      translateY.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
     }
   }, [engineState, translateY, maxScrollShared, initialDurationMs, speedShared]);
 
-  // Frame-by-frame delta integration
   useFrameCallback((frameInfo) => {
     'worklet';
-    if (!isAutoScrollingShared.value || isDraggingShared.value) {
-      return;
-    }
-    if (speedShared.value <= 0 || maxScrollShared.value <= 0) {
-      return;
-    }
+    if (!isAutoScrollingShared.value || isDraggingShared.value) return;
+    if (speedShared.value <= 0 || maxScrollShared.value <= 0) return;
 
     const rawDt = frameInfo.timeSincePreviousFrame;
-    if (rawDt === null || rawDt === undefined || rawDt <= 0) {
-      return;
-    }
+    if (rawDt === null || rawDt === undefined || rawDt <= 0) return;
 
     const dtSeconds = Math.min(rawDt, 64) / 1000;
-    const deltaY = speedShared.value * dtSeconds;
-    const nextY = translateY.value - deltaY;
-
-    if (nextY <= -maxScrollShared.value) {
-      translateY.value = -maxScrollShared.value;
-    } else {
-      translateY.value = nextY;
-    }
+    const nextY = translateY.value - speedShared.value * dtSeconds;
+    translateY.value = nextY <= -maxScrollShared.value ? -maxScrollShared.value : nextY;
   });
 
-  // Teleprompter canvas drag gesture
-  const prompterPanGesture = useMemo(() => {
-    return Gesture.Pan()
-      .activeOffsetY([-4, 4])
-      .onBegin(() => {
-        'worklet';
-        cancelAnimation(translateY);
-        isDraggingShared.value = true;
-        startDragY.value = translateY.value;
-      })
-      .onUpdate((e) => {
-        'worklet';
-        const nextY = startDragY.value + e.translationY;
-        translateY.value = Math.max(-maxScrollShared.value, Math.min(0, nextY));
-      })
-      .onEnd(() => {
-        'worklet';
-        isDraggingShared.value = false;
-      })
-      .onFinalize(() => {
-        'worklet';
-        isDraggingShared.value = false;
-      });
-  }, [translateY, startDragY, isDraggingShared, maxScrollShared]);
+  const prompterPanGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .activeOffsetY([-4, 4])
+        .onBegin(() => {
+          'worklet';
+          cancelAnimation(translateY);
+          isDraggingShared.value = true;
+          startDragY.value = translateY.value;
+        })
+        .onUpdate((e) => {
+          'worklet';
+          const nextY = startDragY.value + e.translationY;
+          translateY.value = Math.max(-maxScrollShared.value, Math.min(0, nextY));
+        })
+        .onEnd(() => { 'worklet'; isDraggingShared.value = false; })
+        .onFinalize(() => { 'worklet'; isDraggingShared.value = false; }),
+    [translateY, startDragY, isDraggingShared, maxScrollShared]
+  );
 
-  const canvasGroupTransform = useDerivedValue(() => [
-    { translateY: translateY.value },
-  ]);
+  const canvasGroupTransform = useDerivedValue(() => [{ translateY: translateY.value }]);
 
   const handleToggleAutoScroll = () => {
     if (isAutoScrolling) {
       setIsAutoScrolling(false);
     } else {
-      if (translateY.value <= -maxScroll + 2) {
-        translateY.value = 0;
-      }
+      if (translateY.value <= -maxScroll + 2) translateY.value = 0;
       setIsAutoScrolling(true);
     }
   };
@@ -315,10 +279,7 @@ useEffect(() => {
     isDraggingShared.value = false;
     cancelAnimation(translateY);
     startDragY.value = 0;
-    translateY.value = withTiming(0, {
-      duration: 250,
-      easing: Easing.out(Easing.quad),
-    });
+    translateY.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.quad) });
   };
 
   const handleToggleMirror = () => {
@@ -327,7 +288,6 @@ useEffect(() => {
     PrompterStorage.setIsMirrored(next);
   };
 
-  // Stepper Button Handlers
   const changeSpeed = (delta: number) => {
     const next = Math.max(0, Math.min(200, speed + delta));
     setSpeed(next);
@@ -354,29 +314,19 @@ useEffect(() => {
     setListPickerType(null);
   };
 
-  // JS Callbacks for Horizontal Thumb Scrubbing
-  const onScrubFontSizeUpdate = useCallback((val: number) => {
-    setFontSize(val);
-  }, []);
+  const onScrubFontSizeUpdate = useCallback((val: number) => setFontSize(val), []);
+  const onScrubFontSizeEnd = useCallback((val: number) => PrompterStorage.setFontSize(val), []);
+  const onScrubSpeedUpdate = useCallback((val: number) => setSpeed(val), []);
+  const onScrubSpeedEnd = useCallback((val: number) => PrompterStorage.setSpeed(val), []);
 
-  const onScrubFontSizeEnd = useCallback((val: number) => {
-    PrompterStorage.setFontSize(val);
-  }, []);
+  const handleOpenKeyboardEdit = useCallback(
+    (type: 'font' | 'speed') => {
+      setKeyboardEditType(type);
+      setKeyboardInputVal(type === 'font' ? String(safeFontSize) : String(speed));
+    },
+    [safeFontSize, speed]
+  );
 
-  const onScrubSpeedUpdate = useCallback((val: number) => {
-    setSpeed(val);
-  }, []);
-
-  const onScrubSpeedEnd = useCallback((val: number) => {
-    PrompterStorage.setSpeed(val);
-  }, []);
-
-  const handleOpenKeyboardEdit = useCallback((type: 'font' | 'speed') => {
-    setKeyboardEditType(type);
-    setKeyboardInputVal(type === 'font' ? String(safeFontSize) : String(speed));
-  }, [safeFontSize, speed]);
-
-  // Horizontal Scrubber Gesture: Font Size (1 unit per ~8px)
   const fontScrubGesture = useMemo(() => {
     const pan = Gesture.Pan()
       .activeOffsetX([-5, 5])
@@ -395,42 +345,22 @@ useEffect(() => {
           runOnJS(onScrubFontSizeUpdate)(next);
         }
       })
-      .onEnd(() => {
-        'worklet';
-        runOnJS(onScrubFontSizeEnd)(fontSizeShared.value);
-      })
-      .onFinalize(() => {
-        'worklet';
-        isScrubbingFont.value = false;
-      });
+      .onEnd(() => { 'worklet'; runOnJS(onScrubFontSizeEnd)(fontSizeShared.value); })
+      .onFinalize(() => { 'worklet'; isScrubbingFont.value = false; });
 
     const tap = Gesture.Tap().onEnd((_e, success) => {
       'worklet';
-      if (success) {
-        runOnJS(setListPickerType)('font');
-      }
+      if (success) runOnJS(setListPickerType)('font');
     });
 
-    const longPress = Gesture.LongPress()
-      .minDuration(280)
-      .onEnd((_e, success) => {
-        'worklet';
-        if (success) {
-          runOnJS(handleOpenKeyboardEdit)('font');
-        }
-      });
+    const longPress = Gesture.LongPress().minDuration(280).onEnd((_e, success) => {
+      'worklet';
+      if (success) runOnJS(handleOpenKeyboardEdit)('font');
+    });
 
     return Gesture.Exclusive(pan, longPress, tap);
-  }, [
-    fontSizeShared,
-    startFontScrub,
-    isScrubbingFont,
-    onScrubFontSizeUpdate,
-    onScrubFontSizeEnd,
-    handleOpenKeyboardEdit,
-  ]);
+  }, [fontSizeShared, startFontScrub, isScrubbingFont, onScrubFontSizeUpdate, onScrubFontSizeEnd, handleOpenKeyboardEdit]);
 
-  // Horizontal Scrubber Gesture: Speed (1 unit per ~2px)
   const speedScrubGesture = useMemo(() => {
     const pan = Gesture.Pan()
       .activeOffsetX([-5, 5])
@@ -449,54 +379,38 @@ useEffect(() => {
           runOnJS(onScrubSpeedUpdate)(next);
         }
       })
-      .onEnd(() => {
-        'worklet';
-        runOnJS(onScrubSpeedEnd)(speedShared.value);
-      })
-      .onFinalize(() => {
-        'worklet';
-        isScrubbingSpeed.value = false;
-      });
+      .onEnd(() => { 'worklet'; runOnJS(onScrubSpeedEnd)(speedShared.value); })
+      .onFinalize(() => { 'worklet'; isScrubbingSpeed.value = false; });
 
     const tap = Gesture.Tap().onEnd((_e, success) => {
       'worklet';
-      if (success) {
-        runOnJS(setListPickerType)('speed');
-      }
+      if (success) runOnJS(setListPickerType)('speed');
     });
 
-    const longPress = Gesture.LongPress()
-      .minDuration(280)
-      .onEnd((_e, success) => {
-        'worklet';
-        if (success) {
-          runOnJS(handleOpenKeyboardEdit)('speed');
-        }
-      });
+    const longPress = Gesture.LongPress().minDuration(280).onEnd((_e, success) => {
+      'worklet';
+      if (success) runOnJS(handleOpenKeyboardEdit)('speed');
+    });
 
     return Gesture.Exclusive(pan, longPress, tap);
-  }, [
-    speedShared,
-    startSpeedScrub,
-    isScrubbingSpeed,
-    onScrubSpeedUpdate,
-    onScrubSpeedEnd,
-    handleOpenKeyboardEdit,
-  ]);
+  }, [speedShared, startSpeedScrub, isScrubbingSpeed, onScrubSpeedUpdate, onScrubSpeedEnd, handleOpenKeyboardEdit]);
 
-  // Glow styles when thumb is actively scrubbing
   const fontPillAnimStyle = useAnimatedStyle(() => ({
-    backgroundColor: isScrubbingFont.value
-      ? 'rgba(56, 189, 248, 0.18)'
-      : 'rgba(255, 255, 255, 0.04)',
-    borderColor: isScrubbingFont.value ? '#38BDF8' : 'transparent',
+    backgroundColor: isScrubbingFont.value ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.04)',
+    borderColor: isScrubbingFont.value ? '#FFFFFF' : 'transparent',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: isScrubbingFont.value ? 0.4 : 0,
+    shadowRadius: 10,
+    elevation: isScrubbingFont.value ? 8 : 0,
   }));
 
   const speedPillAnimStyle = useAnimatedStyle(() => ({
-    backgroundColor: isScrubbingSpeed.value
-      ? 'rgba(56, 189, 248, 0.18)'
-      : 'rgba(255, 255, 255, 0.04)',
-    borderColor: isScrubbingSpeed.value ? '#38BDF8' : 'transparent',
+    backgroundColor: isScrubbingSpeed.value ? 'rgba(255, 255, 255, 0.18)' : 'rgba(255, 255, 255, 0.04)',
+    borderColor: isScrubbingSpeed.value ? '#FFFFFF' : 'transparent',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: isScrubbingSpeed.value ? 0.4 : 0,
+    shadowRadius: 10,
+    elevation: isScrubbingSpeed.value ? 8 : 0,
   }));
 
   const handleSaveScript = (newScript: string) => {
@@ -527,20 +441,18 @@ useEffect(() => {
   const handleViewportLayout = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     if (width > 0 && height > 0) {
-      setCanvasLayout({ width, height });
-      setContainerHeight(height);
+      setCanvasLayout((prev) =>
+        Math.abs(prev.width - width) < 1 && Math.abs(prev.height - height) < 1
+          ? prev
+          : { width, height }
+      );
     }
   };
 
   return (
     <View style={styles.deckContainer}>
-      {/* 1. Top Strip */}
       <View style={styles.topControlStrip}>
-        <TouchableOpacity
-          style={styles.solidPillBtn}
-          onPress={() => setEditModalVisible(true)}
-          activeOpacity={0.7}
-        >
+        <TouchableOpacity style={styles.solidPillBtn} onPress={() => setEditModalVisible(true)} activeOpacity={0.7}>
           <FileText size={12} color="#FFFFFF" strokeWidth={2.2} />
           <Text style={styles.solidPillBtnText}>Script</Text>
         </TouchableOpacity>
@@ -551,25 +463,16 @@ useEffect(() => {
           activeOpacity={0.7}
         >
           {isAutoScrolling ? (
-            <Pause size={12} color="#38BDF8" strokeWidth={2.2} />
+            <Pause size={12} color="#FFFFFF" strokeWidth={2.2} />
           ) : (
             <Play size={12} color="#FFFFFF" strokeWidth={2.2} />
           )}
-          <Text
-            style={[
-              styles.solidPillBtnText,
-              isAutoScrolling && styles.solidPillBtnTextActive,
-            ]}
-          >
+          <Text style={[styles.solidPillBtnText, isAutoScrolling && styles.solidPillBtnTextActive]}>
             {isAutoScrolling ? 'Pause' : 'Scroll'}
           </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.solidPillBtn}
-          onPress={handleReset}
-          activeOpacity={0.7}
-        >
+        <TouchableOpacity style={styles.solidPillBtn} onPress={handleReset} activeOpacity={0.7}>
           <RotateCcw size={12} color="#FFFFFF" strokeWidth={2.2} />
           <Text style={styles.solidPillBtnText}>Reset</Text>
         </TouchableOpacity>
@@ -579,37 +482,17 @@ useEffect(() => {
           onPress={handleToggleMirror}
           activeOpacity={0.7}
         >
-          <FlipHorizontal
-            size={12}
-            color={isMirrored ? '#38BDF8' : '#FFFFFF'}
-            strokeWidth={2.2}
-          />
-          <Text
-            style={[
-              styles.solidPillBtnText,
-              isMirrored && styles.solidPillBtnTextActive,
-            ]}
-          >
+          <FlipHorizontal size={12} color={isMirrored ? '#FFFFFF' : '#FFFFFF'} strokeWidth={2.2} />
+          <Text style={[styles.solidPillBtnText, isMirrored && styles.solidPillBtnTextActive]}>
             Mirror
           </Text>
         </TouchableOpacity>
       </View>
 
-      {/* 2. Custom Skia Canvas Viewport */}
       <GestureDetector gesture={prompterPanGesture}>
-        <View
-          style={[styles.viewport, { height: activeViewportHeight }]}
-          collapsable={false}
-          onLayout={handleViewportLayout}
-        >
+        <View style={styles.viewport} collapsable={false} onLayout={handleViewportLayout}>
           {skiaFont ? (
-            <Canvas
-              style={{
-                width: canvasLayout.width,
-                height: canvasLayout.height,
-              }}
-            >
-              {/* Text Layer */}
+            <Canvas style={{ width: canvasLayout.width, height: canvasLayout.height }}>
               <Group
                 origin={vec(canvasLayout.width / 2, canvasLayout.height / 2)}
                 transform={[{ scaleX: isMirrored ? -1 : 1 }]}
@@ -628,13 +511,7 @@ useEffect(() => {
                 </Group>
               </Group>
 
-              {/* Seamless Full-Viewport Gradient Vignette */}
-              <Rect
-                x={0}
-                y={0}
-                width={canvasLayout.width}
-                height={canvasLayout.height}
-              >
+              <Rect x={0} y={0} width={canvasLayout.width} height={canvasLayout.height}>
                 <LinearGradient
                   start={vec(0, 0)}
                   end={vec(0, canvasLayout.height)}
@@ -658,9 +535,7 @@ useEffect(() => {
         </View>
       </GestureDetector>
 
-      {/* 3. Bottom Strip with Thumb-Scrubbable Steppers */}
       <View style={styles.bottomControlStrip}>
-        {/* Font Size Stepper */}
         <View style={styles.stepperPill}>
           <Type size={11} color="#A1A1AA" />
           <TouchableOpacity
@@ -688,7 +563,6 @@ useEffect(() => {
           </TouchableOpacity>
         </View>
 
-        {/* Speed Stepper */}
         <View style={styles.stepperPill}>
           <Gauge size={11} color="#A1A1AA" />
           <TouchableOpacity
@@ -717,7 +591,6 @@ useEffect(() => {
         </View>
       </View>
 
-      {/* Value Selector Modal */}
       <Modal
         visible={listPickerType !== null}
         transparent
@@ -730,24 +603,17 @@ useEffect(() => {
             activeOpacity={1}
             onPress={() => setListPickerType(null)}
           />
-
           <View style={styles.listPickerCard}>
             <View style={styles.listPickerHeader}>
-              <View>
+              <View style={{ flex: 1 }}>
                 <Text style={styles.listPickerTitle}>
                   {listPickerType === 'font' ? 'Select Text Size' : 'Select Scroll Speed'}
                 </Text>
                 <Text style={styles.listPickerSubtitle}>
-                  {listPickerType === 'font'
-                    ? `1 px to ${MAX_FONT_SIZE} px`
-                    : '0 to 200 px/s'}
+                  {listPickerType === 'font' ? `1 px to ${MAX_FONT_SIZE} px` : '0 to 200 px/s'}
                 </Text>
               </View>
-              <TouchableOpacity
-                style={styles.closeRoundBtn}
-                onPress={() => setListPickerType(null)}
-                activeOpacity={0.7}
-              >
+              <TouchableOpacity style={styles.closeRoundBtn} onPress={() => setListPickerType(null)} activeOpacity={0.7}>
                 <X size={15} color="#FFFFFF" />
               </TouchableOpacity>
             </View>
@@ -755,52 +621,31 @@ useEffect(() => {
             <FlatList
               data={listPickerType === 'font' ? ALL_FONT_SIZES : ALL_SPEEDS}
               keyExtractor={(item) => String(item)}
-              initialScrollIndex={Math.max(
-                0,
-                listPickerType === 'font' ? safeFontSize - 3 : speed - 3
-              )}
+              initialScrollIndex={Math.max(0, listPickerType === 'font' ? safeFontSize - 3 : speed - 3)}
               onScrollToIndexFailed={() => {}}
-              getItemLayout={(_, index) => ({
-                length: ITEM_ROW_HEIGHT,
-                offset: ITEM_ROW_HEIGHT * index,
-                index,
-              })}
+              getItemLayout={(_, index) => ({ length: ITEM_ROW_HEIGHT, offset: ITEM_ROW_HEIGHT * index, index })}
               renderItem={({ item }) => {
-                const isSelected =
-                  listPickerType === 'font' ? item === safeFontSize : item === speed;
+                const isSelected = listPickerType === 'font' ? item === safeFontSize : item === speed;
                 return (
                   <TouchableOpacity
-                    style={[
-                      styles.valueRowItem,
-                      isSelected && styles.valueRowItemActive,
-                    ]}
-                    onPress={() =>
-                      listPickerType === 'font'
-                        ? selectFontSize(item)
-                        : selectSpeed(item)
-                    }
+                    style={[styles.valueRowItem, isSelected && styles.valueRowItemActive]}
+                    onPress={() => (listPickerType === 'font' ? selectFontSize(item) : selectSpeed(item))}
                     activeOpacity={0.7}
                   >
-                    <Text
-                      style={[
-                        styles.valueRowText,
-                        isSelected && styles.valueRowTextActive,
-                      ]}
-                    >
+                    <Text style={[styles.valueRowText, isSelected && styles.valueRowTextActive]}>
                       {item} {listPickerType === 'font' ? 'px' : ''}
                     </Text>
-                    {isSelected && <Check size={16} color="#38BDF8" strokeWidth={2.8} />}
+                    {isSelected && <Check size={16} color="#FFFFFF" strokeWidth={2.8} />}
                   </TouchableOpacity>
                 );
               }}
-              showsVerticalScrollIndicator={true}
+              showsVerticalScrollIndicator
               contentContainerStyle={styles.listPickerScrollContent}
             />
           </View>
         </View>
       </Modal>
 
-      {/* Manual Numeric Input Modal */}
       <Modal
         visible={keyboardEditType !== null}
         transparent
@@ -815,7 +660,7 @@ useEffect(() => {
             <View style={styles.keyboardCard}>
               <View style={styles.keyboardHeader}>
                 <View style={styles.keyboardIconCircle}>
-                  <KeyboardIcon size={16} color="#38BDF8" strokeWidth={2.2} />
+                  <KeyboardIcon size={16} color="#FFFFFF" strokeWidth={2.2} />
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.keyboardTitle}>
@@ -839,6 +684,8 @@ useEffect(() => {
                   selectTextOnFocus
                   maxLength={3}
                   returnKeyType="done"
+                  blurOnSubmit
+                  underlineColorAndroid="transparent"
                   onSubmitEditing={handleSaveKeyboardEdit}
                 />
                 <Text style={styles.keyboardUnit}>
@@ -858,11 +705,7 @@ useEffect(() => {
                   <Text style={styles.keyboardCancelText}>Cancel</Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={styles.keyboardSaveBtn}
-                  onPress={handleSaveKeyboardEdit}
-                  activeOpacity={0.8}
-                >
+                <TouchableOpacity style={styles.keyboardSaveBtn} onPress={handleSaveKeyboardEdit} activeOpacity={0.8}>
                   <Check size={14} color="#000000" strokeWidth={3} />
                   <Text style={styles.keyboardSaveText}>Apply</Text>
                 </TouchableOpacity>
@@ -875,6 +718,7 @@ useEffect(() => {
       <PrompterEditModal
         visible={editModalVisible}
         initialScript={script}
+        topInset={topInset}
         onSave={handleSaveScript}
         onClose={() => setEditModalVisible(false)}
       />
@@ -884,6 +728,7 @@ useEffect(() => {
 
 const styles = StyleSheet.create({
   deckContainer: {
+    flex: 1,
     width: '100%',
     backgroundColor: '#09090B',
     borderRadius: 18,
@@ -911,8 +756,12 @@ const styles = StyleSheet.create({
     borderColor: '#26262F',
   },
   solidPillBtnActive: {
-    backgroundColor: '#16222F',
-    borderColor: '#2563EB',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    borderColor: '#FFFFFF',
+    shadowColor: '#FFFFFF',
+    shadowOpacity: 0.28,
+    shadowRadius: 9,
+    elevation: 6,
   },
   solidPillBtnText: {
     color: '#F4F4F5',
@@ -921,9 +770,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0.2,
   },
   solidPillBtnTextActive: {
-    color: '#38BDF8',
+    color: '#FFFFFF',
+    fontWeight: '700',
   },
   viewport: {
+    flex: 1,
     backgroundColor: '#060608',
     overflow: 'hidden',
     position: 'relative',
@@ -956,12 +807,7 @@ const styles = StyleSheet.create({
     borderColor: '#26262F',
     gap: 5,
   },
-  stepperTouch: {
-    width: 20,
-    height: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  stepperTouch: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
   stepperValTouch: {
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -1006,17 +852,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#202028',
     marginBottom: 6,
   },
-  listPickerTitle: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '700',
-    letterSpacing: -0.2,
-  },
-  listPickerSubtitle: {
-    color: '#8E8E93',
-    fontSize: 11,
-    marginTop: 2,
-  },
+  listPickerTitle: { color: '#FFFFFF', fontSize: 16, fontWeight: '700', letterSpacing: -0.2 },
+  listPickerSubtitle: { color: '#8E8E93', fontSize: 11, marginTop: 2 },
   closeRoundBtn: {
     width: 28,
     height: 28,
@@ -1025,9 +862,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  listPickerScrollContent: {
-    paddingVertical: 4,
-  },
+  listPickerScrollContent: { paddingVertical: 4 },
   valueRowItem: {
     height: ITEM_ROW_HEIGHT,
     flexDirection: 'row',
@@ -1037,19 +872,14 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginVertical: 1,
   },
-  valueRowItemActive: {
-    backgroundColor: 'rgba(56, 189, 248, 0.12)',
-  },
+  valueRowItemActive: { backgroundColor: 'rgba(255, 255, 255, 0.12)' },
   valueRowText: {
     color: '#A1A1AA',
     fontSize: 15,
     fontWeight: '500',
     fontVariant: ['tabular-nums'],
   },
-  valueRowTextActive: {
-    color: '#38BDF8',
-    fontWeight: '700',
-  },
+  valueRowTextActive: { color: '#FFFFFF', fontWeight: '700' },
   keyboardCard: {
     width: '100%',
     maxWidth: 320,
@@ -1059,30 +889,17 @@ const styles = StyleSheet.create({
     borderColor: '#26262F',
     padding: 20,
   },
-  keyboardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 16,
-  },
+  keyboardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
   keyboardIconCircle: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     alignItems: 'center',
     justifyContent: 'center',
   },
-  keyboardTitle: {
-    color: '#FFFFFF',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  keyboardSubtitle: {
-    color: '#8E8E93',
-    fontSize: 11,
-    marginTop: 2,
-  },
+  keyboardTitle: { color: '#FFFFFF', fontSize: 15, fontWeight: '700' },
+  keyboardSubtitle: { color: '#8E8E93', fontSize: 11, marginTop: 2 },
   keyboardInputRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1097,7 +914,7 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   keyboardNumericInput: {
-    color: '#38BDF8',
+    color: '#FFFFFF',
     fontSize: 20,
     fontWeight: '700',
     textAlign: 'center',
@@ -1105,16 +922,8 @@ const styles = StyleSheet.create({
     padding: 0,
     fontVariant: ['tabular-nums'],
   },
-  keyboardUnit: {
-    color: '#71717A',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  keyboardActionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
+  keyboardUnit: { color: '#71717A', fontSize: 13, fontWeight: '600' },
+  keyboardActionRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   keyboardCancelBtn: {
     flex: 1,
     height: 40,
@@ -1123,11 +932,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  keyboardCancelText: {
-    color: '#8E8E93',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  keyboardCancelText: { color: '#8E8E93', fontSize: 13, fontWeight: '600' },
   keyboardSaveBtn: {
     flex: 1.2,
     height: 40,
@@ -1138,9 +943,5 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
   },
-  keyboardSaveText: {
-    color: '#000000',
-    fontSize: 13,
-    fontWeight: '700',
-  },
+  keyboardSaveText: { color: '#000000', fontSize: 13, fontWeight: '700' },
 });

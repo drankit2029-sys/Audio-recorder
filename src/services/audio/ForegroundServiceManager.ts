@@ -1,4 +1,3 @@
-// src/services/audio/ForegroundServiceManager.ts
 import { Platform, PermissionsAndroid } from 'react-native';
 import notifee, {
   AndroidImportance,
@@ -15,6 +14,11 @@ interface ServiceHandlers {
   onStop?: ActionHandler;
 }
 
+const NOTIFICATION_ID = 'recording_ongoing';
+
+/** Neutral accent: white-on-white and black-on-black accents are both invisible. */
+const ACCENT = '#A1A1AA';
+
 class ForegroundServiceManagerImpl {
   private channelId = 'studio_recording_channel';
   private isInitialized = false;
@@ -27,9 +31,7 @@ class ForegroundServiceManagerImpl {
   private actionQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    notifee.registerForegroundService(() => {
-      return new Promise(() => {});
-    });
+    notifee.registerForegroundService(() => new Promise(() => {}));
 
     notifee.onBackgroundEvent(async ({ type, detail }: Event) => {
       await this.handleNotificationAction(type, detail);
@@ -40,52 +42,72 @@ class ForegroundServiceManagerImpl {
     });
   }
 
-  private async renderNotification(): Promise<void> {
-    if (!this.isRunning) return;
-
-    const actions = this.isPaused
+  private buildActions() {
+    return this.isPaused
       ? [
           { title: 'Resume', pressAction: { id: 'resume' } },
-          { title: 'Stop', pressAction: { id: 'stop' } },
+          { title: 'Stop & save', pressAction: { id: 'stop' } },
         ]
       : [
           { title: 'Pause', pressAction: { id: 'pause' } },
-          { title: 'Stop', pressAction: { id: 'stop' } },
+          { title: 'Stop & save', pressAction: { id: 'stop' } },
         ];
+  }
+
+  private async renderNotification(): Promise<void> {
+    if (!this.isRunning) return;
+
+    const timecode = this.lastTimerText;
+    const body = this.isPaused
+      ? `${timecode}  ·  paused, tap to return to the studio`
+      : `${timecode}  ·  recording, tap to return to the studio`;
 
     try {
       await notifee.displayNotification({
-        id: 'recording_ongoing',
-        title: this.isPaused ? 'Paused' : 'Recording',
-        body: `${this.lastTimerText} • ${this.currentPresetBadge}`,
+        id: NOTIFICATION_ID,
+        title: this.isPaused ? 'Capture Paused' : 'Capturing Audio',
+        body,
         android: {
           channelId: this.channelId,
           asForegroundService: true,
-          color: '#27272A',
+          foregroundServiceTypes: [
+            AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+          ],
+          color: ACCENT,
+          colorized: false,
           ongoing: true,
+          autoCancel: false,
           onlyAlertOnce: true,
-          pressAction: { id: 'default' },
-          actions,
+          enableVibration: false,
+          showWhen: false,
+          timestamp: this.lastStartTime,
+          subText: this.currentPresetBadge,
+          ticker: this.isPaused ? 'Recording paused' : 'Recording started',
+          pressAction: { id: 'default', launchActivity: 'default' },
+          actions: this.buildActions(),
         },
       });
-    } catch {}
+    } catch (err) {
+      console.warn('[ForegroundServiceManager] renderNotification failed:', err);
+    }
   }
 
   private async handleNotificationAction(type: EventType, detail: any) {
-    if (type === EventType.ACTION_PRESS && detail.pressAction) {
-      const actionId = detail.pressAction.id;
-      if (actionId === 'pause') {
-        this.isPaused = true;
-        await this.renderNotification();
-        if (this.handlers.onPause) await this.handlers.onPause();
-      } else if (actionId === 'resume') {
-        this.isPaused = false;
-        await this.renderNotification();
-        if (this.handlers.onResume) await this.handlers.onResume();
-      } else if (actionId === 'stop') {
-        if (this.handlers.onStop) await this.handlers.onStop();
-        await this.stopService();
-      }
+    if (type !== EventType.ACTION_PRESS || !detail?.pressAction) return;
+
+    const actionId = detail.pressAction.id;
+
+    if (actionId === 'pause') {
+      this.isPaused = true;
+      if (this.handlers.onPause) await this.handlers.onPause();
+      await this.renderNotification();
+    } else if (actionId === 'resume') {
+      this.isPaused = false;
+      if (this.handlers.onResume) await this.handlers.onResume();
+      await this.renderNotification();
+    } else if (actionId === 'stop') {
+      if (this.handlers.onStop) await this.handlers.onStop();
+      await this.stopService();
     }
   }
 
@@ -94,9 +116,12 @@ class ForegroundServiceManagerImpl {
     try {
       await notifee.createChannel({
         id: this.channelId,
-        name: 'Audio Recording Service',
+        name: 'Studio Recording',
+        description: 'Shows an ongoing notification while audio is being captured.',
         lights: false,
         vibration: false,
+        badge: false,
+        sound: undefined,
         importance: AndroidImportance.LOW,
       });
       this.isInitialized = true;
@@ -110,59 +135,50 @@ class ForegroundServiceManagerImpl {
   }
 
   public startService(presetBadge: string): Promise<void> {
-    this.actionQueue = this.actionQueue.then(async () => {
-      if (this.isRunning) return;
+    this.actionQueue = this.actionQueue
+      .then(async () => {
+        if (this.isRunning) return;
 
-      if (Platform.OS === 'android') {
-        const hasMicPermission = await PermissionsAndroid.check(
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
-        );
-        if (!hasMicPermission) return;
-      }
+        if (Platform.OS === 'android') {
+          const hasMicPermission = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+          );
+          if (!hasMicPermission) return;
+        }
 
-      await this.initialize();
+        await this.initialize();
 
-      this.currentPresetBadge = presetBadge;
-      this.lastTimerText = '00:00';
-      this.isPaused = false;
+        this.currentPresetBadge = presetBadge;
+        this.lastTimerText = '00:00';
+        this.isPaused = false;
+        this.lastStartTime = Date.now();
+        this.isRunning = true;
 
-      await notifee.displayNotification({
-        id: 'recording_ongoing',
-        title: 'Recording',
-        body: `00:00 • ${presetBadge}`,
-        android: {
-          channelId: this.channelId,
-          asForegroundService: true,
-          foregroundServiceTypes: [
-            AndroidForegroundServiceType.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-          ],
-          color: '#27272A',
-          ongoing: true,
-          onlyAlertOnce: true,
-          pressAction: { id: 'default' },
-          actions: [
-            { title: 'Pause', pressAction: { id: 'pause' } },
-            { title: 'Stop', pressAction: { id: 'stop' } },
-          ],
-        },
+        await this.renderNotification();
+      })
+      .catch((err) => {
+        console.error('[ForegroundServiceManager] startService failed:', err);
+        this.isRunning = false;
       });
-
-      this.isRunning = true;
-      this.lastStartTime = Date.now();
-    }).catch((err) => {
-      console.error('[ForegroundServiceManager] startService failed:', err);
-      this.isRunning = false;
-    });
 
     return this.actionQueue;
   }
 
-  public async updateProgress(timerText: string, presetBadge: string, isPaused: boolean): Promise<void> {
+  public async updateProgress(
+    timerText: string,
+    presetBadge: string,
+    isPaused: boolean
+  ): Promise<void> {
     if (!this.isRunning) return;
+
+    const changed = isPaused !== this.isPaused || presetBadge !== this.currentPresetBadge;
     this.lastTimerText = timerText;
     this.currentPresetBadge = presetBadge;
     this.isPaused = isPaused;
-    await this.renderNotification();
+
+    if (changed || timerText.endsWith('0')) {
+      await this.renderNotification();
+    }
   }
 
   public stopService(): Promise<void> {
@@ -176,12 +192,13 @@ class ForegroundServiceManagerImpl {
 
       try {
         await notifee.stopForegroundService();
-        await notifee.cancelNotification('recording_ongoing');
+        await notifee.cancelNotification(NOTIFICATION_ID);
       } catch (error) {
         console.warn('[ForegroundServiceManager] stopService error:', error);
       } finally {
         this.isRunning = false;
         this.isPaused = false;
+        this.lastTimerText = '00:00';
       }
     });
 

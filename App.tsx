@@ -1,4 +1,3 @@
-// App.tsx
 import 'react-native-gesture-handler';
 import { useEffect, useState, useRef } from 'react';
 import {
@@ -10,30 +9,25 @@ import {
   Alert,
   Platform,
   PermissionsAndroid,
-  LayoutAnimation,
   AppState,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
-import { GestureHandlerRootView, ScrollView } from 'react-native-gesture-handler';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
   FadeOut,
-  FadeInDown,
-  FadeOutUp,
   useSharedValue,
   useAnimatedStyle,
   withTiming,
   withSpring,
   Easing,
 } from 'react-native-reanimated';
-import { AudioModule } from 'expo-audio';
 import * as FileSystem from 'expo-file-system/legacy';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import {
   Sliders,
   Mic,
   ChevronLeft,
-  Check,
   Radio,
   AlignLeft,
   Usb,
@@ -59,6 +53,12 @@ import { useResponsive } from './src/hooks/useResponsive';
 import { LibraryScreen } from './src/screens/LibraryScreen';
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio';
 import { ensureTakesFolder, renameTakeFile } from './src/services/storage/recordingPaths';
+import {
+  AppToast,
+  AppToastData,
+  ToastVariant,
+  getToastTop,
+} from './src/components/common/AppToast';
 
 type AppScreen = 'library' | 'studio';
 
@@ -71,10 +71,7 @@ interface PendingTake {
   warning?: string;
 }
 
-interface ToastData {
-  title: string;
-  subtitle: string;
-}
+const MIN_PROMPTER_HEIGHT = 150;
 
 function AudioRecorderApp() {
   const [, setIsReady] = useState(false);
@@ -89,7 +86,7 @@ function AudioRecorderApp() {
   const [pendingTake, setPendingTake] = useState<PendingTake | null>(null);
   const [nameModalVisible, setNameModalVisible] = useState(false);
   const [warningModalVisible, setWarningModalVisible] = useState(false);
-  const [toastData, setToastData] = useState<ToastData | null>(null);
+  const [toastData, setToastData] = useState<AppToastData | null>(null);
 
   const [orphanedSession, setOrphanedSession] = useState<ActiveSessionRecord | null>(null);
   const [orphanedTakeSize, setOrphanedTakeSize] = useState(0);
@@ -98,25 +95,37 @@ function AudioRecorderApp() {
 
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isTransportBusyRef = useRef(false);
+  const isAppForegroundRef = useRef(true);
 
-  const { isTablet, maxContentWidth, prompterHeight, insets } = useResponsive();
+  const { isTablet, maxContentWidth, insets } = useResponsive();
+
+  const toastTop = getToastTop(insets.top);
+  const transportBottom = insets.bottom + 24;
+  const transportClearance = insets.bottom + 112;
+
   const showToast = (
-      title: string,
-      subtitle: string,
-      opts: { warning?: string; isDelete?: boolean } = {}
-    ) => {
-      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-      setToastData({ title, subtitle, ...opts });
-      toastTimeoutRef.current = setTimeout(() => setToastData(null), 3200);
-    };
+    title: string,
+    subtitle?: string,
+    opts: { variant?: ToastVariant; detail?: string } = {}
+  ) => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastData({ title, subtitle, ...opts });
+    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3600);
+  };
+
   const formatBytes = (bytes: number) =>
-  bytes < 1024 * 1024
-    ? `${(bytes / 1024).toFixed(1)} KB`
-    : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    bytes < 1024 * 1024
+      ? `${(bytes / 1024).toFixed(1)} KB`
+      : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 
+  useEffect(() => {
+    isAppForegroundRef.current = AppState.currentState === 'active';
+    const sub = AppState.addEventListener('change', (next) => {
+      isAppForegroundRef.current = next === 'active';
+    });
+    return () => sub.remove();
+  }, []);
 
-
-const transportBottom = insets.bottom + 24;
   const {
     devices,
     selectedDeviceId,
@@ -198,28 +207,67 @@ const transportBottom = insets.bottom + 24;
   releaseHardwareRoutingRef.current = releaseHardwareRouting;
 
   const togglePrompter = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setShowPrompter((prev) => !prev);
   };
 
-  // In App.tsx
+  const commitTakeToLibrary = (
+    uri: string,
+    sizeBytes: number,
+    durationMs: number,
+    name: string,
+    warning?: string
+  ) => {
+    const record: SavedRecording = {
+      id: `take_${Date.now()}`,
+      name,
+      uri,
+      sizeBytes,
+      durationMs,
+      createdAt: Date.now(),
+    };
+
+    setRecordings(RecordingLibrary.save(record));
+    showToast('Take Saved', `${record.name} • ${formatBytes(sizeBytes)}`, {
+      variant: warning ? 'warning' : 'success',
+      detail: warning,
+    });
+
+    void (async () => {
+      try {
+        const renamed = await renameTakeFile(uri, name);
+        if (renamed && renamed !== uri) {
+          setRecordings(RecordingLibrary.updateUri(record.id, renamed));
+        }
+      } catch (err) {
+        console.warn('[App] Could not rename take on disk:', err);
+      }
+    })();
+  };
 
   const handleStopPress = async (autoSave = false) => {
-  if (isTransportBusyRef.current) return;
-  isTransportBusyRef.current = true;
+    if (isTransportBusyRef.current) return;
+    isTransportBusyRef.current = true;
 
-  try {
-    const finalDuration = getExactDurationMs();
-    await deactivateKeepAwake();
+    try {
+      const finalDuration = getExactDurationMs();
+      await deactivateKeepAwake();
 
-    const result = await stopRecording();
-    releaseHardwareRoutingRef.current();
-    await resetEngine();
-    setResumedDurationMs(0);
+      const result = await stopRecording();
+      releaseHardwareRoutingRef.current();
+      await resetEngine();
+      setResumedDurationMs(0);
 
-    await ForegroundServiceManager.stopService();
+      await ForegroundServiceManager.stopService();
 
-    if (result.uri) {
+      if (!result.uri) {
+        showToast(
+          'Nothing Captured',
+          result.degradationNote ?? 'The engine produced no output file.',
+          { variant: 'warning', detail: result.degradationNote }
+        );
+        return;
+      }
+
       const outputUri = result.uri;
 
       let sizeBytes = result.sizeBytes;
@@ -232,11 +280,13 @@ const transportBottom = insets.bottom + 24;
 
       const now = new Date();
       const defaultName = `Take ${now.toLocaleTimeString([], {
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
       })}`;
-
       const durationMs = result.durationMs > 0 ? result.durationMs : finalDuration;
-      const shouldPrompt = !autoSave || AppState.currentState === 'active';
+
+      const shouldPrompt = !autoSave || isAppForegroundRef.current;
 
       if (shouldPrompt) {
         setPendingTake({
@@ -249,79 +299,61 @@ const transportBottom = insets.bottom + 24;
         });
         setNameModalVisible(true);
       } else {
-        const record: SavedRecording = {
-          id: `take_${Date.now()}`,
-          name: defaultName,
-          uri: outputUri,
+        commitTakeToLibrary(
+          outputUri,
           sizeBytes,
           durationMs,
-          createdAt: Date.now(),
-        };
-        setRecordings(RecordingLibrary.save(record));
-        showToast('Take Saved', `${record.name} • ${formatBytes(sizeBytes)}`, {
-          warning: result.degradationNote,
-        });
+          defaultName,
+          result.degradationNote
+        );
       }
-    } else if (result.degradationNote) {
-      showToast('Take Ended', result.degradationNote, { warning: result.degradationNote });
+    } catch (e: any) {
+      await deactivateKeepAwake();
+      await ForegroundServiceManager.stopService();
+      releaseHardwareRoutingRef.current();
+      await resetEngine();
+      setResumedDurationMs(0);
+      Alert.alert('Stop Error', e?.message ?? 'Unknown error');
+    } finally {
+      isTransportBusyRef.current = false;
     }
-  } catch (e: any) {
-    await deactivateKeepAwake();
-    await ForegroundServiceManager.stopService();
-    releaseHardwareRoutingRef.current();
-    await resetEngine();
-    setResumedDurationMs(0);
-    Alert.alert('Stop Error', e?.message ?? 'Unknown error');
-  } finally {
-    isTransportBusyRef.current = false;
-  }
-};
-
-  
+  };
 
   const handleStopPressRef = useRef(handleStopPress);
   handleStopPressRef.current = handleStopPress;
 
   const handleFinalizeTake = (chosenName: string) => {
-  if (!pendingTake) return;
-  const take = pendingTake;
-  const finalName = chosenName.trim().length > 0 ? chosenName.trim() : take.defaultName;
+    if (!pendingTake) return;
+    const take = pendingTake;
+    const finalName =
+      chosenName.trim().length > 0 ? chosenName.trim() : take.defaultName;
 
-  setNameModalVisible(false);
-  setPendingTake(null);
+    setNameModalVisible(false);
+    setPendingTake(null);
 
-  const record: SavedRecording = {
-    id: `take_${Date.now()}`,
-    name: finalName,
-    uri: take.uri,
-    sizeBytes: take.sizeBytes,
-    durationMs: take.durationMs,
-    createdAt: Date.now(),
+    commitTakeToLibrary(
+      take.uri,
+      take.sizeBytes,
+      take.durationMs,
+      finalName,
+      take.warning
+    );
   };
 
-  setRecordings(RecordingLibrary.save(record));
-  showToast('Take Saved', `${record.name} • ${formatBytes(take.sizeBytes)}`, {
-    warning: take.warning,
-  });
-
-  void (async () => {
-    try {
-      const renamed = await renameTakeFile(take.uri, finalName);
-      if (renamed && renamed !== take.uri) {
-        setRecordings(RecordingLibrary.updateUri(record.id, renamed));
-      }
-    } catch (err) {
-      console.warn('[App] Could not rename take on disk:', err);
-    }
-  })();
-};
-
   const handleDiscardTake = async () => {
-    if (pendingTake?.uri) {
-      try { await FileSystem.deleteAsync(pendingTake.uri, { idempotent: true }); } catch {}
+    const uri = pendingTake?.uri;
+    if (uri) {
+      try {
+        await FileSystem.deleteAsync(uri, { idempotent: true });
+      } catch (err) {
+        console.warn('[App] Failed to discard take:', err);
+      }
     }
     setNameModalVisible(false);
     setPendingTake(null);
+    showToast('Take Discarded', 'Audio file deleted from this device', {
+      variant: 'delete',
+    });
   };
 
   const handleDiscardInterruptedTake = async () => {
@@ -337,10 +369,9 @@ const transportBottom = insets.bottom + 24;
     setInterruptedModalVisible(false);
     setOrphanedSession(null);
     setResumedDurationMs(0);
-
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-    setToastData({ title: 'Take Discarded', subtitle: 'Interrupted recording removed' });
-    toastTimeoutRef.current = setTimeout(() => setToastData(null), 3000);
+    showToast('Take Discarded', 'Interrupted recording removed', {
+      variant: 'delete',
+    });
   };
 
   const handleResumeInterruptedTake = async () => {
@@ -376,23 +407,29 @@ const transportBottom = insets.bottom + 24;
       await activateKeepAwakeAsync();
 
       await ForegroundServiceManager.startService(activePreset.badge);
-      await startRecording(durationMs, restoredWaveform, `Take Resumed`, selectedDeviceId ?? -1);
+      const note = await startRecording(
+        durationMs,
+        restoredWaveform,
+        `Take Resumed`,
+        selectedDeviceId ?? -1
+      );
+
       if (oldFileUri) {
         try {
           await FileSystem.deleteAsync(oldFileUri, { idempotent: true });
         } catch {}
       }
 
-      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
       const mins = Math.floor(durationMs / 60000);
       const secs = Math.floor((durationMs % 60000) / 1000);
-      const timeFormatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+      const timeFormatted = `${mins.toString().padStart(2, '0')}:${secs
+        .toString()
+        .padStart(2, '0')}`;
 
-      setToastData({
-        title: 'Take Resumed',
-        subtitle: `Resumed take from ${timeFormatted}`,
+      showToast('Take Resumed', `Continuing from ${timeFormatted}`, {
+        variant: note ? 'warning' : 'success',
+        detail: note,
       });
-      toastTimeoutRef.current = setTimeout(() => setToastData(null), 3500);
     } catch (e: any) {
       await deactivateKeepAwake();
       await ForegroundServiceManager.stopService();
@@ -413,7 +450,9 @@ const transportBottom = insets.bottom + 24;
   };
 
   useEffect(() => {
-    return () => { if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current); };
+    return () => {
+      if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -435,14 +474,10 @@ const transportBottom = insets.bottom + 24;
         }
 
         if (Platform.Version >= 31) {
-          await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT
-          );
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT);
         }
         if (Platform.Version >= 33) {
-          await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS
-          );
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
         }
 
         await setAudioModeAsync({
@@ -503,9 +538,18 @@ const transportBottom = insets.bottom + 24;
 
         await ForegroundServiceManager.startService(activePreset.badge);
         const stamp = new Date().toLocaleTimeString([], {
-            hour: '2-digit', minute: '2-digit', second: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+        const note = await startRecording(0, undefined, `Take ${stamp}`, selectedDeviceId ?? -1);
+
+        if (note) {
+          showToast('Capture Notice', 'Recording with substituted parameters', {
+            variant: 'warning',
+            detail: note,
           });
-        await startRecording(0, undefined, `Take ${stamp}`, selectedDeviceId ?? -1);
+        }
       }
     } catch (e: any) {
       deactivateKeepAwake();
@@ -583,31 +627,59 @@ const transportBottom = insets.bottom + 24;
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <View style={styles.screensContainer}>
         {currentScreen === 'library' ? (
-          <Animated.View key="screen-lib" entering={FadeIn.duration(240)} exiting={FadeOut.duration(180)} style={StyleSheet.absoluteFill}>
-            <LibraryScreen recordings={recordings} onLibraryUpdate={setRecordings} onEditModeChange={setIsLibraryEditMode} />
+          <Animated.View
+            key="screen-lib"
+            entering={FadeIn.duration(240)}
+            exiting={FadeOut.duration(180)}
+            style={StyleSheet.absoluteFill}
+          >
+            <LibraryScreen
+              recordings={recordings}
+              onLibraryUpdate={setRecordings}
+              onEditModeChange={setIsLibraryEditMode}
+            />
           </Animated.View>
         ) : (
-          <Animated.View key="screen-std" entering={FadeIn.duration(240)} exiting={FadeOut.duration(180)} style={StyleSheet.absoluteFill}>
+          <Animated.View
+            key="screen-std"
+            entering={FadeIn.duration(240)}
+            exiting={FadeOut.duration(180)}
+            style={StyleSheet.absoluteFill}
+          >
             <View style={[styles.contentConstraint, { maxWidth: maxContentWidth }]}>
               <View style={styles.header}>
-                <TouchableOpacity style={styles.headerBtn} onPress={handleBackToLibrary} activeOpacity={0.7} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <TouchableOpacity
+                  style={styles.headerBtn}
+                  onPress={handleBackToLibrary}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
                   <ChevronLeft size={24} color="#FFFFFF" strokeWidth={2} />
                 </TouchableOpacity>
 
-                <TouchableOpacity style={styles.headerBtn} onPress={() => setSettingsVisible(true)} activeOpacity={0.7} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <TouchableOpacity
+                  style={styles.headerBtn}
+                  onPress={() => setSettingsVisible(true)}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                >
                   <Sliders size={19} color="#8E8E93" />
                 </TouchableOpacity>
               </View>
 
-              <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} bounces={false}>
+              <View style={[styles.studioBody, !showPrompter && styles.studioBodyNoPrompter]}>
                 {showPrompter ? (
-                  <View style={styles.prompterWrapper}>
+                  <Animated.View
+                    entering={FadeIn.duration(220)}
+                    exiting={FadeOut.duration(160)}
+                    style={[styles.prompterFlex, { minHeight: MIN_PROMPTER_HEIGHT }]}
+                  >
                     <TeleprompterDeck
                       engineState={engineState}
-                      customHeight={prompterHeight}
+                      topInset={insets.top}
                       initialDurationMs={resumedDurationMs}
                     />
-                  </View>
+                  </Animated.View>
                 ) : null}
 
                 <View style={styles.cockpitRow}>
@@ -626,7 +698,10 @@ const transportBottom = insets.bottom + 24;
                         disabled={isSessionActive}
                         activeOpacity={0.6}
                       >
-                        <DeviceIcon size={11} color={selectedDevice && selectedDevice.type !== 'builtin_mic' ? '#60A5FA' : '#8E8E93'} />
+                        <DeviceIcon
+                          size={11}
+                          color={selectedDevice && selectedDevice.type !== 'builtin_mic' ? '#E4E4E7' : '#8E8E93'}
+                        />
                         <Text style={styles.cleanOptionText} numberOfLines={1}>{micLabel}</Text>
                       </TouchableOpacity>
 
@@ -636,7 +711,7 @@ const transportBottom = insets.bottom + 24;
                         disabled={isSessionActive}
                         activeOpacity={0.6}
                       >
-                        <Radio size={11} color="#34D399" />
+                        <Radio size={11} color="#A1A1AA" />
                         <Text style={styles.cleanOptionText} numberOfLines={1}>{formatLabel}</Text>
                       </TouchableOpacity>
 
@@ -646,47 +721,58 @@ const transportBottom = insets.bottom + 24;
                         activeOpacity={0.6}
                       >
                         <AlignLeft size={11} color={showPrompter ? '#FFFFFF' : '#8E8E93'} />
-                        <Text style={[styles.cleanOptionText, showPrompter ? styles.cleanOptionTextActive : null]}>{showPrompter ? 'Hide' : 'Script'}</Text>
+                        <Text style={[styles.cleanOptionText, showPrompter ? styles.cleanOptionTextActive : null]}>
+                          {showPrompter ? 'Hide' : 'Script'}
+                        </Text>
                       </TouchableOpacity>
                     </View>
                   </View>
 
                   <View style={styles.cockpitRight} pointerEvents="none" />
                 </View>
-              </ScrollView>
+              </View>
+
+              <View style={{ height: transportClearance }} />
             </View>
           </Animated.View>
         )}
       </View>
 
       {toastData ? (
-        <View style={[styles.toastOverlay, { top: Math.max(insets.top + 10, 26) }]} pointerEvents="box-none">
-          <Animated.View entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))} exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))} style={styles.toastCard}>
-            <View style={styles.toastIconCircle}><Check size={14} color="#000000" strokeWidth={3} /></View>
-            <View style={styles.toastTextCol}>
-              <Text style={styles.toastTitle}>{toastData.title}</Text>
-              <Text style={styles.toastSubtitle} numberOfLines={1}>{toastData.subtitle}</Text>
-            </View>
-          </Animated.View>
-        </View>
+        <AppToast data={toastData} top={toastTop} wide={Boolean(toastData.detail)} />
       ) : null}
 
       {!isLibraryEditMode ? (
         <View style={[styles.transportChassis, { bottom: transportBottom }]} pointerEvents="box-none">
           <View style={styles.transportBezel} pointerEvents="box-none">
-            <Animated.View style={[styles.stopBtnWrapper, stopBtnAnimatedStyle]} pointerEvents={isSessionActive ? 'auto' : 'none'}>
-              <Pressable onPress={handleStopPress} disabled={!isSessionActive} style={({ pressed }) => [styles.stopOuterBtn, pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] }]} hitSlop={10}>
+            <Animated.View
+              style={[styles.stopBtnWrapper, stopBtnAnimatedStyle]}
+              pointerEvents={isSessionActive ? 'auto' : 'none'}
+            >
+              <Pressable
+                onPress={handleStopPress}
+                disabled={!isSessionActive}
+                style={({ pressed }) => [styles.stopOuterBtn, pressed && { opacity: 0.82, transform: [{ scale: 0.94 }] }]}
+                hitSlop={10}
+              >
                 <View style={styles.stopInnerSquare} />
               </Pressable>
             </Animated.View>
 
             <Animated.View style={[styles.mainBtnWrapper, mainBtnAnimatedStyle]} pointerEvents="box-none">
-              <Pressable onPress={handleMainButtonPress} style={({ pressed }) => [styles.mainOuterRing, pressed && { opacity: 0.88, transform: [{ scale: 0.95 }] }]} hitSlop={10}>
+              <Pressable
+                onPress={handleMainButtonPress}
+                style={({ pressed }) => [styles.mainOuterRing, pressed && { opacity: 0.88, transform: [{ scale: 0.95 }] }]}
+                hitSlop={10}
+              >
                 <Animated.View style={[styles.redCircle, redCircleAnimStyle]} pointerEvents="none">
-                  <Animated.View style={[styles.micIconWrapper, micIconAnimStyle]}><Mic size={24} color="#FFFFFF" strokeWidth={2.4} /></Animated.View>
+                  <Animated.View style={[styles.micIconWrapper, micIconAnimStyle]}>
+                    <Mic size={24} color="#FFFFFF" strokeWidth={2.4} />
+                  </Animated.View>
                 </Animated.View>
                 <Animated.View style={[styles.pauseBarsWrapper, pauseBarsAnimStyle]} pointerEvents="none">
-                  <View style={styles.pauseBar} /><View style={styles.pauseBar} />
+                  <View style={styles.pauseBar} />
+                  <View style={styles.pauseBar} />
                 </Animated.View>
               </Pressable>
             </Animated.View>
@@ -694,7 +780,11 @@ const transportBottom = insets.bottom + 24;
         </View>
       ) : null}
 
-      <ActiveRecordingWarningModal visible={warningModalVisible} onClose={() => setWarningModalVisible(false)} onStopAndExit={handleStopPress} />
+      <ActiveRecordingWarningModal
+        visible={warningModalVisible}
+        onClose={() => setWarningModalVisible(false)}
+        onStopAndExit={handleStopPress}
+      />
 
       <InterruptedTakeModal
         visible={interruptedModalVisible}
@@ -711,6 +801,7 @@ const transportBottom = insets.bottom + 24;
           durationMs={pendingTake.durationMs}
           sizeBytes={pendingTake.sizeBytes}
           formatBadge={pendingTake.formatBadge}
+          warning={pendingTake.warning}
           onSubmit={handleFinalizeTake}
           onDiscard={handleDiscardTake}
         />
@@ -765,17 +856,18 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
+  studioBody: {
+    flex: 1,
+    justifyContent: 'flex-start',
     paddingHorizontal: 8,
     paddingTop: 8,
-    paddingBottom: 170,
   },
-
-  prompterWrapper: {
+  studioBodyNoPrompter: {
+    justifyContent: 'center',
+  },
+  prompterFlex: {
     width: '100%',
-    marginBottom: 16,
+    marginBottom: 14,
   },
 
   cockpitRow: {
@@ -834,55 +926,6 @@ const styles = StyleSheet.create({
   cleanOptionTextActive: {
     color: '#FFFFFF',
     fontWeight: '600',
-  },
-
-  toastOverlay: {
-    position: 'absolute',
-    top: 20,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 10000,
-    elevation: 100,
-  },
-  toastCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    borderRadius: 30,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    maxWidth: 380,
-    gap: 10,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-  toastIconCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#10B981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toastTextCol: {
-    flexShrink: 1,
-  },
-  toastTitle: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  toastSubtitle: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontWeight: '500',
-    marginTop: 1,
   },
 
   transportChassis: {

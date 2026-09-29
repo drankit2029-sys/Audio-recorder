@@ -5,16 +5,14 @@ import {
   Text,
   StyleSheet,
   FlatList,
+  ScrollView,
   TouchableOpacity,
   TextInput,
   Modal,
+  Keyboard,
   Platform,
 } from 'react-native';
-import Animated, {
-  FadeInDown,
-  FadeOutUp,
-  Easing,
-} from 'react-native-reanimated';
+import Animated, { FadeIn, FadeOut, Easing } from 'react-native-reanimated';
 import { useAudioPlayer } from 'expo-audio';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -30,28 +28,33 @@ import {
   HardDrive,
   Share2,
   ChevronRight,
+  Mic,
 } from 'lucide-react-native';
 
 import { RecordingLibrary, SavedRecording } from '../services/storage/recordingLibrary';
+import {
+  renameTakeFile,
+  sanitizeFileName,
+  extractExtension,
+} from '../services/storage/recordingPaths';
 import { useResponsive } from '../hooks/useResponsive';
+import { useKeyboardViewport } from '../hooks/useKeyboardViewport';
+import {
+  AppToast,
+  AppToastData,
+  ToastVariant,
+  getToastTop,
+} from '../components/common/AppToast';
 import { DeleteConfirmationModal } from '../components/audio/DeleteConfirmationModal';
 import { RenameRecordingModal } from '../components/library/RenameRecordingModal';
 import { LibrarySortModal, SortOption } from '../components/library/LibrarySortModal';
 import { LibraryBatchBar } from '../components/library/LibraryBatchBar';
 import { RecordingCard } from '../components/library/RecordingCard';
-import { renameTakeFile } from '../services/storage/recordingPaths';
 
 interface LibraryScreenProps {
   recordings: SavedRecording[];
   onLibraryUpdate: (updated: SavedRecording[]) => void;
   onEditModeChange: (isEdit: boolean) => void;
-}
-
-interface ToastData {
-  title: string;
-  subtitle: string;
-  isDelete?: boolean;
-  isError?: boolean;
 }
 
 type ExportTarget =
@@ -60,11 +63,13 @@ type ExportTarget =
 
 const getMimeType = (uri: string): string => {
   const clean = uri.toLowerCase();
-  if (clean.endsWith('.wav')) return 'audio/wav';
-  if (clean.endsWith('.m4a')) return 'audio/mp4';
-  if (clean.endsWith('.ogg')) return 'audio/ogg';
-  if (clean.endsWith('.flac')) return 'audio/flac';
-  if (clean.endsWith('.3gp')) return 'audio/3gpp';
+  const ext = extractExtension(clean);
+  if (ext === '.wav') return 'audio/wav';
+  if (ext === '.m4a') return 'audio/mp4';
+  if (ext === '.aac') return 'audio/aac';
+  if (ext === '.ogg') return 'audio/ogg';
+  if (ext === '.flac') return 'audio/flac';
+  if (ext === '.3gp') return 'audio/3gpp';
   return 'audio/*';
 };
 
@@ -83,9 +88,10 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   onEditModeChange,
 }) => {
   const { isTablet, maxContentWidth, insets } = useResponsive();
+  const { offset: keyboardOffset, isVisible: keyboardVisible } = useKeyboardViewport();
 
   const deckBottom = Math.max(insets.bottom + 20, 54);
-  const toastTop = Math.max(insets.top + 10, 26);
+  const toastTop = getToastTop(insets.top);
 
   const [isSearching, setIsSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -129,17 +135,24 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     count?: number;
   } | null>(null);
 
-  // Unified Export State
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [exportTarget, setExportTarget] = useState<ExportTarget | null>(null);
 
-  const [toastData, setToastData] = useState<ToastData | null>(null);
+  const [toastData, setToastData] = useState<AppToastData | null>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const showToast = useCallback(
-    (title: string, subtitle: string, isDelete = false, isError = false) => {
+    (
+      title: string,
+      subtitle?: string,
+      opts: { variant?: ToastVariant; isDelete?: boolean } = {}
+    ) => {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-      setToastData({ title, subtitle, isDelete, isError });
+      setToastData({
+        title,
+        subtitle,
+        variant: opts.variant ?? (opts.isDelete ? 'delete' : 'success'),
+      });
       toastTimeoutRef.current = setTimeout(() => setToastData(null), 3500);
     },
     []
@@ -311,10 +324,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   }, []);
 
   const handleSeek = useCallback((item: SavedRecording, seconds: number) => {
-    seekLockRef.current = {
-      targetSec: seconds,
-      timestamp: Date.now(),
-    };
+    seekLockRef.current = { targetSec: seconds, timestamp: Date.now() };
     currentTimeRef.current = seconds;
     setCurrentTime(seconds);
 
@@ -350,7 +360,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     });
   }, []);
 
-  // Long press handler: activates edit mode and selects the pressed card
   const handleCardLongPress = useCallback(
     (id: string) => {
       if (!isEditMode) {
@@ -377,34 +386,37 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     setRenameModalVisible(true);
   }, []);
 
-  const handleSaveRename = useCallback((newName: string) => {
-  const target = recordingToRename;
-  if (!target) {
-    setRenameModalVisible(false);
-    return;
-  }
-
-  const trimmed = newName.trim();
-  if (trimmed.length > 0 && trimmed !== target.name) {
-    const updated = RecordingLibrary.rename(target.id, trimmed);
-    onLibraryUpdate(updated);
-    showToast('Take Renamed', trimmed);
-
-    void (async () => {
-      try {
-        const renamed = await renameTakeFile(target.uri, trimmed);
-        if (renamed && renamed !== target.uri) {
-          onLibraryUpdate(RecordingLibrary.updateUri(target.id, renamed));
-        }
-      } catch (err) {
-        console.warn('[LibraryScreen] Could not rename take on disk:', err);
+  const handleSaveRename = useCallback(
+    (newName: string) => {
+      const target = recordingToRename;
+      if (!target) {
+        setRenameModalVisible(false);
+        return;
       }
-    })();
-  }
 
-  setRenameModalVisible(false);
-  setRecordingToRename(null);
-}, [recordingToRename, onLibraryUpdate, showToast]);
+      const trimmed = newName.trim();
+      if (trimmed.length > 0 && trimmed !== target.name) {
+        const updated = RecordingLibrary.rename(target.id, trimmed);
+        onLibraryUpdate(updated);
+        showToast('Take Renamed', trimmed);
+
+        void (async () => {
+          try {
+            const renamed = await renameTakeFile(target.uri, trimmed);
+            if (renamed && renamed !== target.uri) {
+              onLibraryUpdate(RecordingLibrary.updateUri(target.id, renamed));
+            }
+          } catch (err) {
+            console.warn('[LibraryScreen] Could not rename take on disk:', err);
+          }
+        })();
+      }
+
+      setRenameModalVisible(false);
+      setRecordingToRename(null);
+    },
+    [recordingToRename, onLibraryUpdate, showToast]
+  );
 
   const handleDeleteSingle = useCallback((item: SavedRecording) => {
     setDeleteTarget({ type: 'single', item });
@@ -429,12 +441,11 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         setIsPlaying(false);
         setActiveId(null);
       }
-      if (expandedIdRef.current === item.id) {
-        setExpandedId(null);
-      }
+      if (expandedIdRef.current === item.id) setExpandedId(null);
+
       const updated = await RecordingLibrary.delete(item.id);
       onLibraryUpdate(updated);
-      showToast('Take Deleted', `"${item.name}" removed`, true);
+      showToast('Take Deleted', `"${item.name}" removed`, { variant: 'delete' });
     } else if (deleteTarget.type === 'batch') {
       if (selectedIds.size === 0) return;
 
@@ -458,14 +469,13 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       setSelectedIds(new Set());
       setIsEditMode(false);
       onEditModeChange(false);
-      showToast('Takes Deleted', `${deletedCount} recordings removed`, true);
+      showToast('Takes Deleted', `${deletedCount} recordings removed`, { variant: 'delete' });
     }
 
     setDeleteModalVisible(false);
     setDeleteTarget(null);
   }, [deleteTarget, onEditModeChange, onLibraryUpdate, recordings, selectedIds, showToast]);
 
-  // Unified Export Triggers
   const handleOpenExportSingle = useCallback((item: SavedRecording) => {
     setExportTarget({ type: 'single', item });
     setExportModalVisible(true);
@@ -479,7 +489,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     setExportModalVisible(true);
   }, [recordings, selectedIds]);
 
-  // Action 1: Save to Device Storage
   const handleExportToStorage = useCallback(async () => {
     if (!exportTarget) return;
     const targets = exportTarget.type === 'single' ? [exportTarget.item] : exportTarget.items;
@@ -487,26 +496,20 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
     if (targets.length === 0) return;
 
-    // Validate files on disk first
     const validTargets: SavedRecording[] = [];
     for (const item of targets) {
-      if (await checkFileValid(item.uri)) {
-        validTargets.push(item);
-      }
+      if (await checkFileValid(item.uri)) validTargets.push(item);
     }
 
     if (validTargets.length === 0) {
-      showToast('Export Failed', 'Selected audio file(s) not found on disk', false, true);
+      showToast('Export Failed', 'Selected audio file(s) not found on disk', { variant: 'error' });
       return;
     }
 
     if (Platform.OS === 'android') {
       try {
         const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-        if (!permissions.granted) {
-          // User backed out of directory selection without picking a folder
-          return;
-        }
+        if (!permissions.granted) return;
 
         let savedCount = 0;
         for (const item of validTargets) {
@@ -515,8 +518,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
               encoding: FileSystem.EncodingType.Base64,
             });
             const mimeType = getMimeType(item.uri);
-            const ext = item.uri.includes('.') ? item.uri.substring(item.uri.lastIndexOf('.')) : '.wav';
-            const safeName = item.name.replace(/[/\\?%*:|"<>]/g, '_') + ext;
+            const ext = extractExtension(item.uri) || '.wav';
+            const safeName = sanitizeFileName(item.name) + ext;
 
             const createdUri = await FileSystem.StorageAccessFramework.createFileAsync(
               permissions.directoryUri,
@@ -533,32 +536,33 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         }
 
         if (savedCount === 0) {
-          showToast('Export Failed', 'Could not save take(s) to selected folder', false, true);
+          showToast('Export Failed', 'Could not save take(s) to the selected folder', { variant: 'error' });
         } else if (savedCount === 1) {
           showToast('Saved to Storage', validTargets[0].name);
         } else {
           showToast('Takes Saved', `${savedCount} recordings saved to folder`);
         }
       } catch (err: any) {
-        showToast('Export Failed', err?.message || 'Storage Access export failed', false, true);
+        showToast('Export Failed', err?.message || 'Storage Access export failed', { variant: 'error' });
       }
     } else {
-      // iOS: Save to Files via share sheet
       try {
         for (const item of validTargets) {
           await Sharing.shareAsync(item.uri, {
             dialogTitle: `Save ${item.name}`,
-            UTI: item.uri.endsWith('.wav') ? 'com.microsoft.waveform-audio' : 'public.audio',
+            UTI: extractExtension(item.uri) === '.wav' ? 'com.microsoft.waveform-audio' : 'public.audio',
           });
         }
-        showToast('Saved to Storage', validTargets.length === 1 ? validTargets[0].name : `${validTargets.length} takes`);
+        showToast(
+          'Saved to Storage',
+          validTargets.length === 1 ? validTargets[0].name : `${validTargets.length} takes`
+        );
       } catch (err: any) {
-        showToast('Export Failed', err?.message || 'Failed to save take', false, true);
+        showToast('Export Failed', err?.message || 'Failed to save take', { variant: 'error' });
       }
     }
   }, [exportTarget, showToast]);
 
-  // Action 2: Send to an App (Share Sheet)
   const handleExportToApp = useCallback(async () => {
     if (!exportTarget) return;
     const targets = exportTarget.type === 'single' ? [exportTarget.item] : exportTarget.items;
@@ -569,19 +573,17 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     try {
       const isAvailable = await Sharing.isAvailableAsync();
       if (!isAvailable) {
-        showToast('Export Failed', 'Sharing is unavailable on this device', false, true);
+        showToast('Export Failed', 'Sharing is unavailable on this device', { variant: 'error' });
         return;
       }
 
       const validTargets: SavedRecording[] = [];
       for (const item of targets) {
-        if (await checkFileValid(item.uri)) {
-          validTargets.push(item);
-        }
+        if (await checkFileValid(item.uri)) validTargets.push(item);
       }
 
       if (validTargets.length === 0) {
-        showToast('Export Failed', 'Selected audio file(s) not found on disk', false, true);
+        showToast('Export Failed', 'Selected audio file(s) not found on disk', { variant: 'error' });
         return;
       }
 
@@ -594,10 +596,12 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
       showToast(
         validTargets.length === 1 ? 'Share Dialog Opened' : 'Share Completed',
-        validTargets.length === 1 ? validTargets[0].name : `${validTargets.length} recordings processed`
+        validTargets.length === 1
+          ? validTargets[0].name
+          : `${validTargets.length} recordings processed`
       );
     } catch (err: any) {
-      showToast('Export Failed', err?.message || 'Failed to send to app', false, true);
+      showToast('Export Failed', err?.message || 'Failed to send to app', { variant: 'error' });
     }
   }, [exportTarget, showToast]);
 
@@ -649,16 +653,18 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   );
 
   const exportCount =
-    exportTarget?.type === 'single'
-      ? 1
-      : exportTarget?.type === 'batch'
-      ? exportTarget.items.length
-      : 0;
+    exportTarget?.type === 'single' ? 1 : exportTarget?.type === 'batch' ? exportTarget.items.length : 0;
 
   const exportLabel =
     exportTarget?.type === 'single'
       ? `"${exportTarget.item.name}"`
       : `${exportCount} Recording${exportCount > 1 ? 's' : ''}`;
+
+  const handleClearSearch = () => {
+    setSearchQuery('');
+    setIsSearching(false);
+    Keyboard.dismiss();
+  };
 
   return (
     <View style={styles.container}>
@@ -675,14 +681,14 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
                   placeholder="Search recordings..."
                   placeholderTextColor="#636366"
                   autoFocus
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                  blurOnSubmit
+                  underlineColorAndroid="transparent"
+                  onSubmitEditing={Keyboard.dismiss}
                 />
-                <TouchableOpacity
-                  onPress={() => {
-                    setSearchQuery('');
-                    setIsSearching(false);
-                  }}
-                  style={styles.searchClearBtn}
-                >
+                <TouchableOpacity onPress={handleClearSearch} style={styles.searchClearBtn} hitSlop={8}>
                   <X size={16} color="#8E8E93" />
                 </TouchableOpacity>
               </View>
@@ -722,9 +728,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
               <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
 
-            <Text style={styles.editModeCountText}>
-              {selectedIds.size} selected
-            </Text>
+            <Text style={styles.editModeCountText}>{selectedIds.size} selected</Text>
 
             <TouchableOpacity onPress={handleSelectAll} style={styles.editModeActionBtn}>
               <Text style={styles.selectAllText}>
@@ -735,16 +739,45 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         )}
 
         {processedRecordings.length === 0 ? (
-          <View style={styles.emptyContainer}>
+          <ScrollView
+            style={styles.emptyScroll}
+            contentContainerStyle={[
+              styles.emptyContainer,
+              { paddingBottom: keyboardOffset + 140 },
+            ]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            bounces={false}
+          >
+            <View style={styles.emptyIconCircle}>
+              {searchQuery ? (
+                <Search size={22} color="#52525B" strokeWidth={2} />
+              ) : (
+                <Mic size={22} color="#52525B" strokeWidth={2} />
+              )}
+            </View>
+
             <Text style={styles.emptyTitle}>
               {searchQuery ? 'No Results Found' : 'No Recordings Yet'}
             </Text>
             <Text style={styles.emptySub}>
               {searchQuery
-                ? 'Try searching with a different term.'
+                ? `Nothing matches "${searchQuery.trim()}". Try a different term.`
                 : 'Tap the microphone button below to begin your first take.'}
             </Text>
-          </View>
+
+            {searchQuery ? (
+              <TouchableOpacity
+                style={styles.emptyActionBtn}
+                onPress={handleClearSearch}
+                activeOpacity={0.8}
+              >
+                <X size={13} color="#000000" strokeWidth={3} />
+                <Text style={styles.emptyActionText}>Clear search</Text>
+              </TouchableOpacity>
+            ) : null}
+          </ScrollView>
         ) : (
           <FlatList
             data={processedRecordings}
@@ -753,11 +786,13 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             contentContainerStyle={styles.listContent}
             showsVerticalScrollIndicator={false}
             removeClippedSubviews={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
             extraData={`${expandedId}-${activeId}-${isPlaying}-${selectedIds.size}`}
           />
         )}
 
-        {isEditMode && (
+        {isEditMode ? (
           <LibraryBatchBar
             selectedCount={selectedIds.size}
             totalCount={processedRecordings.length}
@@ -765,52 +800,23 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             onDelete={handleBatchDelete}
             onExport={handleOpenExportBatch}
           />
-        )}
+        ) : null}
       </View>
 
-      {/* Status-Bar Safe Toast */}
-      {toastData ? (
-        <View style={[styles.toastOverlay, { top: toastTop }]} pointerEvents="box-none">
-          <Animated.View
-            entering={FadeInDown.duration(240).easing(Easing.out(Easing.cubic))}
-            exiting={FadeOutUp.duration(180).easing(Easing.in(Easing.cubic))}
-            style={styles.toastCard}
-          >
-            <View
-              style={[
-                styles.toastIconCircle,
-                toastData.isDelete && styles.toastIconCircleDelete,
-                toastData.isError && styles.toastIconCircleError,
-              ]}
-            >
-              {toastData.isDelete ? (
-                <Trash2 size={13} color="#FFFFFF" strokeWidth={2.5} />
-              ) : toastData.isError ? (
-                <AlertCircle size={14} color="#FFFFFF" strokeWidth={2.5} />
-              ) : (
-                <Check size={14} color="#000000" strokeWidth={3} />
-              )}
-            </View>
-            <View style={styles.toastTextCol}>
-              <Text style={styles.toastTitle}>{toastData.title}</Text>
-              <Text style={styles.toastSubtitle} numberOfLines={1}>{toastData.subtitle}</Text>
-            </View>
-          </Animated.View>
-        </View>
-      ) : null}
+      {toastData ? <AppToast data={toastData} top={toastTop} /> : null}
 
-      {/* Overflow Menu */}
       <Modal
         visible={menuVisible}
         transparent
         animationType="fade"
         onRequestClose={() => setMenuVisible(false)}
       >
-        <TouchableOpacity
-          style={styles.menuBackdrop}
-          activeOpacity={1}
-          onPress={() => setMenuVisible(false)}
-        >
+        <View style={styles.menuBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setMenuVisible(false)}
+          />
           <View style={styles.popoverMenu}>
             <TouchableOpacity
               style={styles.popoverItem}
@@ -839,7 +845,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
               <Text style={styles.popoverItemText}>Sort</Text>
             </TouchableOpacity>
           </View>
-        </TouchableOpacity>
+        </View>
       </Modal>
 
       <LibrarySortModal
@@ -853,16 +859,15 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       />
 
       <RenameRecordingModal
-  visible={renameModalVisible}
-  initialName={recordingToRename?.name ?? ''}
-  fileUri={recordingToRename?.uri}
-  onSave={handleSaveRename}
-  onClose={() => {
-    setRenameModalVisible(false);
-    setRecordingToRename(null);
-  }}
-/>
-
+        visible={renameModalVisible}
+        initialName={recordingToRename?.name ?? ''}
+        fileUri={recordingToRename?.uri}
+        onSave={handleSaveRename}
+        onClose={() => {
+          setRenameModalVisible(false);
+          setRecordingToRename(null);
+        }}
+      />
 
       <DeleteConfirmationModal
         visible={deleteModalVisible}
@@ -870,7 +875,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         description={
           deleteTarget?.type === 'single'
             ? `Permanently delete "${deleteTarget.item?.name}"? This action cannot be undone.`
-            : `Permanently delete ${deleteTarget?.count} recording${(deleteTarget?.count ?? 0) > 1 ? 's' : ''}? This action cannot be undone.`
+            : `Permanently delete ${deleteTarget?.count} recording${
+                (deleteTarget?.count ?? 0) > 1 ? 's' : ''
+              }? This action cannot be undone.`
         }
         onConfirm={handleConfirmDelete}
         onCancel={() => {
@@ -879,7 +886,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         }}
       />
 
-      {/* Unified Export Destination Modal */}
       <Modal
         visible={exportModalVisible}
         transparent
@@ -911,14 +917,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             </View>
 
             <View style={styles.exportOptionsList}>
-              {/* Option A: Save to Device Storage */}
-              <TouchableOpacity
-                style={styles.exportOptionRow}
-                onPress={handleExportToStorage}
-                activeOpacity={0.7}
-              >
-                <View style={styles.exportIconBoxStorage}>
-                  <HardDrive size={18} color="#38BDF8" strokeWidth={2.2} />
+              <TouchableOpacity style={styles.exportOptionRow} onPress={handleExportToStorage} activeOpacity={0.7}>
+                <View style={styles.exportIconBox}>
+                  <HardDrive size={18} color="#E4E4E7" strokeWidth={2.2} />
                 </View>
                 <View style={styles.exportOptionTextCol}>
                   <Text style={styles.exportOptionTitle}>Save to device storage</Text>
@@ -931,14 +932,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
               <View style={styles.exportDivider} />
 
-              {/* Option B: Send to an App */}
-              <TouchableOpacity
-                style={styles.exportOptionRow}
-                onPress={handleExportToApp}
-                activeOpacity={0.7}
-              >
-                <View style={styles.exportIconBoxApp}>
-                  <Share2 size={18} color="#10B981" strokeWidth={2.2} />
+              <TouchableOpacity style={styles.exportOptionRow} onPress={handleExportToApp} activeOpacity={0.7}>
+                <View style={styles.exportIconBox}>
+                  <Share2 size={18} color="#E4E4E7" strokeWidth={2.2} />
                 </View>
                 <View style={styles.exportOptionTextCol}>
                   <Text style={styles.exportOptionTitle}>Send to an app</Text>
@@ -1045,12 +1041,27 @@ const styles = StyleSheet.create({
     paddingBottom: 200,
     gap: 10,
   },
-  emptyContainer: {
+  emptyScroll: {
     flex: 1,
+    width: '100%',
+  },
+  emptyContainer: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 32,
-    marginTop: 100,
+    paddingTop: 24,
+  },
+  emptyIconCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#0D0D10',
+    borderWidth: 1,
+    borderColor: '#1E1E22',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
   },
   emptyTitle: {
     color: '#FFFFFF',
@@ -1064,61 +1075,21 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
   },
-
-  toastOverlay: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 10000,
-    elevation: 100,
-  },
-  toastCard: {
+  emptyActionBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#18181B',
-    borderWidth: 1,
-    borderColor: '#27272A',
-    borderRadius: 30,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    maxWidth: 380,
-    gap: 10,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.45,
-    shadowRadius: 12,
-    elevation: 8,
+    gap: 6,
+    height: 38,
+    paddingHorizontal: 18,
+    borderRadius: 19,
+    backgroundColor: '#FFFFFF',
+    marginTop: 18,
   },
-  toastIconCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#10B981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toastIconCircleDelete: {
-    backgroundColor: '#EF4444',
-  },
-  toastIconCircleError: {
-    backgroundColor: '#EF4444',
-  },
-  toastTextCol: {
-    flexShrink: 1,
-  },
-  toastTitle: {
-    color: '#FFFFFF',
+  emptyActionText: {
+    color: '#000000',
     fontSize: 13,
     fontWeight: '700',
   },
-  toastSubtitle: {
-    color: '#8E8E93',
-    fontSize: 11,
-    fontWeight: '500',
-    marginTop: 1,
-  },
-
   menuBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.4)',
@@ -1128,7 +1099,7 @@ const styles = StyleSheet.create({
     top: 60,
     right: 18,
     width: 160,
-    backgroundColor: '#1C1C1E',
+    backgroundColor: '#1C1C2E',
     borderRadius: 14,
     borderWidth: 1,
     borderColor: '#2C2C2E',
@@ -1151,8 +1122,6 @@ const styles = StyleSheet.create({
     height: StyleSheet.hairlineWidth,
     backgroundColor: '#2C2C2E',
   },
-
-  /* Export Destination Modal Styles */
   exportBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',
@@ -1227,23 +1196,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6,
     gap: 12,
   },
-  exportIconBoxStorage: {
+  exportIconBox: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(56, 189, 248, 0.12)',
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
     borderWidth: 1,
-    borderColor: 'rgba(56, 189, 248, 0.28)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  exportIconBoxApp: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(16, 185, 129, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.28)',
+    borderColor: 'rgba(255, 255, 255, 0.16)',
     alignItems: 'center',
     justifyContent: 'center',
   },

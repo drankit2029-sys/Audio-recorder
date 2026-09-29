@@ -3,6 +3,7 @@ import {
   AndroidOutputFormat,
   AndroidAudioEncoder,
 } from 'expo-audio';
+import { Platform } from 'react-native';
 import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
 
 export type PresetKey = string;
@@ -68,6 +69,17 @@ export interface DeviceCompatibilityResult {
 const AMBITERIOUS_RATE_LIMIT = 48000;
 const VALID_AMR_NB_RATES = [8000];
 const VALID_AMR_WB_RATES = [16000];
+
+/**
+ * AudioFormat.ENCODING_PCM_FLOAT is only guaranteed from API 26 (Android 8.0).
+ * Below that, AudioRecord.getMinBufferSize() rejects the encoding and the
+ * native pipeline quietly falls back to 16-bit integer PCM.
+ */
+export const FLOAT_PCM_MIN_API = 26;
+
+export function isFloatPcmSupportedByPlatform(): boolean {
+  return typeof Platform.Version === 'number' && Platform.Version >= FLOAT_PCM_MIN_API;
+}
 
 const isUsbDevice = (device: AudioInputDevice | null): boolean =>
   !!device &&
@@ -145,9 +157,15 @@ export function checkDeviceCompatibility(
   }
 
   // ---- Float PCM availability -------------------------------------------
-  if (preset.bitDepth === 32) {
+  // USB interfaces are required by the USB Audio Devices class to support
+  // ENCODING_PCM_FLOAT, so they clear both gates. Built-in capsules do not.
+  if (preset.bitDepth === 32 && !isUsb) {
     reasons.push(
-      '32-bit float PCM requires Android 8.0+ (API 26) or a class-compliant USB interface.'
+      '32-bit float PCM requires a class-compliant USB Audio Interface. Built-in Android microphones are limited to 16-bit integer PCM.'
+    );
+  } else if (preset.bitDepth === 32 && !isFloatPcmSupportedByPlatform()) {
+    reasons.push(
+      `32-bit float PCM requires Android 8.0 (API ${FLOAT_PCM_MIN_API}) or newer. This device runs API ${Platform.Version}, so the recording would be downgraded to 16-bit.`
     );
   }
 
@@ -244,7 +262,7 @@ const amrEngine = (
   format: audioEncoder === 'amr_wb' ? 'amr_wb' : 'amr_nb',
   engine: 'mediarecorder',
   extension: '.3gp',
-  mimeType: 'audio/3gpp',
+  mimeType:'audio/3gpp',
   sampleRate,
   channels: 1,
   bitRate,
