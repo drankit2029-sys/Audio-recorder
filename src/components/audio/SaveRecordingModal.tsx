@@ -1,4 +1,10 @@
 // src/components/audio/SaveRecordingModal.tsx
+//
+// NOTE: this used to be a react-native <Modal>. On Android 15+ (edge-to-edge,
+// targetSdk 36) the Modal opens a separate window and the IME is not shown
+// for inputs inside it, so the keyboard never came up when saving a take.
+// It is now an in-window overlay (same window as the activity), which behaves
+// like any other screen for focus/IME purposes.
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
@@ -6,11 +12,12 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  Modal,
   Keyboard,
   ScrollView,
   Pressable,
 } from 'react-native';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Trash2, Check, Music2, HardDrive, X, AlertTriangle, CopyPlus, Scissors } from 'lucide-react-native';
 
 import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
@@ -67,51 +74,97 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   onKeepEditing,
 }) => {
   const { offset: keyboardOffset, isVisible: isKeyboardVisible } = useKeyboardViewport();
+  // The overlay is a child of the padded root SafeAreaView; negative
+  // offsets stretch it over the status bar and gesture area too.
+  const insets = useSafeAreaInsets();
 
   const [name, setName] = useState(defaultName);
   const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<TextInput | null>(null);
   const isEdit = Boolean(editOfName);
   const focusTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const mountedRef = useRef(false);
+
+  // Fade in/out of the in-window overlay (replaces the old Modal fade).
+  const overlayOpacity = useSharedValue(0);
+  useEffect(() => {
+    overlayOpacity.value = withTiming(visible ? 1 : 0, {
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [visible, overlayOpacity]);
+
+  const overlayStyle = useAnimatedStyle(() => ({ opacity: overlayOpacity.value }));
+
+  const clearFocusTimers = () => {
+    focusTimers.current.forEach(clearTimeout);
+    focusTimers.current = [];
+  };
+
+  const blurInput = () => {
+    try {
+      inputRef.current?.blur();
+    } catch {}
+    Keyboard.dismiss();
+  };
+
+  const requestKeyboard = () => {
+    // Native helper walks the view hierarchy for the focused EditText and
+    // forces the IME up; on edge-to-edge Android a single attempt is not
+    // enough, so it is retried a few times.
+    KeyboardHelper.show().catch(() => {});
+  };
+
+  const focusInput = () => {
+    clearFocusTimers();
+    const attempt = (delay: number) => {
+      const id = setTimeout(() => {
+        if (!mountedRef.current) return;
+        try {
+          inputRef.current?.focus();
+        } catch {}
+        requestKeyboard();
+      }, delay);
+      focusTimers.current.push(id);
+    };
+    // Staggered retries to survive layout / window attach delays.
+    attempt(50);
+    attempt(150);
+    attempt(350);
+    attempt(650);
+    attempt(1100);
+  };
 
   useEffect(() => {
-    if (visible) setName(defaultName);
-    else setIsFocused(false);
+    if (visible) {
+      setName(defaultName);
+      mountedRef.current = true;
+      // Slight delay so the overlay is laid out before focus is requested.
+      const t = setTimeout(() => focusInput(), 60);
+      return () => {
+        clearTimeout(t);
+      };
+    }
+    mountedRef.current = false;
+    clearFocusTimers();
+    setIsFocused(false);
+    blurInput();
+    return undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, defaultName]);
 
   useEffect(() => {
     return () => {
-      focusTimers.current.forEach(clearTimeout);
+      clearFocusTimers();
+      blurInput();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const focusInput = () => {
-    focusTimers.current.forEach(clearTimeout);
-    focusTimers.current = [];
-    const attempt = (delay: number) => {
-      const id = setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.focus();
-          KeyboardHelper.show().catch(() => {});
-        }
-      }, delay);
-      focusTimers.current.push(id);
-    };
-    attempt(50);
-    attempt(250);
-    attempt(600);
-  };
-
-  const handleShow = () => {
-    focusInput();
-  };
 
   useBackPress(visible, () => {
     Keyboard.dismiss();
     onKeepEditing();
   });
-
-  if (!visible) return null;
 
   const trimmed = name.trim();
   const canSave = trimmed.length > 0;
@@ -134,181 +187,205 @@ export const SaveRecordingModal: React.FC<SaveRecordingModalProps> = ({
   };
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      statusBarTranslucent={false}
-      onShow={handleShow}
-      onRequestClose={handleClose}
+    <Animated.View
+      style={[
+        styles.root,
+        {
+          top: -insets.top,
+          left: -insets.left,
+          right: -insets.right,
+          bottom: -insets.bottom,
+        },
+        overlayStyle,
+      ]}
+      pointerEvents={visible ? 'auto' : 'none'}
     >
-      <View style={styles.backdrop}>
-        <Pressable style={styles.backdropPress} onPress={Keyboard.dismiss} />
-        <ScrollView
-          style={styles.scroll}
-          contentContainerStyle={[
-            styles.scrollContent,
-            {
-              paddingTop: 16,
-              paddingBottom: keyboardOffset + 24,
-            },
-          ]}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-          bounces={false}
-        >
-          <Pressable onPress={(e) => e.stopPropagation()} style={styles.card}>
-            <View style={styles.headerRow}>
-              <View style={styles.iconCircle}>
-                {isEdit ? (
-                  <Scissors size={16} color="#FFFFFF" strokeWidth={2} />
-                ) : (
-                  <Music2 size={17} color="#FFFFFF" strokeWidth={2} />
-                )}
-              </View>
-              <View style={styles.headerTextGroup}>
-                <Text style={styles.title}>{isEdit ? 'Save your edit' : 'Name your take'}</Text>
-                <Text style={styles.subtitle} numberOfLines={1}>
-                  {formatDuration(durationMs)} • {sizeIsEstimate ? '≈ ' : ''}
-                  {formatSize(sizeBytes)} • {formatBadge}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={styles.closeBtn}
-                onPress={handleClose}
-                activeOpacity={0.7}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                accessibilityLabel="Back to the take"
-              >
-                <X size={15} color="#A1A1AA" />
-              </TouchableOpacity>
+      {/* Tap outside the card: just stow the keyboard, keep the dialog. */}
+      <Pressable style={styles.backdropPress} onPress={Keyboard.dismiss} />
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[
+          styles.scrollContent,
+          {
+            paddingTop: 16,
+            paddingBottom: keyboardOffset + 24,
+          },
+        ]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
+        bounces={false}
+      >
+        <Pressable onPress={(e) => e.stopPropagation()} style={styles.card}>
+          <View style={styles.headerRow}>
+            <View style={styles.iconCircle}>
+              {isEdit ? (
+                <Scissors size={16} color="#FFFFFF" strokeWidth={2} />
+              ) : (
+                <Music2 size={17} color="#FFFFFF" strokeWidth={2} />
+              )}
             </View>
+            <View style={styles.headerTextGroup}>
+              <Text style={styles.title}>{isEdit ? 'Save your edit' : 'Name your take'}</Text>
+              <Text style={styles.subtitle} numberOfLines={1}>
+                {formatDuration(durationMs)} • {sizeIsEstimate ? '≈ ' : ''}
+                {formatSize(sizeBytes)} • {formatBadge}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.closeBtn}
+              onPress={handleClose}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              accessibilityLabel="Back to the take"
+            >
+              <X size={15} color="#A1A1AA" />
+            </TouchableOpacity>
+          </View>
 
-            {warning ? (
-              <View style={styles.warningBox}>
-                <AlertTriangle size={14} color="#F59E0B" strokeWidth={2.4} style={{ marginTop: 1 }} />
-                <View style={styles.warningCol}>
-                  <Text style={styles.warningTitle}>CAPTURE NOTICE</Text>
-                  <Text style={styles.warningText}>{warning}</Text>
-                </View>
-              </View>
-            ) : null}
-
-            <View style={styles.fieldSection}>
-              <View style={styles.labelRow}>
-                <Text style={styles.fieldLabel}>TAKE NAME</Text>
-                <Text style={styles.counter}>
-                  {name.length}/{MAX_TAKE_NAME_LENGTH}
-                </Text>
-              </View>
-
-              <View style={[styles.inputShell, isFocused && styles.inputShellFocused]}>
-                <TextInput
-                  ref={inputRef}
-                  style={styles.input}
-                  value={name}
-                  onChangeText={setName}
-                  onFocus={() => setIsFocused(true)}
-                  onBlur={() => setIsFocused(false)}
-                  placeholder={defaultName}
-                  placeholderTextColor="#52525B"
-                  selectTextOnFocus
-                  maxLength={MAX_TAKE_NAME_LENGTH}
-                  returnKeyType="done"
-                  blurOnSubmit
-                  underlineColorAndroid="transparent"
-                  onSubmitEditing={() => submit(isEdit ? 'overwrite' : 'new')}
-                  showSoftInputOnFocus
-                />
-                {name.length > 0 ? (
-                  <TouchableOpacity
-                    style={styles.clearBtn}
-                    onPress={() => setName('')}
-                    activeOpacity={0.7}
-                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                  >
-                    <X size={13} color="#8E8E93" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-
-              <View style={styles.storageRow}>
-                <HardDrive size={11} color="#A1A1AA" />
-                <Text style={styles.storageText} numberOfLines={1}>
-                  {isEdit
-                    ? `Editing "${editOfName}" in ${TAKES_FOLDER_NAME}/`
-                    : `Stored in ${TAKES_FOLDER_NAME}/ on this device`}
-                </Text>
+          {warning ? (
+            <View style={styles.warningBox}>
+              <AlertTriangle size={14} color="#F59E0B" strokeWidth={2.4} style={{ marginTop: 1 }} />
+              <View style={styles.warningCol}>
+                <Text style={styles.warningTitle}>CAPTURE NOTICE</Text>
+                <Text style={styles.warningText}>{warning}</Text>
               </View>
             </View>
+          ) : null}
 
-            {isEdit ? (
-              <>
-                <View style={styles.actionRow}>
-                  <TouchableOpacity
-                    style={[styles.secondaryBtn, !canSave && styles.saveBtnDisabled]}
-                    onPress={() => submit('new')}
-                    disabled={!canSave}
-                    activeOpacity={0.8}
-                  >
-                    <CopyPlus size={14} color="#FFFFFF" strokeWidth={2.2} />
-                    <Text style={styles.secondaryBtnText}>Save as new</Text>
-                  </TouchableOpacity>
+          <View style={styles.fieldSection}>
+            <View style={styles.labelRow}>
+              <Text style={styles.fieldLabel}>TAKE NAME</Text>
+              <Text style={styles.counter}>
+                {name.length}/{MAX_TAKE_NAME_LENGTH}
+              </Text>
+            </View>
 
-                  <TouchableOpacity
-                    style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
-                    onPress={() => submit('overwrite')}
-                    disabled={!canSave}
-                    activeOpacity={0.8}
-                  >
-                    <Check size={14} color="#000000" strokeWidth={3} />
-                    <Text style={styles.saveBtnText}>Save changes</Text>
-                  </TouchableOpacity>
-                </View>
-                <TouchableOpacity style={styles.discardLink} onPress={handleDiscard} activeOpacity={0.7}>
-                  <Trash2 size={12} color="#EF4444" strokeWidth={2.2} />
-                  <Text style={styles.discardLinkText}>Discard changes</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <View style={styles.actionRow}>
-                <TouchableOpacity style={styles.discardBtn} onPress={handleDiscard} activeOpacity={0.75}>
-                  <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
-                  <Text style={styles.discardBtnText}>Discard</Text>
-                </TouchableOpacity>
-
+            <Pressable
+              onPress={() => {
+                try {
+                  inputRef.current?.focus();
+                } catch {}
+                requestKeyboard();
+              }}
+              style={[styles.inputShell, isFocused && styles.inputShellFocused]}
+            >
+              <TextInput
+                ref={inputRef}
+                style={styles.input}
+                value={name}
+                onChangeText={setName}
+                onFocus={() => {
+                  setIsFocused(true);
+                  requestKeyboard();
+                }}
+                onBlur={() => setIsFocused(false)}
+                placeholder={defaultName}
+                placeholderTextColor="#52525B"
+                selectTextOnFocus
+                maxLength={MAX_TAKE_NAME_LENGTH}
+                returnKeyType="done"
+                blurOnSubmit
+                underlineColorAndroid="transparent"
+                onSubmitEditing={() => submit(isEdit ? 'overwrite' : 'new')}
+                showSoftInputOnFocus
+              />
+              {name.length > 0 ? (
                 <TouchableOpacity
-                  style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+                  style={styles.clearBtn}
+                  onPress={() => setName('')}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                >
+                  <X size={13} color="#8E8E93" />
+                </TouchableOpacity>
+              ) : null}
+            </Pressable>
+
+            <View style={styles.storageRow}>
+              <HardDrive size={11} color="#A1A1AA" />
+              <Text style={styles.storageText} numberOfLines={1}>
+                {isEdit
+                  ? `Editing "${editOfName}" in ${TAKES_FOLDER_NAME}/`
+                  : `Stored in ${TAKES_FOLDER_NAME}/ on this device`}
+              </Text>
+            </View>
+          </View>
+
+          {isEdit ? (
+            <>
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={[styles.secondaryBtn, !canSave && styles.saveBtnDisabled]}
                   onPress={() => submit('new')}
                   disabled={!canSave}
                   activeOpacity={0.8}
                 >
+                  <CopyPlus size={14} color="#FFFFFF" strokeWidth={2.2} />
+                  <Text style={styles.secondaryBtnText}>Save as new</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+                  onPress={() => submit('overwrite')}
+                  disabled={!canSave}
+                  activeOpacity={0.8}
+                >
                   <Check size={14} color="#000000" strokeWidth={3} />
-                  <Text style={styles.saveBtnText}>{isDirty ? 'Save' : 'Save take'}</Text>
+                  <Text style={styles.saveBtnText}>Save changes</Text>
                 </TouchableOpacity>
               </View>
-            )}
+              <TouchableOpacity style={styles.discardLink} onPress={handleDiscard} activeOpacity={0.7}>
+                <Trash2 size={12} color="#EF4444" strokeWidth={2.2} />
+                <Text style={styles.discardLinkText}>Discard changes</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <View style={styles.actionRow}>
+              <TouchableOpacity style={styles.discardBtn} onPress={handleDiscard} activeOpacity={0.75}>
+                <Trash2 size={14} color="#EF4444" strokeWidth={2.2} />
+                <Text style={styles.discardBtnText}>Discard</Text>
+              </TouchableOpacity>
 
-            <Text style={styles.hint}>
-              {isEdit
-                ? 'Save changes replaces the original take · Save as new keeps both'
-                : isKeyboardVisible
-                ? 'Tap Save or press done to keep this take'
-                : 'Discard permanently deletes the audio file'}
-            </Text>
-          </Pressable>
-        </ScrollView>
-      </View>
-    </Modal>
+              <TouchableOpacity
+                style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+                onPress={() => submit('new')}
+                disabled={!canSave}
+                activeOpacity={0.8}
+              >
+                <Check size={14} color="#000000" strokeWidth={3} />
+                <Text style={styles.saveBtnText}>{isDirty ? 'Save' : 'Save take'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <Text style={styles.hint}>
+            {isEdit
+              ? 'Save changes replaces the original take · Save as new keeps both'
+              : isKeyboardVisible
+              ? 'Tap Save or press done to keep this take'
+              : 'Discard permanently deletes the audio file'}
+          </Text>
+        </Pressable>
+      </ScrollView>
+    </Animated.View>
   );
 };
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
+  // In-window overlay: must be positioned for the zIndex to take effect, and
+  // sit above the floating transport (zIndex 9999).
+  root: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.86)',
     justifyContent: 'center',
     alignItems: 'center',
+    zIndex: 10050,
+    elevation: 101,
   },
   backdropPress: {
     ...StyleSheet.absoluteFill,

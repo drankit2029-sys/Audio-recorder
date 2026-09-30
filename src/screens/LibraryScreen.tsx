@@ -40,6 +40,7 @@ import {
 } from '../services/storage/recordingPaths';
 import { useResponsive } from '../hooks/useResponsive';
 import { useKeyboardViewport } from '../hooks/useKeyboardViewport';
+import { KeyboardHelper } from '../../modules/audio-hardware-router/src';
 import {
   AppToast,
   AppToastData,
@@ -148,6 +149,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const [toastData, setToastData] = useState<AppToastData | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const searchInputRef = useRef<TextInput | null>(null);
+  const searchFocusTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+
   const showToast = useCallback(
     (
       title: string,
@@ -168,8 +172,32 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+      searchFocusTimers.current.forEach(clearTimeout);
     };
   }, []);
+
+  // Opening the search bar mounts the input fresh; autoFocus alone is not
+  // reliable enough on Android 15+ edge-to-edge to bring up the IME, so the
+  // field is focused (and the native keyboard helper invoked) explicitly,
+  // with staggered retries to survive first-frame layout.
+  useEffect(() => {
+    if (!isSearching) return;
+    const attempt = (delay: number) => {
+      const id = setTimeout(() => {
+        try {
+          searchInputRef.current?.focus();
+        } catch {}
+        KeyboardHelper.show().catch(() => {});
+      }, delay);
+      searchFocusTimers.current.push(id);
+    };
+    attempt(120);
+    attempt(400);
+    return () => {
+      searchFocusTimers.current.forEach(clearTimeout);
+      searchFocusTimers.current = [];
+    };
+  }, [isSearching]);
 
   const activeRecording = recordings.find((r) => r.id === activeId) ?? null;
   const player = useAudioPlayer(activeRecording?.uri ?? null);
@@ -764,6 +792,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
                   </TouchableOpacity>
                   <Search size={16} color="#8E8E93" />
                   <TextInput
+                    ref={searchInputRef}
                     style={styles.searchInput}
                     value={searchQuery}
                     onChangeText={setSearchQuery}
@@ -775,6 +804,10 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
                     returnKeyType="search"
                     blurOnSubmit
                     underlineColorAndroid="transparent"
+                    showSoftInputOnFocus
+                    onFocus={() => {
+                      KeyboardHelper.show().catch(() => {});
+                    }}
                     onSubmitEditing={Keyboard.dismiss}
                   />
                   {searchQuery.length > 0 ? (

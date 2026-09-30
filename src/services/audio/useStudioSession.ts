@@ -105,6 +105,14 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const isAppending = useSharedValue(false);
   const anchorMs = useSharedValue(0);
   const anchorAt = useSharedValue(0);
+  /**
+   * True while a user-initiated mode switch (preview <-> record) is in
+   * flight. The native switch takes a few hundred ms (AudioTrack /
+   * AudioRecord setup); freezing the playhead clock across it is what makes
+   * the punch-in / punch-out transition read as one continuous motion
+   * instead of a jump backwards.
+   */
+  const isTransitioning = useSharedValue(false);
 
   const anchorRef = useRef({ ms: 0, at: 0 });
   const durationRef = useRef(0);
@@ -112,6 +120,13 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const hasEditsRef = useRef(false);
   const lastMeterAtRef = useRef(0);
   const scrubPauseRef = useRef(false);
+  /**
+   * The position the user last asked the engine to start from. Snapshots
+   * that merely echo that start (command return + native state event) must
+   * not re-anchor the clock, or the playhead snaps back to the start frame.
+   */
+  const lastActionRef = useRef<{ at: number; pos: number } | null>(null);
+  const switchGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setEngineState = useCallback((next: EngineState) => {
     engineStateRef.current = next;
@@ -131,7 +146,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   // ---- UI-thread clock -----------------------------------------------------
   const clock = useFrameCallback(() => {
     'worklet';
-    if (!isRunning.value || isScrubbing.value) return;
+    if (!isRunning.value || isScrubbing.value || isTransitioning.value) return;
     let t = anchorMs.value + (Date.now() - anchorAt.value);
     if (t < 0) t = 0;
     if (!isRecording.value && t > durationMs.value) t = durationMs.value;
@@ -167,10 +182,26 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       const running = next === 'RECORDING' || next === 'PREVIEWING';
       const appending = next === 'RECORDING' && !snap.overwriting;
 
-      anchorRef.current = { ms: snap.positionMs, at: now };
-      durationRef.current = snap.durationMs;
-      anchorMs.value = snap.positionMs;
-      anchorAt.value = now;
+      // A snapshot that merely echoes a user-initiated start (the command's
+      // return value, then the native state event for the same switch) keeps
+      // the playhead and anchor where the user saw them; the command path is
+      // authoritative. Without this the playhead snaps back to the exact
+      // start frame on every punch-in / punch-out.
+      const last = lastActionRef.current;
+      const preserveAnchor =
+        (reason === 'record' || reason === 'replace' || reason === 'play') &&
+        last !== null &&
+        now - last.at < 1500 &&
+        Math.abs(snap.positionMs - last.pos) < 250;
+
+      if (!preserveAnchor) {
+        anchorRef.current = { ms: snap.positionMs, at: now };
+        anchorMs.value = snap.positionMs;
+        anchorAt.value = now;
+      }
+      durationRef.current = preserveAnchor
+        ? Math.max(durationRef.current, snap.durationMs)
+        : snap.durationMs;
       isRunning.value = running;
       isRecording.value = next === 'RECORDING';
       isAppending.value = appending;
@@ -182,13 +213,22 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
         peakCountRef.current = 0;
         hasEditsRef.current = false;
         scrubPauseRef.current = false;
+        lastActionRef.current = null;
+        isTransitioning.value = false;
         if (sessionInfoRef.current) setSessionInfo(null);
       } else {
         const fromScrubPause = scrubPauseRef.current && next === 'PAUSED';
         if (fromScrubPause) scrubPauseRef.current = false;
-        const keepPlayhead = fromScrubPause || reason === 'caught_up' || isScrubbing.value;
+        const keepPlayhead =
+          fromScrubPause || reason === 'caught_up' || preserveAnchor || isScrubbing.value;
         if (!keepPlayhead) playheadMs.value = snap.positionMs;
-        if (reason !== 'caught_up') durationMs.value = snap.durationMs;
+        if (reason !== 'caught_up' && !preserveAnchor) {
+          durationMs.value = snap.durationMs;
+        } else if (snap.durationMs > durationMs.value) {
+          // While a Replace pass catches up and appends, the take keeps
+          // growing; never shrink the bar backwards.
+          durationMs.value = snap.durationMs;
+        }
       }
 
       if (next === 'RECORDING') hasEditsRef.current = true;
@@ -229,7 +269,10 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       durationRef.current = e.durationMs;
 
       const state = engineStateRef.current;
-      if (state === 'RECORDING' || state === 'PREVIEWING') {
+      // Meter events that arrive while a mode switch is in flight belong to
+      // the old (or newly starting) engine; let the command path own the
+      // re-anchor instead of pulling the frozen playhead around.
+      if (!isTransitioning.value && (state === 'RECORDING' || state === 'PREVIEWING')) {
         const now = Date.now();
         const a = anchorRef.current;
         const predicted = a.ms + (now - a.at);
@@ -388,37 +431,106 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     [applySnapshot, loadPeaks, setSessionInfo]
   );
 
+  /**
+   * Freeze the playhead clock before a mode switch. The caller must let
+   * record()/preview() finish (they release the freeze) or call endSwitch()
+   * if the switch is abandoned. A safety timer releases the freeze even if
+   * nothing else does.
+   */
+  const beginSwitch = useCallback(() => {
+    lastActionRef.current = { at: Date.now(), pos: playheadMs.value };
+    isTransitioning.value = true;
+    if (switchGuardRef.current) clearTimeout(switchGuardRef.current);
+    switchGuardRef.current = setTimeout(() => {
+      isTransitioning.value = false;
+    }, 5000);
+  }, [playheadMs]);
+
+  const endSwitch = useCallback(() => {
+    isTransitioning.value = false;
+    if (switchGuardRef.current) {
+      clearTimeout(switchGuardRef.current);
+      switchGuardRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (switchGuardRef.current) clearTimeout(switchGuardRef.current);
+    };
+  }, []);
+
   /** Negative position = append at the end. */
   const record = useCallback(
     async (positionMs: number, inputDeviceId: number) => {
-      // Preserve UI playhead for smooth punch-in: the native snapshot may be
-      // slightly off due to frame rounding, so we keep the visual position.
+      // The playhead the user saw is the truth for the transition; the
+      // native snapshot may differ by frame rounding or switch latency.
       const uiPos = positionMs < 0 ? durationRef.current : positionMs;
-      const snap = await StudioEngine.record({ positionMs, inputDeviceId });
-      hasEditsRef.current = true;
-      applySnapshot(snap, snap.overwriting ? 'replace' : 'record');
-      // Smooth the transition: keep the playhead where the user saw it.
       if (positionMs >= 0) {
-        const now = Date.now();
-        anchorRef.current = { ms: uiPos, at: now };
-        anchorMs.value = uiPos;
-        anchorAt.value = now;
-        playheadMs.value = uiPos;
+        lastActionRef.current = { at: Date.now(), pos: uiPos };
+      } else {
+        lastActionRef.current = null;
+      }
+      isTransitioning.value = true;
+      try {
+        const snap = await StudioEngine.record({ positionMs, inputDeviceId });
+        hasEditsRef.current = true;
+        applySnapshot(snap, snap.overwriting ? 'replace' : 'record');
+        // Re-anchor the clock at the position the user saw, so the take
+        // keeps moving from exactly there.
+        if (positionMs >= 0) {
+          const now = Date.now();
+          anchorRef.current = { ms: uiPos, at: now };
+          anchorMs.value = uiPos;
+          anchorAt.value = now;
+          playheadMs.value = uiPos;
+        }
+      } catch (e) {
+        try {
+          await resync();
+        } catch {}
+        throw e;
+      } finally {
+        endSwitch();
       }
     },
-    [applySnapshot, anchorAt, anchorMs, playheadMs]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [applySnapshot, anchorAt, anchorMs, playheadMs, endSwitch, resync]
   );
 
   const preview = useCallback(async (positionMs: number) => {
-    const uiPos = positionMs;
-    await StudioEngine.play(positionMs);
-    // Playback starts at the requested position; keep UI continuous.
-    const now = Date.now();
-    anchorRef.current = { ms: uiPos, at: now };
-    anchorMs.value = uiPos;
-    anchorAt.value = now;
-    playheadMs.value = uiPos;
-  }, [anchorAt, anchorMs, playheadMs]);
+    const dur = durationRef.current;
+    const uiPos = Math.max(0, Math.min(positionMs, dur));
+    lastActionRef.current = { at: Date.now(), pos: uiPos };
+    isTransitioning.value = true;
+    try {
+      await StudioEngine.play(positionMs);
+      // Flip the UI immediately instead of waiting for the native state
+      // event to round-trip; the event will echo this same snapshot.
+      applySnapshot(
+        {
+          hasSession: true,
+          mode: 'previewing',
+          positionMs: uiPos,
+          durationMs: dur,
+          overwriting: false,
+        },
+        'play'
+      );
+      const now = Date.now();
+      anchorRef.current = { ms: uiPos, at: now };
+      anchorMs.value = uiPos;
+      anchorAt.value = now;
+      playheadMs.value = uiPos;
+    } catch (e) {
+      try {
+        await resync();
+      } catch {}
+      throw e;
+    } finally {
+      endSwitch();
+    }
+  }, [applySnapshot, anchorAt, anchorMs, playheadMs, endSwitch, resync]);
 
   const pause = useCallback(async (): Promise<StudioSnapshot> => {
     const snap = await StudioEngine.pause();
@@ -500,6 +612,8 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     finalize,
     discard,
     resync,
+    beginSwitch,
+    endSwitch,
   };
 }
 

@@ -15,7 +15,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.EditText;
 
 import androidx.annotation.NonNull;
 
@@ -487,6 +489,37 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /** Deepest-first search for an EditText that currently has focus. */
+    private View findFocusedEditText(View root) {
+        if (root == null) return null;
+        try {
+            if (root instanceof EditText && root.isFocused()) return root;
+        } catch (Throwable ignored) {
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                View found = findFocusedEditText(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    /** First EditText in the hierarchy (input fields inside RN overlays). */
+    private View findFirstEditText(View root) {
+        if (root == null) return null;
+        if (root instanceof EditText) return root;
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                View found = findFirstEditText(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
     @ReactMethod
     public void showSoftKeyboard(final Promise promise) {
         try {
@@ -499,19 +532,50 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
                 @Override
                 public void run() {
                     try {
-                        View view = activity.getCurrentFocus();
-                        if (view == null) {
-                            view = activity.getWindow().getDecorView();
-                        }
-                        InputMethodManager imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        InputMethodManager imm =
+                                (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
                         if (imm == null) {
                             promise.resolve(false);
                             return;
                         }
-                        boolean result = imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+                        // getCurrentFocus() is frequently null or a non-editing
+                        // view under edge-to-edge Android 15+, so fall back to
+                        // walking the hierarchy for the real input field and
+                        // give it focus before asking the IME to show.
+                        View focused = activity.getCurrentFocus();
+                        View target = (focused instanceof EditText) ? focused : null;
+                        if (target == null) {
+                            target = findFocusedEditText(activity.getWindow().getDecorView());
+                        }
+                        if (target == null) {
+                            target = findFirstEditText(activity.getWindow().getDecorView());
+                        }
+                        if (target == null) {
+                            target = activity.getWindow().getDecorView();
+                        }
+                        if (target instanceof EditText) {
+                            try {
+                                target.requestFocus();
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        boolean result = false;
+                        try {
+                            result = imm.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
+                        } catch (Throwable ignored) {
+                        }
                         if (!result) {
-                            imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
-                            result = true;
+                            try {
+                                result = imm.showSoftInput(target, 0);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        if (!result) {
+                            try {
+                                imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+                                result = true;
+                            } catch (Throwable ignored) {
+                            }
                         }
                         promise.resolve(result);
                     } catch (Throwable t) {

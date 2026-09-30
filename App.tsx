@@ -467,6 +467,10 @@ function AudioRecorderApp() {
       : 'mic';
 
   // ---- transport animation --------------------------------------------------
+  // Derived early: the slide effect below needs it, and it is a pure function
+  // of state.
+  const transportHidden = isLibraryEditMode || isLibraryOverlayOpen;
+
   const slideProgress = useSharedValue(0);
   const redCircleOpacity = useSharedValue(1);
   const redCircleScale = useSharedValue(1);
@@ -476,13 +480,38 @@ function AudioRecorderApp() {
   const playOpacity = useSharedValue(0);
   const playScale = useSharedValue(0.7);
 
+  const slidePrimedRef = useRef(false);
+  const transportShownRef = useRef(!transportHidden);
+  const appMountedAtRef = useRef<number | null>(null);
+  if (appMountedAtRef.current === null) appMountedAtRef.current = Date.now();
+
   useEffect(() => {
-    slideProgress.value = withSpring(isSessionActive ? 1 : 0, {
-      damping: 24,
-      stiffness: 220,
-      mass: 0.8,
-    });
-  }, [isSessionActive, slideProgress]);
+    const target = isSessionActive ? 1 : 0;
+    // Jump straight to the final layout (no slide) when:
+    //  - the transport has not painted yet,
+    //  - it is being re-shown after the save/rename overlays hid it,
+    //  - we are still inside the bootstrap window, i.e. the session became
+    //    "active" because a live native take was re-attached on cold start.
+    // In those cases the slide reads as the record button drifting to the
+    // left on its own.
+    const jump =
+      !slidePrimedRef.current ||
+      transportShownRef.current !== !transportHidden ||
+      Date.now() - (appMountedAtRef.current ?? 0) < 1200;
+    slidePrimedRef.current = true;
+    transportShownRef.current = !transportHidden;
+    if (jump) {
+      slideProgress.value = target;
+    } else {
+      // Slightly overdamped (critical for these params ~= 30.5): the button
+      // must settle into its slot without overshooting past it.
+      slideProgress.value = withSpring(target, {
+        damping: 32,
+        stiffness: 260,
+        mass: 0.9,
+      });
+    }
+  }, [isSessionActive, transportHidden, slideProgress]);
 
   useEffect(() => {
     const ease = Easing.out(Easing.cubic);
@@ -765,7 +794,14 @@ function AudioRecorderApp() {
   // ---- transport ----------------------------------------------------------------
   /** Negative position appends at the end of the take. */
   const startCapture = async (positionMs: number) => {
-    if (!(await acquireCaptureResources())) return;
+    // Freeze the playhead before (not only during) the native switch:
+    // acquiring routing / wake-lock can take a few hundred ms, and the
+    // playhead must not keep extrapolating across that gap.
+    session.beginSwitch();
+    if (!(await acquireCaptureResources())) {
+      session.endSwitch();
+      return;
+    }
     await session.record(positionMs, selectedDeviceIdRef.current ?? -1);
   };
 
@@ -828,9 +864,11 @@ function AudioRecorderApp() {
 
   const handleToggleReplace = async () => {
     if (!replaceEnabled) return;
+    // Never flip the armed state while a punch-in/out is in flight, or the
+    // pill would desync from what the engine is actually doing.
+    if (isTransportBusyRef.current) return;
     const next = !replaceArmedRef.current;
     setReplaceArmed(next);
-    if (isTransportBusyRef.current) return;
     const state = engineStateRef.current;
     // Live punch in / out while the take is running.
     const punchIn = next && state === 'PREVIEWING';
@@ -1212,7 +1250,6 @@ function AudioRecorderApp() {
     : 'WAV';
 
   const isRecordingNow = engineState === 'RECORDING';
-  const transportHidden = isLibraryEditMode || isLibraryOverlayOpen;
   const waveformInteractive = engineState === 'PAUSED' || engineState === 'PREVIEWING';
 
   return (
@@ -1733,8 +1770,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // Both buttons share one explicit slot (bezel is 220x80, button 76) so
+  // their resting position never depends on layout-engine static positions.
   mainBtnWrapper: {
     position: 'absolute',
+    top: 2,
+    left: 72,
     width: 76,
     height: 76,
     alignItems: 'center',
@@ -1743,6 +1784,8 @@ const styles = StyleSheet.create({
   },
   stopBtnWrapper: {
     position: 'absolute',
+    top: 2,
+    left: 72,
     width: 76,
     height: 76,
     alignItems: 'center',
