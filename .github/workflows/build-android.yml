@@ -24,9 +24,12 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
-      - name: Expo doctor
-        run: npx expo-doctor
-        continue-on-error: true
+      # Advisory only: expo-doctor flags @notifee/react-native as "unmaintained"
+      # and the local module as having no directory metadata, neither of which is
+      # actionable. `|| true` keeps the report in the log without painting a
+      # failing step (and a scary ##[error] annotation) over a healthy build.
+      - name: Expo doctor (advisory)
+        run: npx expo-doctor || true
 
       - name: Prebuild Native Project
         run: npx expo prebuild --platform android --clean

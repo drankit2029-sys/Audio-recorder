@@ -37,6 +37,8 @@ import java.nio.ByteOrder;
  */
 public class WavRecorderModule extends ReactContextBaseJavaModule {
 
+    private static final String TAG = "WavRecorder";
+
     private static final String EVENT_METERING = "wavRecorderMetering";
     private static final String EVENT_ERROR = "wavRecorderError";
 
@@ -707,7 +709,8 @@ public class WavRecorderModule extends ReactContextBaseJavaModule {
                 return;
             }
 
-            try (java.io.FileChannel channel = new java.io.FileOutputStream(file, true).getChannel()) {
+            try (java.nio.channels.FileChannel channel =
+                         new FileOutputStream(file, true).getChannel()) {
                 channel.truncate(44L + target);
             }
             writeLe32(file, 4, 36L + target);
