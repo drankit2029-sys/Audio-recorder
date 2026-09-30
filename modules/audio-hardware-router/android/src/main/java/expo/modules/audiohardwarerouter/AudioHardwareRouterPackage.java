@@ -15,6 +15,7 @@ public class AudioHardwareRouterPackage implements ReactPackage {
         List<NativeModule> modules = new ArrayList<>();
         modules.add(new AudioHardwareRouterModule(reactContext));
         modules.add(new WavRecorderModule(reactContext));
+        modules.add(new StudioEngineModule(reactContext));
         return modules;
     }
 

@@ -1,131 +1,119 @@
 // src/components/studio/StudioTimer.tsx
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
-import { EngineState } from '../../services/audio/useAudioRecording';
+import React, { useMemo, useState } from 'react';
+import { View, StyleSheet, LayoutChangeEvent, Platform } from 'react-native';
+import { Canvas, Text as SkiaText, matchFont, Group } from '@shopify/react-native-skia';
+import { SharedValue, useDerivedValue } from 'react-native-reanimated';
 
 interface StudioTimerProps {
-  telemetry: React.MutableRefObject<{
-    durationMs: number;
-    startTime: number;
-    accumulatedMs: number;
-    isPaused: boolean;
-  }>;
-  engineState: EngineState;
+  /** The studio playhead (UI thread). */
+  playheadMs: SharedValue<number>;
   isTablet?: boolean;
   /** Short screens / split-screen: shrink the type so the transport still fits. */
   compact?: boolean;
 }
 
-/**
- * The timer is a *display*, not the clock.
- *
- * The duration is owned by useAudioRecording, which ticks on a timer instead of
- * requestAnimationFrame: rAF is paused whenever the app is backgrounded or the
- * UI is occluded, which used to freeze the on-screen readout AND the
- * notification timecode during a background take.
- */
-const REDRAW_INTERVAL_MS = 50;
+const HOUR_MS = 3600000;
+const GAP = 2;
 
+const pad2 = (n: number): string => {
+  'worklet';
+  return n < 10 ? `0${n}` : `${n}`;
+};
+
+/**
+ * The timer reads the studio playhead on the UI thread and is drawn with Skia,
+ * so the hundredths redraw every frame (60 fps) without React renders, and it
+ * follows the waveform while it is being scrolled.
+ */
 export const StudioTimer: React.FC<StudioTimerProps> = ({
-  telemetry,
-  engineState,
+  playheadMs,
   isTablet = false,
   compact = false,
 }) => {
-  const [displayMs, setDisplayMs] = useState(telemetry.current.durationMs || 0);
+  const mainSize = isTablet ? 64 : compact ? 34 : 44;
+  const fracSize = isTablet ? 24 : compact ? 14 : 17;
+  const [width, setWidth] = useState(0);
 
-  useEffect(() => {
-    let intervalId: ReturnType<typeof setInterval> | null = null;
-
-    const sync = () => setDisplayMs(telemetry.current.durationMs);
-
-    if (engineState === 'RECORDING' && !telemetry.current.isPaused) {
-      sync();
-      // 20 fps is plenty for a hundredths readout and costs a fifth of the
-      // renders the old per-frame loop did. (M3)
-      intervalId = setInterval(sync, REDRAW_INTERVAL_MS);
-    } else if (engineState === 'PAUSED') {
-      setDisplayMs(telemetry.current.durationMs);
-    } else if (engineState === 'IDLE' || engineState === 'STOPPED') {
-      setDisplayMs(0);
+  const fonts = useMemo(() => {
+    try {
+      const family = Platform.select({ ios: 'Helvetica Neue', default: 'sans-serif' });
+      const main = matchFont({ fontFamily: family, fontSize: mainSize, fontWeight: '200', fontStyle: 'normal' });
+      const frac = matchFont({ fontFamily: family, fontSize: fracSize, fontWeight: '300', fontStyle: 'normal' });
+      const wMain = main.measureText('00:00').width;
+      const wMainHours = main.measureText('00:00:00').width;
+      const wFrac = frac.measureText('.00').width;
+      const metrics = main.getMetrics();
+      return { main, frac, wMain, wMainHours, wFrac, ascent: metrics.ascent, descent: metrics.descent };
+    } catch {
+      return null;
     }
+  }, [mainSize, fracSize]);
 
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
-  }, [engineState, telemetry]);
+  const canvasHeight = Math.ceil(mainSize * 1.22);
 
+  const mainText = useDerivedValue(() => {
+    const ms = Math.max(0, playheadMs.value);
+    const total = Math.floor(ms / 1000);
+    const hrs = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return hrs > 0 ? `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}` : `${pad2(mins)}:${pad2(secs)}`;
+  });
 
-  const totalSeconds = Math.floor(displayMs / 1000);
-  const hrs = Math.floor(totalSeconds / 3600);
-  const mins = Math.floor((totalSeconds % 3600) / 60);
-  const secs = totalSeconds % 60;
-  const centis = Math.floor((displayMs % 1000) / 10);
+  const fracText = useDerivedValue(() => {
+    const ms = Math.max(0, playheadMs.value);
+    return `.${pad2(Math.floor((ms % 1000) / 10))}`;
+  });
 
-  const mainTime = hrs > 0
-    ? `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
-    : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  const wMain = fonts?.wMain ?? 0;
+  const wMainHours = fonts?.wMainHours ?? 0;
+  const wFrac = fonts?.wFrac ?? 0;
 
-  const frameTime = '.' + centis.toString().padStart(2, '0');
+  const mainX = useDerivedValue(() => {
+    const mw = playheadMs.value >= HOUR_MS ? wMainHours : wMain;
+    return (width - (mw + GAP + wFrac)) / 2;
+  });
+
+  const fracX = useDerivedValue(() => {
+    const mw = playheadMs.value >= HOUR_MS ? wMainHours : wMain;
+    return (width - (mw + GAP + wFrac)) / 2 + mw + GAP;
+  });
+
+  const onLayout = (e: LayoutChangeEvent) => {
+    const w = Math.round(e.nativeEvent.layout.width);
+    if (w > 0 && w !== width) setWidth(w);
+  };
+
+  // Shrink to fit narrow windows (the widest reading has hours).
+  const widest = wMainHours + GAP + wFrac;
+  const scale = width > 0 && widest > width ? width / widest : 1;
+  const baseline = fonts
+    ? (canvasHeight - (fonts.descent - fonts.ascent)) / 2 - fonts.ascent
+    : canvasHeight * 0.8;
 
   return (
-    <View style={styles.container}>
-      <Text
-        style={[
-          styles.timerMain,
-          isTablet ? styles.timerMainTablet : null,
-          compact ? styles.timerMainCompact : null,
-        ]}
-        adjustsFontSizeToFit
-        numberOfLines={1}
-        maxFontSizeMultiplier={1.2}
-      >{mainTime}</Text>
-      <Text
-        style={[
-          styles.timerFrames,
-          isTablet ? styles.timerFramesTablet : null,
-          compact ? styles.timerFramesCompact : null,
-        ]}
-        maxFontSizeMultiplier={1.2}
-      >{frameTime}</Text>
+    <View style={[styles.container, { height: canvasHeight }]} onLayout={onLayout}>
+      {fonts && width > 0 ? (
+        <Canvas style={{ width, height: canvasHeight }}>
+          <Group
+            transform={[{ scale }]}
+            origin={{ x: width / 2, y: canvasHeight / 2 }}
+          >
+            <SkiaText x={mainX} y={baseline} text={mainText} font={fonts.main} color="#FFFFFF" />
+            <SkiaText x={fracX} y={baseline} text={fracText} font={fonts.frac} color="#71717A" />
+          </Group>
+        </Canvas>
+      ) : null}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    justifyContent: 'center',
+    width: '100%',
     marginTop: 4,
     marginBottom: 2,
-    flexShrink: 1,
-  },
-  timerMain: {
-    fontSize: 44,
-    fontWeight: '200',
-    color: '#FFFFFF',
-    fontVariant: ['tabular-nums'],
-    letterSpacing: -1.0,
-  },
-  timerMainTablet: {
-    fontSize: 64,
-  },
-  timerMainCompact: {
-    fontSize: 34,
-    letterSpacing: -0.5,
-  },
-  timerFrames: {
-    fontSize: 17,
-    fontWeight: '300',
-    color: '#71717A',
-    fontVariant: ['tabular-nums'],
-    marginLeft: 2,
-  },
-  timerFramesTablet: {
-    fontSize: 24,
-  },
-  timerFramesCompact: {
-    fontSize: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

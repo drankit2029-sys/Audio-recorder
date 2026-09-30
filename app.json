@@ -18,14 +18,13 @@
       ]
     },
     "plugins": [
-      "./plugins/withNotifeeForegroundService",
       "./plugins/withBluetoothMaxSdk",
       "./plugins/withAndroidLargeScreenOptOut",
       [
         "expo-audio",
         {
           "recordAudioAndroid": true,
-          "enableBackgroundRecording": true,
+          "enableBackgroundRecording": false,
           "enableBackgroundPlayback": false
         }
       ],

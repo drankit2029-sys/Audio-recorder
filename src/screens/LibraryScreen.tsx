@@ -55,6 +55,10 @@ interface LibraryScreenProps {
   recordings: SavedRecording[];
   onLibraryUpdate: (updated: SavedRecording[]) => void;
   onEditModeChange: (isEdit: boolean) => void;
+  /** Opens a take in the studio for scrubbing / replacing / re-recording. */
+  onEditRecording: (item: SavedRecording) => void;
+  /** An in-window dialog (rename) covers the screen: hide the floating transport. */
+  onOverlayChange?: (visible: boolean) => void;
 }
 
 type ExportTarget =
@@ -86,6 +90,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   recordings,
   onLibraryUpdate,
   onEditModeChange,
+  onEditRecording,
+  onOverlayChange,
 }) => {
   const { isTablet, maxContentWidth, insets } = useResponsive();
   const { offset: keyboardOffset, isVisible: keyboardVisible } = useKeyboardViewport();
@@ -386,6 +392,26 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     setRenameModalVisible(true);
   }, []);
 
+  useEffect(() => {
+    onOverlayChange?.(renameModalVisible);
+  }, [renameModalVisible, onOverlayChange]);
+
+  useEffect(() => {
+    return () => onOverlayChange?.(false);
+  }, [onOverlayChange]);
+
+  const handleEditRecording = useCallback(
+    (item: SavedRecording) => {
+      // Release the preview player before the studio opens the file.
+      try {
+        playerRef.current?.pause();
+      } catch {}
+      setIsPlaying(false);
+      onEditRecording(item);
+    },
+    [onEditRecording]
+  );
+
   const handleSaveRename = useCallback(
     (newName: string) => {
       const target = recordingToRename;
@@ -627,6 +653,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           onPlayToggle={handlePlayToggle}
           onSeek={handleSeek}
           onOpenRename={handleOpenRename}
+          onEdit={handleEditRecording}
           onExport={handleOpenExportSingle}
           onDelete={handleDeleteSingle}
           onLongPress={handleCardLongPress}
@@ -641,6 +668,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       handleDeleteSingle,
       handleOpenExportSingle,
       handleOpenRename,
+      handleEditRecording,
       handlePlayToggle,
       handleSeek,
       handleToggleExpand,

@@ -23,6 +23,7 @@ import {
   Pencil,
   Share2,
   Trash2,
+  AudioLines,
 } from 'lucide-react-native';
 import { SavedRecording } from '../../services/storage/recordingLibrary';
 
@@ -44,6 +45,8 @@ interface RecordingCardProps {
   onPlayToggle: (item: SavedRecording) => void;
   onSeek: (item: SavedRecording, seconds: number) => void;
   onOpenRename: (item: SavedRecording) => void;
+  /** Opens the take in the studio (scrub, replace, re-record). */
+  onEdit: (item: SavedRecording) => void;
   onExport: (item: SavedRecording) => void;
   onDelete: (item: SavedRecording) => void;
   onLongPress?: (id: string) => void;
@@ -63,6 +66,7 @@ export const RecordingCard = memo<RecordingCardProps>(({
   onPlayToggle,
   onSeek,
   onOpenRename,
+  onEdit,
   onExport,
   onDelete,
   onLongPress,
@@ -375,12 +379,22 @@ export const RecordingCard = memo<RecordingCardProps>(({
 
           <View style={styles.actionsRow}>
             <TouchableOpacity
+              style={[styles.actionBtn, styles.editBtn]}
+              onPress={() => onEdit(item)}
+              activeOpacity={0.75}
+              accessibilityLabel={`Edit ${item.name} in the studio`}
+            >
+              <AudioLines size={12} color="#000000" strokeWidth={2.4} />
+              <Text style={styles.editBtnText} numberOfLines={1}>EDIT</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={styles.actionBtn}
               onPress={() => onOpenRename(item)}
               activeOpacity={0.7}
             >
-              <Pencil size={13} color="#FFFFFF" />
-              <Text style={styles.actionBtnText}>RENAME</Text>
+              <Pencil size={12} color="#FFFFFF" />
+              <Text style={styles.actionBtnText} numberOfLines={1}>RENAME</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -388,8 +402,8 @@ export const RecordingCard = memo<RecordingCardProps>(({
               onPress={() => onExport(item)}
               activeOpacity={0.7}
             >
-              <Share2 size={13} color="#FFFFFF" />
-              <Text style={styles.actionBtnText}>EXPORT</Text>
+              <Share2 size={12} color="#FFFFFF" />
+              <Text style={styles.actionBtnText} numberOfLines={1}>EXPORT</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -397,8 +411,8 @@ export const RecordingCard = memo<RecordingCardProps>(({
               onPress={() => onDelete(item)}
               activeOpacity={0.7}
             >
-              <Trash2 size={13} color="#FF453A" />
-              <Text style={styles.deleteBtnText}>DELETE</Text>
+              <Trash2 size={12} color="#FF453A" />
+              <Text style={styles.deleteBtnText} numberOfLines={1}>DELETE</Text>
             </TouchableOpacity>
           </View>
         </Animated.View>
@@ -529,38 +543,53 @@ const styles = StyleSheet.create({
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
     marginTop: 14,
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: '#202022',
   },
   actionBtn: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'center',
+    gap: 4,
     backgroundColor: '#1E1E22',
     borderWidth: 1,
     borderColor: '#2A2A2E',
-    paddingHorizontal: 12,
+    paddingHorizontal: 4,
     paddingVertical: 8,
     borderRadius: 8,
   },
   actionBtnText: {
+    flexShrink: 1,
     color: '#FFFFFF',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
+  },
+  editBtn: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#FFFFFF',
+  },
+  editBtnText: {
+    flexShrink: 1,
+    color: '#000000',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   deleteBtn: {
-    marginLeft: 'auto',
     backgroundColor: '#1E1212',
     borderColor: '#301818',
   },
   deleteBtnText: {
+    flexShrink: 1,
     color: '#FF453A',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.5,
+    letterSpacing: 0.3,
   },
 });

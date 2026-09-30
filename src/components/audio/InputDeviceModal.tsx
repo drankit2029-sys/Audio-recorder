@@ -18,7 +18,7 @@ import {
 } from 'lucide-react-native';
 
 import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
-import { EngineState } from '../../services/audio/useAudioRecording';
+import { EngineState, isSessionState } from '../../services/audio/useStudioSession';
 import { useResponsive } from '../../hooks/useResponsive';
 
 interface InputDeviceModalProps {
@@ -42,7 +42,7 @@ export const InputDeviceModal: React.FC<InputDeviceModalProps> = ({
   activeDevice = null,
 }) => {
   const { isTablet } = useResponsive();
-  const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
+  const isLocked = isSessionState(engineState);
 
   const getTypeMeta = (type: AudioInputDevice['type']) => {
     switch (type) {

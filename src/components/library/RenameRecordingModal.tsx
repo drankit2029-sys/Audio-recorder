@@ -1,7 +1,6 @@
 // src/components/library/RenameRecordingModal.tsx
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Modal,
   View,
   Text,
   TextInput,
@@ -11,11 +10,12 @@ import {
   TouchableWithoutFeedback,
   Keyboard,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { Check, X, Pencil } from 'lucide-react-native';
 
 import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 import { useResponsive } from '../../hooks/useResponsive';
+import { useAutoFocusInput, useBackPress } from '../../hooks/useOverlayInput';
 import {
   MAX_TAKE_NAME_LENGTH,
   sanitizeFileName,
@@ -37,32 +37,25 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   onSave,
   onClose,
 }) => {
-  const insets = useSafeAreaInsets();
   const { isTablet } = useResponsive();
   const { offset: keyboardOffset, isVisible: isKeyboardVisible } = useKeyboardViewport();
 
   const [name, setName] = useState(initialName);
   const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<TextInput | null>(null);
-  const focusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
-
-    if (!visible) {
-      setIsFocused(false);
-      return;
-    }
-
-    setName(initialName);
-    focusTimerRef.current = setTimeout(() => {
-      inputRef.current?.focus();
-    }, 240);
-
-    return () => {
-      if (focusTimerRef.current) clearTimeout(focusTimerRef.current);
-    };
+    if (visible) setName(initialName);
+    else setIsFocused(false);
   }, [visible, initialName]);
+
+  // In-window dialog (not an Android dialog window): the field takes focus
+  // and the keyboard opens reliably. See useAutoFocusInput for the details.
+  useAutoFocusInput(visible, inputRef);
+  useBackPress(visible, () => {
+    Keyboard.dismiss();
+    onClose();
+  });
 
   const trimmed = name.trim();
   const canSave = trimmed.length > 0;
@@ -83,14 +76,10 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
     onClose();
   };
 
+  if (!visible) return null;
+
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      statusBarTranslucent
-      onRequestClose={handleCancel}
-    >
+    <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(140)} style={styles.overlay}>
       <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
         <View style={styles.backdrop}>
           <ScrollView
@@ -98,12 +87,13 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
             contentContainerStyle={[
               styles.scrollContent,
               {
-                paddingTop: insets.top + 16,
-                paddingBottom: insets.bottom + keyboardOffset + 16,
+                // Rendered inside the app's SafeAreaView, which already
+                // clears the system bars; only the keyboard is added here.
+                paddingTop: 16,
+                paddingBottom: keyboardOffset + 16,
               },
             ]}
             keyboardShouldPersistTaps="handled"
-            keyboardDismissMode="on-drag"
             showsVerticalScrollIndicator={false}
             bounces={false}
           >
@@ -137,6 +127,7 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
                       onBlur={() => setIsFocused(false)}
                       placeholder="Take title..."
                       placeholderTextColor="#52525B"
+                      autoFocus
                       selectTextOnFocus
                       maxLength={MAX_TAKE_NAME_LENGTH}
                       returnKeyType="done"
@@ -192,11 +183,16 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
           </ScrollView>
         </View>
       </TouchableWithoutFeedback>
-    </Modal>
+    </Animated.View>
   );
 };
 
 const styles = StyleSheet.create({
+  overlay: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 25000,
+    elevation: 130,
+  },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',

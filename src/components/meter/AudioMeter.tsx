@@ -15,7 +15,7 @@ import {
   Easing,
   cancelAnimation,
 } from 'react-native-reanimated';
-import { EngineState } from '../../services/audio/useAudioRecording';
+import { EngineState } from '../../services/audio/useStudioSession';
 
 interface AudioMeterProps {
   telemetry: React.MutableRefObject<{ meteringDb: number }>;
@@ -83,7 +83,7 @@ export const AudioMeter: React.FC<AudioMeterProps> = ({ telemetry, engineState, 
         lastDb = rawDb;
         const targetNorm = dbToNorm(rawDb);
 
-        // Immediate assignment: ballistics are computed smoothly in useAudioRecording
+        // Immediate assignment: ballistics are computed smoothly in useStudioSession
         meterLevel.value = targetNorm;
 
         if (targetNorm >= peakHoldLevel.value) {

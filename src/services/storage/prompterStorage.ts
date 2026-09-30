@@ -9,6 +9,18 @@ const SCRIPT_KEY = 'prompter_script_text';
 const SPEED_KEY = 'prompter_scroll_speed_px';
 const FONT_SIZE_KEY = 'prompter_font_size';
 const MIRROR_KEY = 'prompter_is_mirrored';
+const LINE_SPACING_KEY = 'prompter_line_spacing';
+
+export const MIN_LINE_SPACING = 1.0;
+export const MAX_LINE_SPACING = 4.0;
+export const DEFAULT_LINE_SPACING = 2.2;
+
+/** Line spacing is a multiple of the font size, kept to one decimal. */
+export const clampLineSpacing = (value: number): number => {
+  if (!Number.isFinite(value)) return DEFAULT_LINE_SPACING;
+  const rounded = Math.round(value * 10) / 10;
+  return Math.max(MIN_LINE_SPACING, Math.min(MAX_LINE_SPACING, rounded));
+};
 
 const DEFAULT_SCRIPT = `Welcome to the studio. This is your synchronized teleprompter.
 
@@ -55,5 +67,16 @@ export const PrompterStorage = {
 
   setIsMirrored(mirrored: boolean): void {
     prompterStorage.set(MIRROR_KEY, mirrored);
+  },
+
+  getLineSpacing(): number {
+    const val = prompterStorage.getNumber(LINE_SPACING_KEY);
+    return typeof val === 'number' && Number.isFinite(val)
+      ? clampLineSpacing(val)
+      : DEFAULT_LINE_SPACING;
+  },
+
+  setLineSpacing(spacing: number): void {
+    prompterStorage.set(LINE_SPACING_KEY, clampLineSpacing(spacing));
   },
 };

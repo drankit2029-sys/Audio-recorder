@@ -302,3 +302,223 @@ export function onWavError(
     listener(event ?? { message: 'Unknown WAV capture error' });
   }) ?? null;
 }
+
+// ---------------------------------------------------------------------------
+// StudioEngine: PCM session (record / replace / preview / encode)
+// ---------------------------------------------------------------------------
+
+const NativeStudio = NativeModules.StudioEngine;
+
+export type StudioMode = 'idle' | 'paused' | 'recording' | 'previewing';
+
+export type StudioOutputFormat =
+  | 'wav'
+  | 'aac'
+  | 'he_aac'
+  | 'aac_eld'
+  | 'aac_adts'
+  | 'amr_nb'
+  | 'amr_wb';
+
+export interface StudioSnapshot {
+  hasSession: boolean;
+  mode: StudioMode;
+  positionMs: number;
+  durationMs: number;
+  /** True while a Replace pass is writing over existing audio. */
+  overwriting: boolean;
+}
+
+export interface StudioSessionInfo {
+  sessionId: string;
+  /** Absolute path of the working WAV (kept in the crash journal). */
+  sessionPath: string;
+  sampleRate: number;
+  channels: number;
+  floatPcm: boolean;
+  durationMs: number;
+  dataBytes: number;
+  peakCount: number;
+  peakBucketMs: number;
+  sourceMime?: string;
+  sourceBitRate?: number;
+}
+
+export interface StudioStatus
+  extends StudioSnapshot,
+    Partial<Omit<StudioSessionInfo, 'durationMs'>> {
+  exporting: boolean;
+  opening: boolean;
+  foregroundService: boolean;
+  hasEdits: boolean;
+  badge: string;
+}
+
+export interface StudioStateEvent extends StudioSnapshot {
+  reason: string;
+}
+
+export interface StudioMeterEvent {
+  db: number;
+  positionMs: number;
+  durationMs: number;
+  overwriting: boolean;
+  recording: boolean;
+  /** Index of the first 20 ms waveform bucket in `peaks`. */
+  peakStart: number;
+  /** Bucket values 0-255 that changed since the previous event. */
+  peaks: number[];
+}
+
+export interface StudioProgressEvent {
+  phase: 'open' | 'save';
+  progress: number;
+}
+
+export interface StudioErrorEvent {
+  code: string;
+  message: string;
+}
+
+export interface StudioNotificationEvent {
+  action: 'resume' | 'stop' | 'pause';
+}
+
+export interface StudioFinalizeOptions {
+  targetPath: string;
+  format: StudioOutputFormat;
+  bitRate?: number;
+  sampleRate?: number;
+  channels?: number;
+}
+
+export interface StudioFinalizeResult {
+  path: string;
+  sizeBytes: number;
+  durationMs: number;
+}
+
+export interface StudioEventMap {
+  studioState: StudioStateEvent;
+  studioMeter: StudioMeterEvent;
+  studioProgress: StudioProgressEvent;
+  studioError: StudioErrorEvent;
+  studioNotificationAction: StudioNotificationEvent;
+}
+
+const StudioEmitter = NativeStudio ? new NativeEventEmitter(NativeStudio) : null;
+
+function requireStudio() {
+  if (!NativeStudio) {
+    throw new Error(
+      'The StudioEngine native module is not linked. Rebuild the Android app after updating the module.'
+    );
+  }
+  return NativeStudio;
+}
+
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const B64_LOOKUP: number[] = (() => {
+  const table = new Array<number>(256).fill(-1);
+  for (let i = 0; i < B64_ALPHABET.length; i += 1) {
+    table[B64_ALPHABET.charCodeAt(i)] = i;
+  }
+  return table;
+})();
+
+/** Base64 -> byte values. Hand-rolled so it does not depend on atob/Buffer. */
+export function decodeBase64Bytes(b64: string): number[] {
+  const out: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (let i = 0; i < b64.length; i += 1) {
+    const v = B64_LOOKUP[b64.charCodeAt(i) & 0xff];
+    if (v === undefined || v < 0) continue;
+    buffer = ((buffer << 6) | v) & 0xffffff;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((buffer >> bits) & 0xff);
+    }
+  }
+  return out;
+}
+
+export const StudioEngine = {
+  isAvailable(): boolean {
+    return !!NativeStudio;
+  },
+
+  createSession(options: {
+    sampleRate: number;
+    channels: number;
+    bitDepth: 16 | 32;
+    badge: string;
+  }): Promise<StudioSessionInfo> {
+    return requireStudio().createSession(options);
+  },
+
+  /** `edit` copies/decodes a take; `recover` re-opens a working file in place. */
+  openSession(options: {
+    sourcePath: string;
+    mode: 'edit' | 'recover';
+    badge: string;
+  }): Promise<StudioSessionInfo> {
+    return requireStudio().openSession(options);
+  },
+
+  /** Negative `positionMs` appends at the end of the take. */
+  record(options: { positionMs: number; inputDeviceId: number }): Promise<StudioSnapshot> {
+    return requireStudio().record(options);
+  },
+
+  play(positionMs: number): Promise<void> {
+    return requireStudio().play({ positionMs });
+  },
+
+  pause(): Promise<StudioSnapshot> {
+    return requireStudio().pause();
+  },
+
+  seek(positionMs: number): Promise<void> {
+    return requireStudio().seek({ positionMs });
+  },
+
+  async getStatus(): Promise<StudioStatus | null> {
+    if (!NativeStudio) return null;
+    try {
+      return (await NativeStudio.getStatus()) as StudioStatus;
+    } catch (e) {
+      console.warn('[StudioEngine] getStatus failed:', e);
+      return null;
+    }
+  },
+
+  async getPeaks(start = 0, count = -1): Promise<number[]> {
+    const b64 = (await requireStudio().getPeaks({ start, count })) as string;
+    return decodeBase64Bytes(b64 ?? '');
+  },
+
+  finalize(options: StudioFinalizeOptions): Promise<StudioFinalizeResult> {
+    return requireStudio().finalizeSession(options);
+  },
+
+  discard(): Promise<void> {
+    return requireStudio().discardSession();
+  },
+
+  setBadge(badge: string): void {
+    try {
+      NativeStudio?.setBadge(badge);
+    } catch {
+      /* noop */
+    }
+  },
+
+  addListener<K extends keyof StudioEventMap>(
+    event: K,
+    listener: (payload: StudioEventMap[K]) => void
+  ): EmitterSubscription | null {
+    return StudioEmitter?.addListener(event, listener as (payload: any) => void) ?? null;
+  },
+};

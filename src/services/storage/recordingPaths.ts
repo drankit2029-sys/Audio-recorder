@@ -255,6 +255,9 @@ export async function renameTakeFile(
   if (!stem) return null;
 
   const folder = getTakesFolderUri();
+  // Already named correctly: the collision check below would otherwise find
+  // the file itself and rename it to "Name (2)".
+  if (`${folder}${stem}${ext}` === uri) return uri;
   const target = await uniqueTarget(folder, stem, ext);
   if (target === uri) return uri;
 

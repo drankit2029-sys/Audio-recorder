@@ -35,6 +35,29 @@ export interface ActiveSessionRecord {
 }
 
 const ACTIVE_SESSION_KEY = 'active_recording_session';
+const STUDIO_SESSION_KEY = 'studio_active_session_v2';
+
+/**
+ * Crash journal for a studio session. The working WAV is written by the
+ * native engine, so recovering only needs its path and how to deliver it.
+ */
+export interface StudioJournalRecord {
+  version: 2;
+  sessionId: string;
+  /** Absolute path of the working WAV. */
+  sessionPath: string;
+  /** Preset used for new takes (ignored for edits). */
+  presetKey: string;
+  badge: string;
+  sampleRate: number;
+  channels: number;
+  floatPcm: boolean;
+  /** Set when the session edits a library take. */
+  editOf?: { id: string; name: string; uri: string } | null;
+  startedAt: number;
+  lastHeartbeatTimestamp: number;
+  durationMs: number;
+}
 
 /** Journals written by earlier builds used `byteOffsetEstimate` for the duration. */
 interface LegacySessionRecord extends Omit<ActiveSessionRecord, 'durationMs' | 'dataBytes'> {
@@ -131,5 +154,49 @@ export const SessionJournal = {
 
   clearSession(): void {
     sessionStorage.remove(ACTIVE_SESSION_KEY);
+  },
+
+  // ---- studio sessions (v2) ----------------------------------------------
+
+  startStudioSession(
+    record: Omit<StudioJournalRecord, 'version' | 'lastHeartbeatTimestamp' | 'durationMs'> & {
+      durationMs?: number;
+    }
+  ): void {
+    const full: StudioJournalRecord = {
+      ...record,
+      version: 2,
+      durationMs: record.durationMs ?? 0,
+      lastHeartbeatTimestamp: Date.now(),
+    };
+    sessionStorage.set(STUDIO_SESSION_KEY, JSON.stringify(full));
+    // A studio session supersedes anything left by the old recorder.
+    sessionStorage.remove(ACTIVE_SESSION_KEY);
+  },
+
+  updateStudioHeartbeat(durationMs: number): void {
+    const raw = sessionStorage.getString(STUDIO_SESSION_KEY);
+    if (!raw) return;
+    try {
+      const record = JSON.parse(raw) as StudioJournalRecord;
+      record.durationMs = durationMs;
+      record.lastHeartbeatTimestamp = Date.now();
+      sessionStorage.set(STUDIO_SESSION_KEY, JSON.stringify(record));
+    } catch {}
+  },
+
+  getStudioSession(): StudioJournalRecord | null {
+    try {
+      const raw = sessionStorage.getString(STUDIO_SESSION_KEY);
+      if (!raw) return null;
+      const record = JSON.parse(raw) as StudioJournalRecord;
+      return record && record.version === 2 && record.sessionPath ? record : null;
+    } catch {
+      return null;
+    }
+  },
+
+  clearStudioSession(): void {
+    sessionStorage.remove(STUDIO_SESSION_KEY);
   },
 };

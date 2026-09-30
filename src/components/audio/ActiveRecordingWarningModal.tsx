@@ -14,12 +14,18 @@ interface ActiveRecordingWarningModalProps {
   visible: boolean;
   onClose: () => void;
   onStopAndExit: () => void;
+  title?: string;
+  description?: string;
+  keepLabel?: string;
 }
 
 export const ActiveRecordingWarningModal: React.FC<ActiveRecordingWarningModalProps> = ({
   visible,
   onClose,
   onStopAndExit,
+  title = 'Recording in Progress',
+  description = 'Audio capture is currently active. Please stop and finalize your take before returning to the library.',
+  keepLabel = 'KEEP RECORDING',
 }) => {
   const { isTablet } = useResponsive();
 
@@ -38,10 +44,8 @@ export const ActiveRecordingWarningModal: React.FC<ActiveRecordingWarningModalPr
           </View>
 
           {/* Heading & Notice */}
-          <Text style={styles.title}>Recording in Progress</Text>
-          <Text style={styles.description}>
-            Audio capture is currently active. Please stop and finalize your take before returning to the library.
-          </Text>
+          <Text style={styles.title}>{title}</Text>
+          <Text style={styles.description}>{description}</Text>
 
           {/* Action Buttons */}
           <View style={styles.actionsColumn}>
@@ -51,7 +55,7 @@ export const ActiveRecordingWarningModal: React.FC<ActiveRecordingWarningModalPr
               activeOpacity={0.8}
             >
               <Check size={16} color="#000000" strokeWidth={2.5} />
-              <Text style={styles.primaryBtnText}>KEEP RECORDING</Text>
+              <Text style={styles.primaryBtnText}>{keepLabel}</Text>
             </TouchableOpacity>
 
             <TouchableOpacity

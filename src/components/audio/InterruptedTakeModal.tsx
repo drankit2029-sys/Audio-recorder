@@ -9,13 +9,19 @@ import {
 } from 'react-native';
 import { AlertTriangle, Trash2, Play } from 'lucide-react-native';
 
-import { ActiveSessionRecord } from '../../services/storage/sessionJournal';
-import { AudioSettingsStorage } from '../../services/storage/audioSettingsStorage';
 import { useResponsive } from '../../hooks/useResponsive';
+
+/** What the recovery card shows about a take left behind by a dead process. */
+export interface InterruptedTakeInfo {
+  durationMs: number;
+  badge: string;
+  /** Set when the interrupted session was editing a library take. */
+  editOfName?: string | null;
+}
 
 interface InterruptedTakeModalProps {
   visible: boolean;
-  session: ActiveSessionRecord | null;
+  info: InterruptedTakeInfo | null;
   sizeBytes: number;
   onDiscard: () => void;
   onResume: () => void;
@@ -39,34 +45,28 @@ const formatSize = (bytes: number) => {
 
 export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
   visible,
-  session,
+  info,
   sizeBytes,
   onDiscard,
   onResume,
 }) => {
   const { isTablet } = useResponsive();
 
-  if (!session) return null;
+  if (!info) return null;
 
-  // M9: `byteOffsetEstimate` was the recorded *duration* under a misleading
-  // name; the journal now calls it what it is.
-  const durationMs =
-    session.durationMs > 0
-      ? session.durationMs
-      : Math.max(1000, session.lastHeartbeatTimestamp - session.startedAt);
+  const durationMs = Math.max(0, info.durationMs);
+  const presetBadge = info.badge || 'WAV Master';
 
-  const presetBadge =
-    AudioSettingsStorage.getResolvedPreset(session.formatPreset)?.badge ?? 'WAV Master';
-
+  // Dismissing must never throw a recovered take away: only Discard does that.
   return (
     <Modal
       visible={visible}
       transparent
       animationType="fade"
       statusBarTranslucent
-      onRequestClose={onDiscard}
+      onRequestClose={() => {}}
     >
-      <TouchableWithoutFeedback onPress={onDiscard}>
+      <TouchableWithoutFeedback onPress={() => {}}>
         <View style={styles.backdrop}>
           <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
             <View style={[styles.card, isTablet && styles.cardTablet]}>
@@ -76,8 +76,9 @@ export const InterruptedTakeModal: React.FC<InterruptedTakeModalProps> = ({
 
               <Text style={styles.title}>Interrupted Take Detected</Text>
               <Text style={styles.description}>
-                The app closed during active audio capture. Continue the session from
-                where it stopped, or discard the partial recording permanently.
+                {info.editOfName
+                  ? `The app closed while "${info.editOfName}" was being edited. Continue the session from where it stopped, or discard the unsaved edit (the original take is untouched).`
+                  : 'The app closed during active audio capture. Continue the session from where it stopped, or discard the partial recording permanently.'}
               </Text>
 
               <View style={styles.metaBox}>

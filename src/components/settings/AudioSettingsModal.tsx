@@ -20,7 +20,7 @@ import {
   checkDeviceCompatibility,
 } from '../../services/audio/types';
 import { AudioSettingsStorage } from '../../services/storage/audioSettingsStorage';
-import { EngineState } from '../../services/audio/useAudioRecording';
+import { EngineState, isSessionState } from '../../services/audio/useStudioSession';
 import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
 import { useResponsive } from '../../hooks/useResponsive';
 import { CustomPresetEditorModal } from './CustomPresetEditorModal';
@@ -43,7 +43,7 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
   selectedDevice,
 }) => {
   const { isTablet } = useResponsive();
-  const isLocked = engineState === 'RECORDING' || engineState === 'PAUSED';
+  const isLocked = isSessionState(engineState);
 
   const [customPresets, setCustomPresets] = useState<CustomPresetConfig[]>(() =>
     AudioSettingsStorage.getCustomPresets()
