@@ -6,11 +6,9 @@ import {
   Path,
   Line,
   Circle,
-  Rect,
-  LinearGradient,
   Skia,
+  BlurMask,
   vec,
-  SkPathBuilder,
 } from '@shopify/react-native-skia';
 import {
   SharedValue,
@@ -44,14 +42,7 @@ const PAD = 6;
 const BAR_SPACING = 3;
 const BAR_WIDTH = 1.6;
 const PEAK_BUCKET_SEC = 0.02;
-const EDGE_FADE = 22;
 
-/**
- * Tape-style waveform with a fixed playhead in the middle. Bars are anchored
- * to absolute time, so the tape slides smoothly under the playhead while
- * recording or previewing, and can be dragged (with momentum) to any point of
- * the take while paused. Everything is drawn on the UI thread.
- */
 export const StudioWaveform: React.FC<StudioWaveformProps> = ({
   playheadMs,
   durationMs,
@@ -81,19 +72,16 @@ export const StudioWaveform: React.FC<StudioWaveformProps> = ({
   const centerY = PAD + height / 2;
   const maxDeflection = height * 0.46;
 
-  /**
-   * Pure helper: every shared value is read by the derived values below and
-   * passed in, because Reanimated only tracks shared values that appear
-   * directly in a derived value's own closure.
-   */
   const drawBars = (
-    b: SkPathBuilder,
+    b: any,
     past: boolean,
     w: number,
     pps: number,
     durMs: number,
     arr: number[],
-    playMs: number
+    playMs: number,
+    cY: number,
+    maxDef: number
   ) => {
     'worklet';
     const dur = durMs / 1000;
@@ -123,25 +111,23 @@ export const StudioWaveform: React.FC<StudioWaveformProps> = ({
         if (pk > v) v = pk;
       }
       const x = cx + (mid - t) * pps;
-      const amp = Math.max(1.1, (v / 255) * maxDeflection);
-      b.moveTo(x, centerY - amp);
-      b.lineTo(x, centerY + amp);
+      const amp = Math.max(1.1, (v / 255) * maxDef);
+      b.moveTo(x, cY - amp);
+      b.lineTo(x, cY + amp);
     }
   };
 
-  // The initial run happens on the JS thread during render; skip it there so a
-  // long take's peak table is never copied across threads synchronously.
   const pastPath = useDerivedValue(() => {
     if (isRNRuntime()) return Skia.Path.Make();
     const b = Skia.PathBuilder.Make();
-    drawBars(b, true, widthSV.value, pxPerSec.value, durationMs.value, peaks.value, playheadMs.value);
+    drawBars(b, true, widthSV.value, pxPerSec.value, durationMs.value, peaks.value, playheadMs.value, centerY, maxDeflection);
     return b.build();
   });
 
   const futurePath = useDerivedValue(() => {
     if (isRNRuntime()) return Skia.Path.Make();
     const b = Skia.PathBuilder.Make();
-    drawBars(b, false, widthSV.value, pxPerSec.value, durationMs.value, peaks.value, playheadMs.value);
+    drawBars(b, false, widthSV.value, pxPerSec.value, durationMs.value, peaks.value, playheadMs.value, centerY, maxDeflection);
     return b.build();
   });
 
@@ -154,7 +140,6 @@ export const StudioWaveform: React.FC<StudioWaveformProps> = ({
         .activeOffsetX([-4, 4])
         .onBegin(() => {
           'worklet';
-          // A touch stops any momentum that is still running.
           cancelAnimation(playheadMs);
         })
         .onStart(() => {
@@ -206,37 +191,17 @@ export const StudioWaveform: React.FC<StudioWaveformProps> = ({
         >
           <Line p1={vec(PAD + 4, centerY)} p2={vec(PAD + width - 4, centerY)} color="#16161A" strokeWidth={1} />
 
-          <Path
-            path={futurePath}
-            style="stroke"
-            strokeWidth={BAR_WIDTH}
-            strokeCap="round"
-            color="#FFFFFF"
-            opacity={0.26}
-          />
-          <Path
-            path={pastPath}
-            style="stroke"
-            strokeWidth={BAR_WIDTH}
-            strokeCap="round"
-            color="#FFFFFF"
-            opacity={0.92}
-          />
+          {/* Future: glow + core */}
+          <Path path={futurePath} style="stroke" strokeWidth={BAR_WIDTH + 2.2} strokeCap="round" color="#FFFFFF" opacity={0.10}>
+            <BlurMask blur={7} style="normal" />
+          </Path>
+          <Path path={futurePath} style="stroke" strokeWidth={BAR_WIDTH} strokeCap="round" color="#FFFFFF" opacity={0.26} />
 
-          <Rect x={PAD} y={0} width={EDGE_FADE} height={canvasH}>
-            <LinearGradient
-              start={vec(PAD, 0)}
-              end={vec(PAD + EDGE_FADE, 0)}
-              colors={['#000000', 'rgba(0, 0, 0, 0)']}
-            />
-          </Rect>
-          <Rect x={PAD + width - EDGE_FADE} y={0} width={EDGE_FADE} height={canvasH}>
-            <LinearGradient
-              start={vec(PAD + width - EDGE_FADE, 0)}
-              end={vec(PAD + width, 0)}
-              colors={['rgba(0, 0, 0, 0)', '#000000']}
-            />
-          </Rect>
+          {/* Past: glow + core */}
+          <Path path={pastPath} style="stroke" strokeWidth={BAR_WIDTH + 2.8} strokeCap="round" color="#FFFFFF" opacity={0.28}>
+            <BlurMask blur={9} style="normal" />
+          </Path>
+          <Path path={pastPath} style="stroke" strokeWidth={BAR_WIDTH} strokeCap="round" color="#FFFFFF" opacity={0.92} />
 
           <Line p1={vec(cx, PAD - 2)} p2={vec(cx, PAD + height + 2)} color={playheadColor} strokeWidth={1.5} />
           <Circle cx={cx} cy={PAD - 2} r={2.6} color={playheadColor} />

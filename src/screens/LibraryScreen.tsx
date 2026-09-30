@@ -11,6 +11,7 @@ import {
   Modal,
   Keyboard,
   Platform,
+  BackHandler,
 } from 'react-native';
 import Animated, { FadeIn, FadeOut, Easing } from 'react-native-reanimated';
 import { useAudioPlayer } from 'expo-audio';
@@ -400,6 +401,58 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     return () => onOverlayChange?.(false);
   }, [onOverlayChange]);
 
+  // Back button in library: close modals, exit search/edit, otherwise let app handle.
+  useEffect(() => {
+    const onBack = () => {
+      if (renameModalVisible) {
+        setRenameModalVisible(false);
+        setRecordingToRename(null);
+        return true;
+      }
+      if (exportModalVisible) {
+        setExportModalVisible(false);
+        return true;
+      }
+      if (deleteModalVisible) {
+        setDeleteModalVisible(false);
+        setDeleteTarget(null);
+        return true;
+      }
+      if (sortModalVisible) {
+        setSortModalVisible(false);
+        return true;
+      }
+      if (menuVisible) {
+        setMenuVisible(false);
+        return true;
+      }
+      if (isSearching) {
+        setIsSearching(false);
+        setSearchQuery('');
+        Keyboard.dismiss();
+        return true;
+      }
+      if (isEditMode) {
+        setIsEditMode(false);
+        setSelectedIds(new Set());
+        onEditModeChange(false);
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
+    return () => sub.remove();
+  }, [
+    renameModalVisible,
+    exportModalVisible,
+    deleteModalVisible,
+    sortModalVisible,
+    menuVisible,
+    isSearching,
+    isEditMode,
+    onEditModeChange,
+  ]);
+
   const handleEditRecording = useCallback(
     (item: SavedRecording) => {
       // Release the preview player before the studio opens the file.
@@ -690,6 +743,10 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
   const handleClearSearch = () => {
     setSearchQuery('');
+  };
+
+  const handleExitSearch = () => {
+    setSearchQuery('');
     setIsSearching(false);
     Keyboard.dismiss();
   };
@@ -698,27 +755,39 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     <View style={styles.container}>
       <View style={[styles.contentConstraint, { maxWidth: maxContentWidth }]}>
         {!isEditMode ? (
-          <View style={styles.header}>
+          <View style={[styles.header, isSearching && styles.headerSearching]}>
             {isSearching ? (
-              <View style={styles.searchBarContainer}>
-                <Search size={16} color="#8E8E93" />
-                <TextInput
-                  style={styles.searchInput}
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                  placeholder="Search recordings..."
-                  placeholderTextColor="#636366"
-                  autoFocus
-                  autoCorrect={false}
-                  autoCapitalize="none"
-                  returnKeyType="search"
-                  blurOnSubmit
-                  underlineColorAndroid="transparent"
-                  onSubmitEditing={Keyboard.dismiss}
-                />
-                <TouchableOpacity onPress={handleClearSearch} style={styles.searchClearBtn} hitSlop={8}>
-                  <X size={16} color="#8E8E93" />
-                </TouchableOpacity>
+              <View style={styles.searchColumn}>
+                <View style={styles.searchBarContainer}>
+                  <TouchableOpacity onPress={handleExitSearch} style={styles.searchBackBtn} hitSlop={8}>
+                    <ChevronRight size={18} color="#8E8E93" style={{ transform: [{ rotate: '180deg' }] }} />
+                  </TouchableOpacity>
+                  <Search size={16} color="#8E8E93" />
+                  <TextInput
+                    style={styles.searchInput}
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    placeholder="Search recordings..."
+                    placeholderTextColor="#636366"
+                    autoFocus
+                    autoCorrect={false}
+                    autoCapitalize="none"
+                    returnKeyType="search"
+                    blurOnSubmit
+                    underlineColorAndroid="transparent"
+                    onSubmitEditing={Keyboard.dismiss}
+                  />
+                  {searchQuery.length > 0 ? (
+                    <TouchableOpacity onPress={handleClearSearch} style={styles.searchClearBtn} hitSlop={8}>
+                      <X size={16} color="#8E8E93" />
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+                <Text style={styles.searchResultCount}>
+                  {searchQuery.trim().length > 0
+                    ? `${processedRecordings.length} result${processedRecordings.length === 1 ? '' : 's'} for "${searchQuery.trim()}"`
+                    : `${recordings.length} recording${recordings.length === 1 ? '' : 's'}`}
+                </Text>
               </View>
             ) : (
               <>
@@ -999,13 +1068,29 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   header: {
-    height: 60,
+    minHeight: 60,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#1F1F1F',
+  },
+  headerSearching: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    justifyContent: 'flex-start',
+    paddingTop: 8,
+    paddingBottom: 8,
+    gap: 6,
+  },
+  searchColumn: {
+    width: '100%',
+    gap: 6,
+  },
+  searchBackBtn: {
+    padding: 2,
+    marginRight: 2,
   },
   headerTitle: {
     color: '#FFFFFF',
@@ -1044,6 +1129,13 @@ const styles = StyleSheet.create({
   },
   searchClearBtn: {
     padding: 4,
+  },
+  searchResultCount: {
+    color: '#71717A',
+    fontSize: 11,
+    fontWeight: '500',
+    paddingHorizontal: 4,
+    letterSpacing: 0.2,
   },
   editModeActionBtn: {
     paddingVertical: 6,

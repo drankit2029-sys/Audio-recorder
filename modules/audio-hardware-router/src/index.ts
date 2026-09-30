@@ -24,6 +24,25 @@ export interface AudioInputDevice {
   isSink: boolean;
 }
 
+export const KeyboardHelper = {
+  async show(): Promise<boolean> {
+    if (!NativeRouter || typeof NativeRouter.showSoftKeyboard !== 'function') return false;
+    try {
+      return (await NativeRouter.showSoftKeyboard()) === true;
+    } catch {
+      return false;
+    }
+  },
+  async hide(): Promise<boolean> {
+    if (!NativeRouter || typeof NativeRouter.hideSoftKeyboard !== 'function') return false;
+    try {
+      return (await NativeRouter.hideSoftKeyboard()) === true;
+    } catch {
+      return false;
+    }
+  },
+};
+
 export const AudioHardwareRouter = {
   /** False when the native module is missing (e.g. Expo Go or a stale build). */
   isAvailable(): boolean {
@@ -513,6 +532,15 @@ export const StudioEngine = {
     } catch {
       /* noop */
     }
+  },
+
+  stopForegroundService(): Promise<boolean> {
+    if (!NativeStudio || typeof NativeStudio.stopForegroundService !== 'function') {
+      return Promise.resolve(false);
+    }
+    return NativeStudio.stopForegroundService()
+      .then(() => true)
+      .catch(() => false);
   },
 
   addListener<K extends keyof StudioEventMap>(

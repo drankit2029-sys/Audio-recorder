@@ -378,6 +378,7 @@ export const SUPPORTED_CUSTOM_FORMATS: AudioFormatType[] = [
   'aac',
   'aac_adts',
   'he_aac',
+  'aac_eld',
   'amr_nb',
   'amr_wb',
 ];

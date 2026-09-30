@@ -126,6 +126,16 @@ public class StudioEngineModule extends ReactContextBaseJavaModule implements St
         engine.setBadge(badge);
     }
 
+    @ReactMethod
+    public void stopForegroundService(Promise promise) {
+        try {
+            engine.stopForegroundService();
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_STOP_FG", message(t), t);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Transport
     // -----------------------------------------------------------------------

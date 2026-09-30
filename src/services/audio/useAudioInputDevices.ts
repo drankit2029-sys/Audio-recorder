@@ -52,18 +52,24 @@ export function useAudioInputDevices() {
 
   const selectDevice = useCallback((deviceId: number) => {
     setSelectedDeviceId(deviceId);
+    // Try to route immediately so the UI reflects the choice.
+    AudioHardwareRouter.setPreferredInputDevice(deviceId)
+      .then(() => AudioHardwareRouter.getActiveInputDevice().then(setActiveDevice).catch(() => {}))
+      .catch((e) => console.warn('[useAudioInputDevices] Routing failed:', e));
   }, []);
 
   const activateHardwareRouting = useCallback(() => {
     if (selectedDeviceId !== null) {
-      AudioHardwareRouter.setPreferredInputDevice(selectedDeviceId).catch((e) =>
-        console.warn('[useAudioInputDevices] Routing failed:', e)
-      );
+      AudioHardwareRouter.setPreferredInputDevice(selectedDeviceId)
+        .then(() => AudioHardwareRouter.getActiveInputDevice().then(setActiveDevice).catch(() => {}))
+        .catch((e) => console.warn('[useAudioInputDevices] Routing failed:', e));
     }
   }, [selectedDeviceId]);
 
   const releaseHardwareRouting = useCallback(() => {
-    AudioHardwareRouter.clearPreferredInputDevice().catch(() => {});
+    AudioHardwareRouter.clearPreferredInputDevice()
+      .then(() => AudioHardwareRouter.getActiveInputDevice().then(setActiveDevice).catch(() => {}))
+      .catch(() => {});
   }, []);
 
   return {

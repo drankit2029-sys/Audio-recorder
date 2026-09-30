@@ -1,5 +1,6 @@
 package expo.modules.audiohardwarerouter;
 
+import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothHeadset;
 import android.content.BroadcastReceiver;
@@ -13,6 +14,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
 
 import androidx.annotation.NonNull;
 
@@ -481,6 +484,76 @@ public class AudioHardwareRouterModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             Log.w(TAG, "getActiveInputDevice failed", e);
             promise.resolve(null);
+        }
+    }
+
+    @ReactMethod
+    public void showSoftKeyboard(final Promise promise) {
+        try {
+            final Activity activity = getCurrentActivity();
+            if (activity == null) {
+                promise.resolve(false);
+                return;
+            }
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        View view = activity.getCurrentFocus();
+                        if (view == null) {
+                            view = activity.getWindow().getDecorView();
+                        }
+                        InputMethodManager imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (imm == null) {
+                            promise.resolve(false);
+                            return;
+                        }
+                        boolean result = imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT);
+                        if (!result) {
+                            imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+                            result = true;
+                        }
+                        promise.resolve(result);
+                    } catch (Throwable t) {
+                        promise.resolve(false);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            promise.resolve(false);
+        }
+    }
+
+    @ReactMethod
+    public void hideSoftKeyboard(final Promise promise) {
+        try {
+            final Activity activity = getCurrentActivity();
+            if (activity == null) {
+                promise.resolve(false);
+                return;
+            }
+            activity.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        View view = activity.getCurrentFocus();
+                        if (view == null) {
+                            view = activity.getWindow().getDecorView();
+                        }
+                        InputMethodManager imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+                        if (imm == null) {
+                            promise.resolve(false);
+                            return;
+                        }
+                        boolean result = imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+                        promise.resolve(result);
+                    } catch (Throwable t) {
+                        promise.resolve(false);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            promise.resolve(false);
         }
     }
 

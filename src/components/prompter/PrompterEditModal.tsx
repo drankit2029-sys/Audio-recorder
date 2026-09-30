@@ -26,6 +26,7 @@ import {
   ToastVariant,
   getToastTop,
 } from '../../components/common/AppToast';
+import { KeyboardHelper } from '../../../modules/audio-hardware-router/src';
 
 interface PrompterEditModalProps {
   visible: boolean;
@@ -92,7 +93,12 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
     setIsEditing(true);
     setTimeout(() => {
       inputRef.current?.focus();
+      KeyboardHelper.show().catch(() => {});
     }, 80);
+    setTimeout(() => {
+      inputRef.current?.focus();
+      KeyboardHelper.show().catch(() => {});
+    }, 300);
   };
 
   const handleCancelEditing = () => {
@@ -335,7 +341,7 @@ export const PrompterEditModal: React.FC<PrompterEditModalProps> = ({
       animationType={isTablet ? 'fade' : 'slide'}
       presentationStyle={isTablet ? 'overFullScreen' : 'pageSheet'}
       transparent={isTablet}
-      statusBarTranslucent={true}
+      statusBarTranslucent={false}
       onRequestClose={isEditing ? handleCancelEditing : onClose}
     >
       {isTablet ? (

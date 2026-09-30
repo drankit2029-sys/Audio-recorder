@@ -9,6 +9,7 @@ import {
   Alert,
   AppState,
   LayoutChangeEvent,
+  BackHandler,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -242,7 +243,9 @@ function AudioRecorderApp() {
   const [isLibraryOverlayOpen, setIsLibraryOverlayOpen] = useState(false);
 
   const [pendingSave, setPendingSave] = useState<PendingSave | null>(null);
+  const pendingSaveRef = useRef<PendingSave | null>(null);
   const [saveVisible, setSaveVisible] = useState(false);
+  const saveVisibleRef = useRef(false);
   const [warningModalVisible, setWarningModalVisible] = useState(false);
   const [toastData, setToastData] = useState<AppToastData | null>(null);
   const [busy, setBusy] = useState<{ title: string; subtitle?: string } | null>(null);
@@ -268,6 +271,19 @@ function AudioRecorderApp() {
   const isAppForegroundRef = useRef(true);
   const exitAfterSaveRef = useRef(false);
   const sessionResourcesRef = useRef({ micGranted: false, routing: false, keepAwake: false });
+
+  // Keep refs in sync for notification handler.
+  useEffect(() => {
+    pendingSaveRef.current = pendingSave;
+  }, [pendingSave]);
+  useEffect(() => {
+    saveVisibleRef.current = saveVisible;
+    if (saveVisible) {
+      // Collapse the foreground notification while the save dialog is open,
+      // so Resume cannot be triggered behind it.
+      StudioEngine.stopForegroundService().catch(() => {});
+    }
+  }, [saveVisible]);
 
   const pxPerSec = useSharedValue(AudioSettingsStorage.getWaveformZoom());
   const [cockpitCenterY, setCockpitCenterY] = useState(0);
@@ -328,6 +344,59 @@ function AudioRecorderApp() {
     });
     return () => sub.remove();
   }, []);
+
+  // Back button: studio should pause or prompt, library should exit search/edit, otherwise let system handle.
+  useEffect(() => {
+    const onBack = () => {
+      if (saveVisibleRef.current) {
+        exitAfterSaveRef.current = false;
+        setSaveVisible(false);
+        return true;
+      }
+      if (warningModalVisible) {
+        setWarningModalVisible(false);
+        return true;
+      }
+      if (settingsVisible) {
+        setSettingsVisible(false);
+        return true;
+      }
+      if (deviceModalVisible) {
+        setDeviceModalVisible(false);
+        return true;
+      }
+      if (interruptedModalVisible) {
+        return true;
+      }
+      if (currentScreen === 'studio') {
+        if (isSessionState(engineStateRef.current)) {
+          setWarningModalVisible(true);
+        } else {
+          setCurrentScreen('library');
+        }
+        return true;
+      }
+      // library: let LibraryScreen handle search/edit/overlay via its own handler.
+      // If overlay is open, we consume back to avoid exiting app.
+      if (isLibraryOverlayOpen) {
+        return true;
+      }
+      if (isLibraryEditMode) {
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
+    return () => sub.remove();
+  }, [
+    currentScreen,
+    warningModalVisible,
+    settingsVisible,
+    deviceModalVisible,
+    interruptedModalVisible,
+    isLibraryOverlayOpen,
+    isLibraryEditMode,
+  ]);
 
   const {
     devices,
@@ -782,6 +851,15 @@ function AudioRecorderApp() {
   };
 
   notificationActionRef.current = (action) => {
+    // While the save dialog is open, ignore transport actions from the
+    // notification so Resume cannot continue recording behind the modal.
+    if (saveVisibleRef.current || pendingSaveRef.current) {
+      if (action === 'stop') {
+        // Already in save flow, just ensure notification is collapsed.
+        StudioEngine.stopForegroundService().catch(() => {});
+      }
+      return;
+    }
     if (action === 'stop') {
       void handleStopPressRef.current(true);
     } else if (action === 'pause') {

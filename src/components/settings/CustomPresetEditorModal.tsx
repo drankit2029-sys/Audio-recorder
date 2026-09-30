@@ -17,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Check, Disc, HardDrive, Radio, Layers, AlertTriangle } from 'lucide-react-native';
 
 import { CustomPresetConfig, AudioFormatType } from '../../services/audio/types';
-import { AudioInputDevice } from '../../../modules/audio-hardware-router/src';
+import { AudioInputDevice, KeyboardHelper } from '../../../modules/audio-hardware-router/src';
 import { useResponsive } from '../../hooks/useResponsive';
 import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 
@@ -43,6 +43,7 @@ const FORMAT_OPTIONS: { id: AudioFormatType; label: string; tag: string }[] = [
   { id: 'he_aac', label: 'HE-AAC', tag: 'High efficiency' },
   { id: 'amr_wb', label: 'AMR-WB', tag: '16 kHz voice' },
   { id: 'amr_nb', label: 'AMR-NB', tag: '8 kHz voice' },
+  { id: 'aac_eld', label: 'AAC-ELD', tag: 'Low-delay' },
 ];
 
 export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = ({
@@ -61,6 +62,8 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
 
   const [name, setName] = useState('');
   const [format, setFormat] = useState<AudioFormatType>('wav');
+  const nameInputRef = React.useRef<TextInput | null>(null);
+  const focusTimers = React.useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const [sampleRateStr, setSampleRateStr] = useState('48000');
   const [channelsStr, setChannelsStr] = useState('1');
@@ -221,12 +224,33 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
     onSave(config);
   };
 
+  const focusNameInput = () => {
+    focusTimers.current.forEach(clearTimeout);
+    focusTimers.current = [];
+    const attempt = (delay: number) => {
+      const id = setTimeout(() => {
+        nameInputRef.current?.focus();
+        KeyboardHelper.show().catch(() => {});
+      }, delay);
+      focusTimers.current.push(id);
+    };
+    attempt(80);
+    attempt(300);
+  };
+
+  useEffect(() => {
+    return () => {
+      focusTimers.current.forEach(clearTimeout);
+    };
+  }, []);
+
   return (
     <Modal
       visible={visible}
       animationType="fade"
       transparent
-      statusBarTranslucent
+      statusBarTranslucent={false}
+      onShow={focusNameInput}
       onRequestClose={onClose}
     >
       <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
@@ -266,6 +290,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                 <Text style={styles.sectionLabel}>PROFILE NAME</Text>
                 <View style={styles.inputWrapper}>
                   <TextInput
+                    ref={nameInputRef}
                     style={styles.textInput}
                     value={name}
                     onChangeText={setName}
@@ -274,6 +299,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     returnKeyType="done"
                     blurOnSubmit
                     underlineColorAndroid="transparent"
+                    showSoftInputOnFocus
                   />
                   {name.length > 0 ? (
                     <TouchableOpacity
@@ -365,7 +391,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       onChangeText={setSampleRateStr}
                       keyboardType="number-pad"
                       maxLength={7}
-                      underlineColorAndroid="transparent"
+                      underlineColorAndroid="transparent" showSoftInputOnFocus
                     />
                     <Text style={styles.unitSuffix}>Hz</Text>
                   </View>
@@ -415,7 +441,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                       onChangeText={setChannelsStr}
                       keyboardType="number-pad"
                       maxLength={2}
-                      underlineColorAndroid="transparent"
+                      underlineColorAndroid="transparent" showSoftInputOnFocus
                     />
                     <Text style={styles.unitSuffix}>Ch</Text>
                   </View>
@@ -467,7 +493,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                         onChangeText={setBitDepthStr}
                         keyboardType="number-pad"
                         maxLength={2}
-                        underlineColorAndroid="transparent"
+                        underlineColorAndroid="transparent" showSoftInputOnFocus
                       />
                       <Text style={styles.unitSuffix}>bit</Text>
                     </View>
@@ -516,7 +542,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                         onChangeText={setBitRateKbpsStr}
                         keyboardType="number-pad"
                         maxLength={4}
-                        underlineColorAndroid="transparent"
+                        underlineColorAndroid="transparent" showSoftInputOnFocus
                       />
                       <Text style={styles.unitSuffix}>kbps</Text>
                     </View>
@@ -570,7 +596,7 @@ export const CustomPresetEditorModal: React.FC<CustomPresetEditorModalProps> = (
                     placeholder="e.g. Master uncompressed capture for external DAW post-production."
                     placeholderTextColor="#52525B"
                     multiline
-                    underlineColorAndroid="transparent"
+                    underlineColorAndroid="transparent" showSoftInputOnFocus
                   />
                 </View>
               </View>

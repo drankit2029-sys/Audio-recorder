@@ -391,16 +391,34 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   /** Negative position = append at the end. */
   const record = useCallback(
     async (positionMs: number, inputDeviceId: number) => {
+      // Preserve UI playhead for smooth punch-in: the native snapshot may be
+      // slightly off due to frame rounding, so we keep the visual position.
+      const uiPos = positionMs < 0 ? durationRef.current : positionMs;
       const snap = await StudioEngine.record({ positionMs, inputDeviceId });
       hasEditsRef.current = true;
       applySnapshot(snap, snap.overwriting ? 'replace' : 'record');
+      // Smooth the transition: keep the playhead where the user saw it.
+      if (positionMs >= 0) {
+        const now = Date.now();
+        anchorRef.current = { ms: uiPos, at: now };
+        anchorMs.value = uiPos;
+        anchorAt.value = now;
+        playheadMs.value = uiPos;
+      }
     },
-    [applySnapshot]
+    [applySnapshot, anchorAt, anchorMs, playheadMs]
   );
 
   const preview = useCallback(async (positionMs: number) => {
+    const uiPos = positionMs;
     await StudioEngine.play(positionMs);
-  }, []);
+    // Playback starts at the requested position; keep UI continuous.
+    const now = Date.now();
+    anchorRef.current = { ms: uiPos, at: now };
+    anchorMs.value = uiPos;
+    anchorAt.value = now;
+    playheadMs.value = uiPos;
+  }, [anchorAt, anchorMs, playheadMs]);
 
   const pause = useCallback(async (): Promise<StudioSnapshot> => {
     const snap = await StudioEngine.pause();

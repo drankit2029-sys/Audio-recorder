@@ -7,20 +7,21 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
-  TouchableWithoutFeedback,
+  Modal,
   Keyboard,
+  Pressable,
 } from 'react-native';
-import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { Check, X, Pencil } from 'lucide-react-native';
 
 import { useKeyboardViewport } from '../../hooks/useKeyboardViewport';
 import { useResponsive } from '../../hooks/useResponsive';
-import { useAutoFocusInput, useBackPress } from '../../hooks/useOverlayInput';
+import { useBackPress } from '../../hooks/useOverlayInput';
 import {
   MAX_TAKE_NAME_LENGTH,
   sanitizeFileName,
   extractExtension,
 } from '../../services/storage/recordingPaths';
+import { KeyboardHelper } from '../../../modules/audio-hardware-router/src';
 
 interface RenameRecordingModalProps {
   visible: boolean;
@@ -43,15 +44,34 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   const [name, setName] = useState(initialName);
   const [isFocused, setIsFocused] = useState(false);
   const inputRef = useRef<TextInput | null>(null);
+  const focusTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {
     if (visible) setName(initialName);
     else setIsFocused(false);
   }, [visible, initialName]);
 
-  // In-window dialog (not an Android dialog window): the field takes focus
-  // and the keyboard opens reliably. See useAutoFocusInput for the details.
-  useAutoFocusInput(visible, inputRef);
+  useEffect(() => {
+    return () => {
+      focusTimers.current.forEach(clearTimeout);
+    };
+  }, []);
+
+  const focusInput = () => {
+    focusTimers.current.forEach(clearTimeout);
+    focusTimers.current = [];
+    const attempt = (delay: number) => {
+      const id = setTimeout(() => {
+        inputRef.current?.focus();
+        KeyboardHelper.show().catch(() => {});
+      }, delay);
+      focusTimers.current.push(id);
+    };
+    attempt(50);
+    attempt(250);
+    attempt(600);
+  };
+
   useBackPress(visible, () => {
     Keyboard.dismiss();
     onClose();
@@ -61,9 +81,7 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   const canSave = trimmed.length > 0;
 
   const previewFileName =
-    fileUri && canSave
-      ? `${sanitizeFileName(trimmed)}${extractExtension(fileUri)}`
-      : null;
+    fileUri && canSave ? `${sanitizeFileName(trimmed)}${extractExtension(fileUri)}` : null;
 
   const handleSave = () => {
     if (!canSave) return;
@@ -79,123 +97,123 @@ export const RenameRecordingModal: React.FC<RenameRecordingModalProps> = ({
   if (!visible) return null;
 
   return (
-    <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(140)} style={styles.overlay}>
-      <TouchableWithoutFeedback accessible={false} onPress={Keyboard.dismiss}>
-        <View style={styles.backdrop}>
-          <ScrollView
-            style={styles.scroll}
-            contentContainerStyle={[
-              styles.scrollContent,
-              {
-                // Rendered inside the app's SafeAreaView, which already
-                // clears the system bars; only the keyboard is added here.
-                paddingTop: 16,
-                paddingBottom: keyboardOffset + 16,
-              },
-            ]}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-            bounces={false}
-          >
-            <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
-              <View style={[styles.card, isTablet && styles.cardTablet]}>
-                <View style={styles.headerRow}>
-                  <View style={styles.iconCircle}>
-                    <Pencil size={16} color="#FFFFFF" strokeWidth={2} />
-                  </View>
-                  <View style={styles.headerTextGroup}>
-                    <Text style={styles.title}>Rename Recording</Text>
-                    <Text style={styles.subtitle}>Update the label for this take</Text>
-                  </View>
-                </View>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      statusBarTranslucent={false}
+      onShow={focusInput}
+      onRequestClose={handleCancel}
+    >
+      <View style={styles.backdrop}>
+        <Pressable style={styles.backdropPress} onPress={Keyboard.dismiss} />
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={[
+            styles.scrollContent,
+            {
+              paddingTop: 16,
+              paddingBottom: keyboardOffset + 24,
+            },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          bounces={false}
+        >
+          <Pressable onPress={(e) => e.stopPropagation()} style={[styles.card, isTablet && styles.cardTablet]}>
+            <View style={styles.headerRow}>
+              <View style={styles.iconCircle}>
+                <Pencil size={16} color="#FFFFFF" strokeWidth={2} />
+              </View>
+              <View style={styles.headerTextGroup}>
+                <Text style={styles.title}>Rename Recording</Text>
+                <Text style={styles.subtitle}>Update the label for this take</Text>
+              </View>
+            </View>
 
-                <View style={styles.fieldSection}>
-                  <View style={styles.labelRow}>
-                    <Text style={styles.fieldLabel}>RECORDING NAME</Text>
-                    <Text style={styles.counter}>
-                      {name.length}/{MAX_TAKE_NAME_LENGTH}
-                    </Text>
-                  </View>
-
-                  <View style={[styles.inputShell, isFocused && styles.inputShellFocused]}>
-                    <TextInput
-                      ref={inputRef}
-                      style={styles.input}
-                      value={name}
-                      onChangeText={setName}
-                      onFocus={() => setIsFocused(true)}
-                      onBlur={() => setIsFocused(false)}
-                      placeholder="Take title..."
-                      placeholderTextColor="#52525B"
-                      autoFocus
-                      selectTextOnFocus
-                      maxLength={MAX_TAKE_NAME_LENGTH}
-                      returnKeyType="done"
-                      blurOnSubmit
-                      underlineColorAndroid="transparent"
-                      onSubmitEditing={handleSave}
-                    />
-                    {name.length > 0 ? (
-                      <TouchableOpacity
-                        style={styles.clearBtn}
-                        onPress={() => setName('')}
-                        activeOpacity={0.7}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                      >
-                        <X size={13} color="#8E8E93" />
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-
-                  {previewFileName ? (
-                    <View style={styles.previewRow}>
-                      <Text style={styles.previewLabel}>SAVES AS</Text>
-                      <Text style={styles.previewName} numberOfLines={1}>
-                        {previewFileName}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-
-                <View style={styles.actionRow}>
-                  <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel} activeOpacity={0.75}>
-                    <Text style={styles.cancelBtnText}>Cancel</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
-                    onPress={handleSave}
-                    disabled={!canSave}
-                    activeOpacity={0.8}
-                  >
-                    <Check size={14} color="#000000" strokeWidth={3} />
-                    <Text style={styles.saveBtnText}>Save</Text>
-                  </TouchableOpacity>
-                </View>
-
-                <Text style={styles.hint}>
-                  {isKeyboardVisible
-                    ? 'Tap Save or press done to apply'
-                    : 'The audio file is renamed to match'}
+            <View style={styles.fieldSection}>
+              <View style={styles.labelRow}>
+                <Text style={styles.fieldLabel}>RECORDING NAME</Text>
+                <Text style={styles.counter}>
+                  {name.length}/{MAX_TAKE_NAME_LENGTH}
                 </Text>
               </View>
-            </TouchableWithoutFeedback>
-          </ScrollView>
-        </View>
-      </TouchableWithoutFeedback>
-    </Animated.View>
+
+              <View style={[styles.inputShell, isFocused && styles.inputShellFocused]}>
+                <TextInput
+                  ref={inputRef}
+                  style={styles.input}
+                  value={name}
+                  onChangeText={setName}
+                  onFocus={() => setIsFocused(true)}
+                  onBlur={() => setIsFocused(false)}
+                  placeholder="Take title..."
+                  placeholderTextColor="#52525B"
+                  selectTextOnFocus
+                  maxLength={MAX_TAKE_NAME_LENGTH}
+                  returnKeyType="done"
+                  blurOnSubmit
+                  underlineColorAndroid="transparent"
+                  onSubmitEditing={handleSave}
+                  showSoftInputOnFocus
+                />
+                {name.length > 0 ? (
+                  <TouchableOpacity
+                    style={styles.clearBtn}
+                    onPress={() => setName('')}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <X size={13} color="#8E8E93" />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              {previewFileName ? (
+                <View style={styles.previewRow}>
+                  <Text style={styles.previewLabel}>SAVES AS</Text>
+                  <Text style={styles.previewName} numberOfLines={1}>
+                    {previewFileName}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+
+            <View style={styles.actionRow}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={handleCancel} activeOpacity={0.75}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+                onPress={handleSave}
+                disabled={!canSave}
+                activeOpacity={0.8}
+              >
+                <Check size={14} color="#000000" strokeWidth={3} />
+                <Text style={styles.saveBtnText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.hint}>
+              {isKeyboardVisible ? 'Tap Save or press done to apply' : 'The audio file is renamed to match'}
+            </Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+    </Modal>
   );
 };
 
 const styles = StyleSheet.create({
-  overlay: {
-    ...StyleSheet.absoluteFill,
-    zIndex: 25000,
-    elevation: 130,
-  },
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  backdropPress: {
+    ...StyleSheet.absoluteFill,
   },
   scroll: {
     flex: 1,

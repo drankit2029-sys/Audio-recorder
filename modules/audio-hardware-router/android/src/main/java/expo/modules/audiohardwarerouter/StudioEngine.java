@@ -1736,6 +1736,10 @@ final class StudioEngine {
      * overlap (old instance destroyed after a new take already asked for the
      * service), so the flag is only cleared when no take is open.
      */
+    synchronized void stopForegroundService() {
+        stopService();
+    }
+
     void onServiceDestroyed() {
         if (!hasSession) {
             serviceRequested = false;
