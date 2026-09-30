@@ -543,6 +543,31 @@ export const StudioEngine = {
       .catch(() => false);
   },
 
+  /**
+   * Keep a mic open (stopped) so the next record() does not pay the
+   * 200-500 ms AudioRecord setup cost — that cost was the silent gap at
+   * the head of each segment. Never throws; a failed warm just means the
+   * recorder is opened on demand as before.
+   */
+  prepareRecorder(deviceId: number): Promise<boolean> {
+    if (!NativeStudio || typeof NativeStudio.prepareRecorder !== 'function') {
+      return Promise.resolve(false);
+    }
+    return NativeStudio.prepareRecorder(deviceId)
+      .then(() => true)
+      .catch(() => false);
+  },
+
+  /** Release the warm mic (app backgrounded or user left the studio). */
+  dropWarmRecorder(): Promise<boolean> {
+    if (!NativeStudio || typeof NativeStudio.dropWarmRecorder !== 'function') {
+      return Promise.resolve(false);
+    }
+    return NativeStudio.dropWarmRecorder()
+      .then(() => true)
+      .catch(() => false);
+  },
+
   addListener<K extends keyof StudioEventMap>(
     event: K,
     listener: (payload: StudioEventMap[K]) => void

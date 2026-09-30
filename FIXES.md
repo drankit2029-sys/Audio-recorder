@@ -108,3 +108,76 @@ The JS side now keeps the playhead continuous across both:
 - on `"caught_up"` the playhead is kept, the duration bar only ever grows,
   the Replace pill auto-disarms, and recording continues seamlessly — no
   jump, no pause.
+
+---
+
+# Bugfix Round 2 — 2026-09-30
+
+Follow-up fixes for three issues that survived Round 1. Native module
+changes included — **an Android rebuild is required** (`expo run:android`),
+a JS-only reload will not pick up the warm-recorder changes.
+
+## 6. Library search input invisible (icons and count render, typing works)
+
+**Root cause:** the search bar layout was not fully deterministic. The
+container used `flex: 1` inside the (auto-height) search column and the
+`TextInput` carried no explicit size or visible caret, so on Android the
+input could measure to zero / render indistinguishably from the background
+while the icons kept their explicit sizes. `autoFocus` on mount also raced
+the first layout pass: the field could be focused before it was sized,
+which is a common cause of a missing caret and "invisible" text.
+
+**Fix (`src/screens/LibraryScreen.tsx`):**
+- `searchBarContainer` now uses an explicit `width: '100%'` plus a subtle
+  border, so the field is always the full bar width and visibly outlined.
+- `searchInput` uses `flex: 1` + `minWidth: 0` + `height: '100%'`, so it
+  fills the bar and can never collapse to zero.
+- Added `cursorColor` (RN 0.86's replacement for `caretColor`) and
+  `selectionColor` so the caret and selection are always visible on the
+  dark background, and a brighter placeholder.
+- `autoFocus` removed: the staggered retry effect (Round 1) is the single
+  source of truth for focus, so the field can no longer be focused before
+  it is laid out.
+
+## 7. Silent gap at the start of a recording and after resuming from pause
+
+**Root cause:** every start/resume called `AudioRecord` setup from scratch.
+Opening/priming the input stream takes 200–500 ms on many devices during
+which the engine is already "running" and the UI clock is already moving,
+so the head of the segment is silent and the timer leads the audio.
+
+**Fix:**
+- `StudioEngine` (native) now keeps a **warm recorder**: when a take is
+  paused, the stopped `AudioRecord` is retained instead of released, and
+  the next `record()` reuses it (one fresh open if the warm instance is
+  stale, e.g. the device was unplugged while paused). A stopped
+  `AudioRecord` captures nothing and idles at ~zero power.
+- New bridge methods `prepareRecorder(deviceId)` / `dropWarmRecorder()`:
+  the studio screen pre-warms the mic whenever it is idle or paused
+  (and re-warms on foreground return), and the warm mic is dropped when
+  the app backgrounds (so it never blocks the microphone for other apps)
+  or when the session closes/finalizes/discards.
+
+## 8. Playhead advances then snaps back when toggling Replace / preview
+
+**Root cause:** the Round 1 transition freeze only covered the JS→native
+command window. After the command resolved, the UI clock kept running, but
+the native first `AudioRecord.read()` / `AudioTrack.write()` lags the
+command by 100–500 ms (device priming, blocking read). The first meter
+then reported a position *behind* the UI prediction, and the 80 ms drift
+gate hard re-anchored to it — the visible jump backwards.
+
+**Fix (`src/services/audio/useStudioSession.ts`):**
+- The transition freeze now stays **on until the first hardware meter for
+  the target mode arrives** (`awaitingFirstMeterRef`). The playhead clock
+  is frozen while the audio path primes, so the UI can never lead the
+  hardware.
+- That first meter re-anchors the clock to the *true* native position and
+  releases the freeze; the drift gate then sees ~0 drift, so the hard
+  snap-back can no longer happen after a switch.
+- The wait is gated on the meter's `recording` flag (which mirrors the
+  engine mode the worker ran under), so stale meters from the other mode
+  that are still in flight cannot steal the anchor.
+- Safety valves: a 1.5 s guard releases the freeze if no meter ever
+  arrives, and any snapshot that is IDLE or not running (e.g. a
+  notification paused the take) releases it immediately.

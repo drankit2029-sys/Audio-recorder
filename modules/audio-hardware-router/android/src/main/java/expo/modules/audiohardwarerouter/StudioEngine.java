@@ -146,6 +146,20 @@ final class StudioEngine {
     private long playStartFrame = 0L;
     private int generation = 0;
 
+    /**
+     * Microphone that has been opened but is stopped, kept across
+     * pause/resume and between takes. Reopening an AudioRecord takes
+     * 200-500 ms on many devices, and that cost used to be paid on every
+     * start/resume: the first ~0.3 s of the segment had no audio while the
+     * UI was already running. A stopped AudioRecord captures nothing and
+     * idles at ~zero power, so holding it is cheap.
+     */
+    private AudioRecord warmRecorder;
+    private CaptureConfig warmConfig;
+    private int warmDeviceId = Integer.MIN_VALUE;
+    private int activeDeviceId = Integer.MIN_VALUE;
+    private CaptureConfig activeConfig;
+
     private boolean focusHeld = false;
     private Object focusRequest;
     private boolean serviceRequested = false;
@@ -540,13 +554,51 @@ final class StudioEngine {
             throw new IOException("This take reached the maximum WAV size.");
         }
 
-        CaptureConfig cc = openRecorder(inputDeviceId);
-        AudioRecord rec = cc.record;
+        // Reuse the warm (pre-opened, stopped) mic when the device matches —
+        // this skips the 200-500 ms AudioRecord setup that used to happen on
+        // every start/resume (the silent gap at the head of a segment).
+        CaptureConfig cc = null;
+        AudioRecord rec = null;
+        boolean fromWarm = false;
+        AudioRecord warm = warmRecorder;
+        if (warm != null && warmDeviceId == inputDeviceId) {
+            rec = warm;
+            cc = warmConfig;
+            fromWarm = true;
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+        }
+        if (rec == null) {
+            if (warm != null) {
+                releaseQuietly(warm);
+                warmRecorder = null;
+                warmConfig = null;
+                warmDeviceId = Integer.MIN_VALUE;
+            }
+            cc = openRecorder(inputDeviceId);
+            rec = cc.record;
+        }
         try {
             rec.startRecording();
         } catch (Throwable t) {
-            releaseQuietly(rec);
-            throw new IOException("The microphone could not start: " + t.getMessage());
+            if (fromWarm) {
+                // Stale warm instance (e.g. device unplugged while paused):
+                // one fresh try before giving up.
+                releaseQuietly(rec);
+                try {
+                    cc = openRecorder(inputDeviceId);
+                    rec = cc.record;
+                    rec.startRecording();
+                    fromWarm = false;
+                } catch (Throwable t2) {
+                    releaseQuietly(rec);
+                    throw new IOException("The microphone could not start: " + t2.getMessage());
+                }
+            } else {
+                releaseQuietly(rec);
+                throw new IOException("The microphone could not start: " + t.getMessage());
+            }
         }
         if (rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
             releaseQuietly(rec);
@@ -554,6 +606,8 @@ final class StudioEngine {
         }
 
         recorder = rec;
+        activeConfig = cc;
+        activeDeviceId = inputDeviceId;
         writeFrame = start;
         overwriteEndFrame = total;
         overwriting = start < total;
@@ -609,6 +663,50 @@ final class StudioEngine {
         long total = dataBytes / frameBytes;
         positionFrames = Math.max(0L, Math.min(total, msToFrames(positionMs)));
         refreshService();
+    }
+
+    /**
+     * Open (or swap) the warm mic so the next {@link #record} call has no
+     * device-setup latency. No-op while a take is already running; never
+     * throws — warming is best effort and the recorder is re-opened on
+     * demand if this failed.
+     */
+    public synchronized void prepareRecorder(int deviceId) {
+        if (mode == MODE_RECORDING) {
+            return;
+        }
+        if (warmRecorder != null && warmDeviceId == deviceId) {
+            return;
+        }
+        AudioRecord warm = warmRecorder;
+        if (warm != null) {
+            releaseQuietly(warm);
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+        }
+        try {
+            CaptureConfig cc = openRecorder(deviceId);
+            warmRecorder = cc.record;
+            warmConfig = cc;
+            warmDeviceId = deviceId;
+        } catch (Throwable t) {
+            Log.w(TAG, "Warm recorder open failed", t);
+        }
+    }
+
+    /** Drop the warm mic (app backgrounded or user left the studio). */
+    public synchronized void dropWarmRecorder() {
+        if (mode == MODE_RECORDING) {
+            return;
+        }
+        AudioRecord warm = warmRecorder;
+        if (warm != null) {
+            releaseQuietly(warm);
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+        }
     }
 
     // =======================================================================
@@ -754,7 +852,14 @@ final class StudioEngine {
             }
             joinQuietly(captureThread, 2500L);
             captureThread = null;
-            releaseQuietly(rec);
+            // Keep the (now stopped) mic warm instead of releasing it:
+            // reopening it is the 200-500 ms gap the user heard at the start
+            // of a resume. A stopped AudioRecord captures nothing.
+            if (rec != null) {
+                warmRecorder = rec;
+                warmConfig = activeConfig;
+                warmDeviceId = activeDeviceId;
+            }
             recorder = null;
             finishTracker();
             synchronized (ioLock) {
@@ -800,6 +905,13 @@ final class StudioEngine {
 
     private void closeSessionLocked(boolean deleteFile) {
         stopActivityLocked();
+        AudioRecord warm = warmRecorder;
+        if (warm != null) {
+            releaseQuietly(warm);
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+        }
         synchronized (ioLock) {
             closeRafLocked();
         }

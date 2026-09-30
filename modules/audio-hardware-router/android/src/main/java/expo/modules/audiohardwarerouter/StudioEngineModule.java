@@ -180,6 +180,26 @@ public class StudioEngineModule extends ReactContextBaseJavaModule implements St
         }
     }
 
+    @ReactMethod
+    public void prepareRecorder(int deviceId, Promise promise) {
+        try {
+            engine.prepareRecorder(deviceId);
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_PREPARE", message(t), t);
+        }
+    }
+
+    @ReactMethod
+    public void dropWarmRecorder(Promise promise) {
+        try {
+            engine.dropWarmRecorder();
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_PREPARE", message(t), t);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Queries
     // -----------------------------------------------------------------------

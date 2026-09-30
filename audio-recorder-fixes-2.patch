@@ -1,0 +1,676 @@
+From 7e1e87d80e3c8e3a9fa8764a34431857e50c1ca3 Mon Sep 17 00:00:00 2001
+From: Ankit <akitsini2004@gmail.com>
+Date: Wed, 30 Sep 2026 18:42:59 +0000
+Subject: [PATCH] Fix invisible search input, silent gap at record/resume, and
+ replace/preview snap-back
+
+1. Library search input: deterministic layout (explicit-width container,
+   minWidth:0 + full-height input), visible caret (cursorColor) and
+   selection color, brighter placeholder, subtle field border. autoFocus
+   removed - the staggered retry effect drives focus so the field can
+   never be focused before it is sized.
+
+2. Silent gap at record start / resume: the native engine now keeps a
+   warm (pre-opened, stopped) AudioRecord across pause/resume and between
+   takes (prepareRecorder/dropWarmRecorder bridge methods). record() reuses
+   it, so the 200-500 ms AudioRecord setup no longer eats the head of the
+   segment. The warm mic is dropped when the app backgrounds or the
+   session closes, so it never blocks other apps.
+
+3. Playhead running ahead / snapping back: the JS transition freeze now
+   stays on until the FIRST hardware meter for the target mode arrives
+   (gated on the meter's recording flag so stale meters from the other
+   mode are ignored). That meter re-anchors the clock to the true
+   position, so the UI starts moving in step with the audio instead of
+   ahead of it, and the 80 ms drift snap can no longer yank the playhead
+   backwards after a switch. A 1.5 s guard releases the freeze if no
+   meter ever arrives; IDLE/not-running snapshots release it immediately.
+---
+ App.tsx                                       |  15 +++
+ FIXES.md                                      |  73 ++++++++++
+ .../audiohardwarerouter/StudioEngine.java     | 122 ++++++++++++++++-
+ .../StudioEngineModule.java                   |  20 +++
+ modules/audio-hardware-router/src/index.ts    |  25 ++++
+ src/screens/LibraryScreen.tsx                 |  19 ++-
+ src/services/audio/useStudioSession.ts        | 125 ++++++++++++++++--
+ 7 files changed, 381 insertions(+), 18 deletions(-)
+
+diff --git a/App.tsx b/App.tsx
+index d2bdb28..35e4c98 100644
+--- a/App.tsx
++++ b/App.tsx
+@@ -457,6 +457,21 @@ function AudioRecorderApp() {
+     if (!replaceEnabled && replaceArmedRef.current) setReplaceArmed(false);
+   }, [replaceEnabled]);
+ 
++  // Keep a warm (pre-opened, stopped) microphone while the studio is idle
++  // or paused: reopening AudioRecord on every start/resume used to cost
++  // 200-500 ms, which is what produced the silent gap at the head of a
++  // segment and the UI timer running ahead of the audio. Warming is
++  // best-effort (native swallows failures) and is dropped on background.
++  const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
++  useEffect(() => {
++    const sub = AppState.addEventListener('change', (s) => setAppActive(s === 'active'));
++    return () => sub.remove();
++  }, []);
++  useEffect(() => {
++    if (!appActive || currentScreen !== 'studio' || isSessionActive) return;
++    void StudioEngine.prepareRecorder(selectedDeviceId ?? -1);
++  }, [appActive, currentScreen, isSessionActive, selectedDeviceId]);
++
+   const mainIcon: MainIcon =
+     engineState === 'RECORDING' || engineState === 'PREVIEWING'
+       ? 'pause'
+diff --git a/FIXES.md b/FIXES.md
+index 77ea2cc..cae2784 100644
+--- a/FIXES.md
++++ b/FIXES.md
+@@ -108,3 +108,76 @@ The JS side now keeps the playhead continuous across both:
+ - on `"caught_up"` the playhead is kept, the duration bar only ever grows,
+   the Replace pill auto-disarms, and recording continues seamlessly — no
+   jump, no pause.
++
++---
++
++# Bugfix Round 2 — 2026-09-30
++
++Follow-up fixes for three issues that survived Round 1. Native module
++changes included — **an Android rebuild is required** (`expo run:android`),
++a JS-only reload will not pick up the warm-recorder changes.
++
++## 6. Library search input invisible (icons and count render, typing works)
++
++**Root cause:** the search bar layout was not fully deterministic. The
++container used `flex: 1` inside the (auto-height) search column and the
++`TextInput` carried no explicit size or visible caret, so on Android the
++input could measure to zero / render indistinguishably from the background
++while the icons kept their explicit sizes. `autoFocus` on mount also raced
++the first layout pass: the field could be focused before it was sized,
++which is a common cause of a missing caret and "invisible" text.
++
++**Fix (`src/screens/LibraryScreen.tsx`):**
++- `searchBarContainer` now uses an explicit `width: '100%'` plus a subtle
++  border, so the field is always the full bar width and visibly outlined.
++- `searchInput` uses `flex: 1` + `minWidth: 0` + `height: '100%'`, so it
++  fills the bar and can never collapse to zero.
++- Added `cursorColor` (RN 0.86's replacement for `caretColor`) and
++  `selectionColor` so the caret and selection are always visible on the
++  dark background, and a brighter placeholder.
++- `autoFocus` removed: the staggered retry effect (Round 1) is the single
++  source of truth for focus, so the field can no longer be focused before
++  it is laid out.
++
++## 7. Silent gap at the start of a recording and after resuming from pause
++
++**Root cause:** every start/resume called `AudioRecord` setup from scratch.
++Opening/priming the input stream takes 200–500 ms on many devices during
++which the engine is already "running" and the UI clock is already moving,
++so the head of the segment is silent and the timer leads the audio.
++
++**Fix:**
++- `StudioEngine` (native) now keeps a **warm recorder**: when a take is
++  paused, the stopped `AudioRecord` is retained instead of released, and
++  the next `record()` reuses it (one fresh open if the warm instance is
++  stale, e.g. the device was unplugged while paused). A stopped
++  `AudioRecord` captures nothing and idles at ~zero power.
++- New bridge methods `prepareRecorder(deviceId)` / `dropWarmRecorder()`:
++  the studio screen pre-warms the mic whenever it is idle or paused
++  (and re-warms on foreground return), and the warm mic is dropped when
++  the app backgrounds (so it never blocks the microphone for other apps)
++  or when the session closes/finalizes/discards.
++
++## 8. Playhead advances then snaps back when toggling Replace / preview
++
++**Root cause:** the Round 1 transition freeze only covered the JS→native
++command window. After the command resolved, the UI clock kept running, but
++the native first `AudioRecord.read()` / `AudioTrack.write()` lags the
++command by 100–500 ms (device priming, blocking read). The first meter
++then reported a position *behind* the UI prediction, and the 80 ms drift
++gate hard re-anchored to it — the visible jump backwards.
++
++**Fix (`src/services/audio/useStudioSession.ts`):**
++- The transition freeze now stays **on until the first hardware meter for
++  the target mode arrives** (`awaitingFirstMeterRef`). The playhead clock
++  is frozen while the audio path primes, so the UI can never lead the
++  hardware.
++- That first meter re-anchors the clock to the *true* native position and
++  releases the freeze; the drift gate then sees ~0 drift, so the hard
++  snap-back can no longer happen after a switch.
++- The wait is gated on the meter's `recording` flag (which mirrors the
++  engine mode the worker ran under), so stale meters from the other mode
++  that are still in flight cannot steal the anchor.
++- Safety valves: a 1.5 s guard releases the freeze if no meter ever
++  arrives, and any snapshot that is IDLE or not running (e.g. a
++  notification paused the take) releases it immediately.
+diff --git a/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngine.java b/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngine.java
+index c29bb6b..cfb33d5 100644
+--- a/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngine.java
++++ b/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngine.java
+@@ -146,6 +146,20 @@ final class StudioEngine {
+     private long playStartFrame = 0L;
+     private int generation = 0;
+ 
++    /**
++     * Microphone that has been opened but is stopped, kept across
++     * pause/resume and between takes. Reopening an AudioRecord takes
++     * 200-500 ms on many devices, and that cost used to be paid on every
++     * start/resume: the first ~0.3 s of the segment had no audio while the
++     * UI was already running. A stopped AudioRecord captures nothing and
++     * idles at ~zero power, so holding it is cheap.
++     */
++    private AudioRecord warmRecorder;
++    private CaptureConfig warmConfig;
++    private int warmDeviceId = Integer.MIN_VALUE;
++    private int activeDeviceId = Integer.MIN_VALUE;
++    private CaptureConfig activeConfig;
++
+     private boolean focusHeld = false;
+     private Object focusRequest;
+     private boolean serviceRequested = false;
+@@ -540,13 +554,51 @@ final class StudioEngine {
+             throw new IOException("This take reached the maximum WAV size.");
+         }
+ 
+-        CaptureConfig cc = openRecorder(inputDeviceId);
+-        AudioRecord rec = cc.record;
++        // Reuse the warm (pre-opened, stopped) mic when the device matches —
++        // this skips the 200-500 ms AudioRecord setup that used to happen on
++        // every start/resume (the silent gap at the head of a segment).
++        CaptureConfig cc = null;
++        AudioRecord rec = null;
++        boolean fromWarm = false;
++        AudioRecord warm = warmRecorder;
++        if (warm != null && warmDeviceId == inputDeviceId) {
++            rec = warm;
++            cc = warmConfig;
++            fromWarm = true;
++            warmRecorder = null;
++            warmConfig = null;
++            warmDeviceId = Integer.MIN_VALUE;
++        }
++        if (rec == null) {
++            if (warm != null) {
++                releaseQuietly(warm);
++                warmRecorder = null;
++                warmConfig = null;
++                warmDeviceId = Integer.MIN_VALUE;
++            }
++            cc = openRecorder(inputDeviceId);
++            rec = cc.record;
++        }
+         try {
+             rec.startRecording();
+         } catch (Throwable t) {
+-            releaseQuietly(rec);
+-            throw new IOException("The microphone could not start: " + t.getMessage());
++            if (fromWarm) {
++                // Stale warm instance (e.g. device unplugged while paused):
++                // one fresh try before giving up.
++                releaseQuietly(rec);
++                try {
++                    cc = openRecorder(inputDeviceId);
++                    rec = cc.record;
++                    rec.startRecording();
++                    fromWarm = false;
++                } catch (Throwable t2) {
++                    releaseQuietly(rec);
++                    throw new IOException("The microphone could not start: " + t2.getMessage());
++                }
++            } else {
++                releaseQuietly(rec);
++                throw new IOException("The microphone could not start: " + t.getMessage());
++            }
+         }
+         if (rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+             releaseQuietly(rec);
+@@ -554,6 +606,8 @@ final class StudioEngine {
+         }
+ 
+         recorder = rec;
++        activeConfig = cc;
++        activeDeviceId = inputDeviceId;
+         writeFrame = start;
+         overwriteEndFrame = total;
+         overwriting = start < total;
+@@ -611,6 +665,50 @@ final class StudioEngine {
+         refreshService();
+     }
+ 
++    /**
++     * Open (or swap) the warm mic so the next {@link #record} call has no
++     * device-setup latency. No-op while a take is already running; never
++     * throws — warming is best effort and the recorder is re-opened on
++     * demand if this failed.
++     */
++    public synchronized void prepareRecorder(int deviceId) {
++        if (mode == MODE_RECORDING) {
++            return;
++        }
++        if (warmRecorder != null && warmDeviceId == deviceId) {
++            return;
++        }
++        AudioRecord warm = warmRecorder;
++        if (warm != null) {
++            releaseQuietly(warm);
++            warmRecorder = null;
++            warmConfig = null;
++            warmDeviceId = Integer.MIN_VALUE;
++        }
++        try {
++            CaptureConfig cc = openRecorder(deviceId);
++            warmRecorder = cc.record;
++            warmConfig = cc;
++            warmDeviceId = deviceId;
++        } catch (Throwable t) {
++            Log.w(TAG, "Warm recorder open failed", t);
++        }
++    }
++
++    /** Drop the warm mic (app backgrounded or user left the studio). */
++    public synchronized void dropWarmRecorder() {
++        if (mode == MODE_RECORDING) {
++            return;
++        }
++        AudioRecord warm = warmRecorder;
++        if (warm != null) {
++            releaseQuietly(warm);
++            warmRecorder = null;
++            warmConfig = null;
++            warmDeviceId = Integer.MIN_VALUE;
++        }
++    }
++
+     // =======================================================================
+     // Queries
+     // =======================================================================
+@@ -754,7 +852,14 @@ final class StudioEngine {
+             }
+             joinQuietly(captureThread, 2500L);
+             captureThread = null;
+-            releaseQuietly(rec);
++            // Keep the (now stopped) mic warm instead of releasing it:
++            // reopening it is the 200-500 ms gap the user heard at the start
++            // of a resume. A stopped AudioRecord captures nothing.
++            if (rec != null) {
++                warmRecorder = rec;
++                warmConfig = activeConfig;
++                warmDeviceId = activeDeviceId;
++            }
+             recorder = null;
+             finishTracker();
+             synchronized (ioLock) {
+@@ -800,6 +905,13 @@ final class StudioEngine {
+ 
+     private void closeSessionLocked(boolean deleteFile) {
+         stopActivityLocked();
++        AudioRecord warm = warmRecorder;
++        if (warm != null) {
++            releaseQuietly(warm);
++            warmRecorder = null;
++            warmConfig = null;
++            warmDeviceId = Integer.MIN_VALUE;
++        }
+         synchronized (ioLock) {
+             closeRafLocked();
+         }
+diff --git a/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngineModule.java b/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngineModule.java
+index 5721437..67d4ceb 100644
+--- a/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngineModule.java
++++ b/modules/audio-hardware-router/android/src/main/java/expo/modules/audiohardwarerouter/StudioEngineModule.java
+@@ -180,6 +180,26 @@ public class StudioEngineModule extends ReactContextBaseJavaModule implements St
+         }
+     }
+ 
++    @ReactMethod
++    public void prepareRecorder(int deviceId, Promise promise) {
++        try {
++            engine.prepareRecorder(deviceId);
++            promise.resolve(true);
++        } catch (Throwable t) {
++            promise.reject("E_STUDIO_PREPARE", message(t), t);
++        }
++    }
++
++    @ReactMethod
++    public void dropWarmRecorder(Promise promise) {
++        try {
++            engine.dropWarmRecorder();
++            promise.resolve(true);
++        } catch (Throwable t) {
++            promise.reject("E_STUDIO_PREPARE", message(t), t);
++        }
++    }
++
+     // -----------------------------------------------------------------------
+     // Queries
+     // -----------------------------------------------------------------------
+diff --git a/modules/audio-hardware-router/src/index.ts b/modules/audio-hardware-router/src/index.ts
+index 6a713f5..3c02d0a 100644
+--- a/modules/audio-hardware-router/src/index.ts
++++ b/modules/audio-hardware-router/src/index.ts
+@@ -543,6 +543,31 @@ export const StudioEngine = {
+       .catch(() => false);
+   },
+ 
++  /**
++   * Keep a mic open (stopped) so the next record() does not pay the
++   * 200-500 ms AudioRecord setup cost — that cost was the silent gap at
++   * the head of each segment. Never throws; a failed warm just means the
++   * recorder is opened on demand as before.
++   */
++  prepareRecorder(deviceId: number): Promise<boolean> {
++    if (!NativeStudio || typeof NativeStudio.prepareRecorder !== 'function') {
++      return Promise.resolve(false);
++    }
++    return NativeStudio.prepareRecorder(deviceId)
++      .then(() => true)
++      .catch(() => false);
++  },
++
++  /** Release the warm mic (app backgrounded or user left the studio). */
++  dropWarmRecorder(): Promise<boolean> {
++    if (!NativeStudio || typeof NativeStudio.dropWarmRecorder !== 'function') {
++      return Promise.resolve(false);
++    }
++    return NativeStudio.dropWarmRecorder()
++      .then(() => true)
++      .catch(() => false);
++  },
++
+   addListener<K extends keyof StudioEventMap>(
+     event: K,
+     listener: (payload: StudioEventMap[K]) => void
+diff --git a/src/screens/LibraryScreen.tsx b/src/screens/LibraryScreen.tsx
+index d178be7..811e42f 100644
+--- a/src/screens/LibraryScreen.tsx
++++ b/src/screens/LibraryScreen.tsx
+@@ -791,20 +791,27 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
+                     <ChevronRight size={18} color="#8E8E93" style={{ transform: [{ rotate: '180deg' }] }} />
+                   </TouchableOpacity>
+                   <Search size={16} color="#8E8E93" />
++                  {/* Focus is driven by the staggered retry effect below;
++                      autoFocus on mount races the first layout pass on
++                      Android and can leave the field focused before it is
++                      sized (no visible caret/text). */}
+                   <TextInput
+                     ref={searchInputRef}
+                     style={styles.searchInput}
+                     value={searchQuery}
+                     onChangeText={setSearchQuery}
+                     placeholder="Search recordings..."
+-                    placeholderTextColor="#636366"
+-                    autoFocus
++                    placeholderTextColor="#8E8E93"
+                     autoCorrect={false}
+                     autoCapitalize="none"
+                     returnKeyType="search"
+                     blurOnSubmit
+                     underlineColorAndroid="transparent"
+                     showSoftInputOnFocus
++                    cursorColor="#FFFFFF"
++                    selectionColor="#7C5CFF"
++                    textAlignVertical="center"
++                    maxLength={80}
+                     onFocus={() => {
+                       KeyboardHelper.show().catch(() => {});
+                     }}
+@@ -1145,17 +1152,23 @@ const styles = StyleSheet.create({
+     backgroundColor: '#121212',
+   },
+   searchBarContainer: {
+-    flex: 1,
++    width: '100%',
+     flexDirection: 'row',
+     alignItems: 'center',
+     backgroundColor: '#161618',
+     borderRadius: 10,
++    borderWidth: 1,
++    borderColor: '#2A2A31',
+     paddingHorizontal: 12,
+     height: 42,
+     gap: 8,
+   },
++  // Deterministic sizing: the input must never collapse to zero (explicit
++  // full-width container, flex + minWidth:0 on the input, full height).
+   searchInput: {
+     flex: 1,
++    minWidth: 0,
++    height: '100%',
+     color: '#FFFFFF',
+     fontSize: 15,
+     padding: 0,
+diff --git a/src/services/audio/useStudioSession.ts b/src/services/audio/useStudioSession.ts
+index 61814b8..c3bbce8 100644
+--- a/src/services/audio/useStudioSession.ts
++++ b/src/services/audio/useStudioSession.ts
+@@ -127,6 +127,45 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+    */
+   const lastActionRef = useRef<{ at: number; pos: number } | null>(null);
+   const switchGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
++  /**
++   * The mode we are waiting for the first hardware meter of. The playhead
++   * clock stays frozen (isTransitioning) until that meter arrives: the
++   * native audio path takes up to ~0.5 s to prime, and letting the UI run
++   * ahead during that window is what caused the "timer moves before the
++   * audio starts" gap and the hard snap-back when the first meter (tens of
++   * ms behind the UI prediction) was blended in.
++   */
++  const awaitingFirstMeterRef = useRef<EngineState | null>(null);
++  const firstMeterGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
++
++  const releaseFirstMeterWait = useCallback(() => {
++    awaitingFirstMeterRef.current = null;
++    if (firstMeterGuardRef.current) {
++      clearTimeout(firstMeterGuardRef.current);
++      firstMeterGuardRef.current = null;
++    }
++    // Also clear the beginSwitch() safety timer: a stale 5 s guard could
++    // otherwise fire into the middle of a *new* switch and release that
++    // freeze early.
++    if (switchGuardRef.current) {
++      clearTimeout(switchGuardRef.current);
++      switchGuardRef.current = null;
++    }
++    isTransitioning.value = false;
++  }, [isTransitioning]);
++
++  const armFirstMeterWait = useCallback(
++    (expected: EngineState) => {
++      awaitingFirstMeterRef.current = expected;
++      if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
++      firstMeterGuardRef.current = setTimeout(() => {
++        // Safety: if the meter never arrives (the engine never really
++        // started), release the freeze so the UI cannot wedge.
++        releaseFirstMeterWait();
++      }, 1500);
++    },
++    [isTransitioning, releaseFirstMeterWait]
++  );
+ 
+   const setEngineState = useCallback((next: EngineState) => {
+     engineStateRef.current = next;
+@@ -214,7 +253,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+         hasEditsRef.current = false;
+         scrubPauseRef.current = false;
+         lastActionRef.current = null;
+-        isTransitioning.value = false;
++        releaseFirstMeterWait();
+         if (sessionInfoRef.current) setSessionInfo(null);
+       } else {
+         const fromScrubPause = scrubPauseRef.current && next === 'PAUSED';
+@@ -229,6 +268,11 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+           // growing; never shrink the bar backwards.
+           durationMs.value = snap.durationMs;
+         }
++        // If the mode we were waiting for can no longer happen (e.g. a
++        // notification paused the take), release the freeze right away.
++        if (!running && awaitingFirstMeterRef.current !== null) {
++          releaseFirstMeterWait();
++        }
+       }
+ 
+       if (next === 'RECORDING') hasEditsRef.current = true;
+@@ -238,7 +282,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+     },
+     // Shared values and refs are stable.
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    [setEngineState, setOverwriting, setSessionInfo]
++    [setEngineState, setOverwriting, setSessionInfo, releaseFirstMeterWait]
+   );
+ 
+   const applyPeakDelta = useCallback(
+@@ -269,6 +313,27 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+       durationRef.current = e.durationMs;
+ 
+       const state = engineStateRef.current;
++
++      // The first hardware meter for the mode we just switched into proves
++      // the audio path is live. Anchor the clock to the true position and
++      // release the transition freeze so the UI starts moving in step with
++      // the audio instead of ahead of it. (A stale meter from the *other*
++      // mode is ignored via the recording flag, which mirrors the engine
++      // mode each worker ran under.)
++      const waitingFor = awaitingFirstMeterRef.current;
++      if (
++        waitingFor !== null &&
++        state === waitingFor &&
++        (waitingFor === 'RECORDING' ? e.recording : !e.recording)
++      ) {
++        const now = Date.now();
++        anchorRef.current = { ms: e.positionMs, at: now };
++        anchorMs.value = e.positionMs;
++        anchorAt.value = now;
++        playheadMs.value = e.positionMs;
++        releaseFirstMeterWait();
++      }
++
+       // Meter events that arrive while a mode switch is in flight belong to
+       // the old (or newly starting) engine; let the command path own the
+       // re-anchor instead of pulling the frozen playhead around.
+@@ -285,8 +350,9 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+         anchorAt.value = anchorRef.current.at;
+       }
+     },
++    // Shared values and refs are stable.
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    [applyPeakDelta]
++    [applyPeakDelta, releaseFirstMeterWait]
+   );
+ 
+   const loadPeaks = useCallback(async () => {
+@@ -341,8 +407,16 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+     const sub = AppState.addEventListener('change', (next) => {
+       if (next === 'active') {
+         void resync();
+-      } else if (next === 'background' && engineStateRef.current === 'PREVIEWING') {
+-        StudioEngine.pause().catch(() => {});
++      } else if (next === 'background') {
++        if (engineStateRef.current === 'PREVIEWING') {
++          StudioEngine.pause().catch(() => {});
++        }
++        // Release the warm mic so backgrounding the app does not keep the
++        // microphone held from other apps. The studio screen re-warms it on
++        // foreground return (and on every idle/paused entry).
++        if (engineStateRef.current !== 'RECORDING') {
++          StudioEngine.dropWarmRecorder().catch(() => {});
++        }
+       }
+     });
+     return () => sub.remove();
+@@ -370,8 +444,13 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+       playheadMs.value = 0;
+       hasEditsRef.current = false;
+       try {
++        // Freeze the clock while the mic opens, exactly like a mode
++        // switch: on a cold start the audio path needs up to ~0.5 s to
++        // prime, and the UI must not run ahead of it.
++        isTransitioning.value = true;
+         const snap = await StudioEngine.record({ positionMs: -1, inputDeviceId: o.inputDeviceId });
+         applySnapshot(snap, 'record');
++        armFirstMeterWait('RECORDING');
+       } catch (e) {
+         try {
+           await StudioEngine.discard();
+@@ -382,7 +461,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+       return info;
+     },
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    [applySnapshot, setSessionInfo]
++    [applySnapshot, armFirstMeterWait, isTransitioning, setSessionInfo]
+   );
+ 
+   const openSession = useCallback(
+@@ -457,6 +536,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+   useEffect(() => {
+     return () => {
+       if (switchGuardRef.current) clearTimeout(switchGuardRef.current);
++      if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
+     };
+   }, []);
+ 
+@@ -485,17 +565,26 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+           anchorAt.value = now;
+           playheadMs.value = uiPos;
+         }
++        // The mic was (re)opened natively: freeze the clock until the first
++        // capture meter proves audio is actually flowing (see
++        // armFirstMeterWait). That meter re-anchors the clock to the true
++        // position, so the UI never leads the hardware.
++        armFirstMeterWait('RECORDING');
+       } catch (e) {
+         try {
+           await resync();
+         } catch {}
+         throw e;
+       } finally {
+-        endSwitch();
++        // On success the freeze is released by the first meter (or the
++        // guard timer); on failure the resync snapshot released it.
++        if (!awaitingFirstMeterRef.current) {
++          releaseFirstMeterWait();
++        }
+       }
+     },
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-    [applySnapshot, anchorAt, anchorMs, playheadMs, endSwitch, resync]
++    [applySnapshot, anchorAt, anchorMs, playheadMs, armFirstMeterWait, releaseFirstMeterWait, resync]
+   );
+ 
+   const preview = useCallback(async (positionMs: number) => {
+@@ -522,15 +611,31 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
+       anchorMs.value = uiPos;
+       anchorAt.value = now;
+       playheadMs.value = uiPos;
++      // The speaker path was just (re)opened natively: freeze the clock
++      // until the first playback meter proves audio is actually flowing
++      // (see armFirstMeterWait).
++      armFirstMeterWait('PREVIEWING');
+     } catch (e) {
+       try {
+         await resync();
+       } catch {}
+       throw e;
+     } finally {
+-      endSwitch();
++      // On success the freeze is released by the first meter (or the
++      // guard timer); on failure the resync snapshot released it.
++      if (!awaitingFirstMeterRef.current) {
++        releaseFirstMeterWait();
++      }
+     }
+-  }, [applySnapshot, anchorAt, anchorMs, playheadMs, endSwitch, resync]);
++  }, [
++    applySnapshot,
++    anchorAt,
++    anchorMs,
++    armFirstMeterWait,
++    playheadMs,
++    releaseFirstMeterWait,
++    resync,
++  ]);
+ 
+   const pause = useCallback(async (): Promise<StudioSnapshot> => {
+     const snap = await StudioEngine.pause();
+-- 
+2.47.3
+

@@ -791,20 +791,27 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
                     <ChevronRight size={18} color="#8E8E93" style={{ transform: [{ rotate: '180deg' }] }} />
                   </TouchableOpacity>
                   <Search size={16} color="#8E8E93" />
+                  {/* Focus is driven by the staggered retry effect below;
+                      autoFocus on mount races the first layout pass on
+                      Android and can leave the field focused before it is
+                      sized (no visible caret/text). */}
                   <TextInput
                     ref={searchInputRef}
                     style={styles.searchInput}
                     value={searchQuery}
                     onChangeText={setSearchQuery}
                     placeholder="Search recordings..."
-                    placeholderTextColor="#636366"
-                    autoFocus
+                    placeholderTextColor="#8E8E93"
                     autoCorrect={false}
                     autoCapitalize="none"
                     returnKeyType="search"
                     blurOnSubmit
                     underlineColorAndroid="transparent"
                     showSoftInputOnFocus
+                    cursorColor="#FFFFFF"
+                    selectionColor="#7C5CFF"
+                    textAlignVertical="center"
+                    maxLength={80}
                     onFocus={() => {
                       KeyboardHelper.show().catch(() => {});
                     }}
@@ -1145,17 +1152,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#121212',
   },
   searchBarContainer: {
-    flex: 1,
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#161618',
     borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2A2A31',
     paddingHorizontal: 12,
     height: 42,
     gap: 8,
   },
+  // Deterministic sizing: the input must never collapse to zero (explicit
+  // full-width container, flex + minWidth:0 on the input, full height).
   searchInput: {
     flex: 1,
+    minWidth: 0,
+    height: '100%',
     color: '#FFFFFF',
     fontSize: 15,
     padding: 0,

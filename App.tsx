@@ -457,6 +457,21 @@ function AudioRecorderApp() {
     if (!replaceEnabled && replaceArmedRef.current) setReplaceArmed(false);
   }, [replaceEnabled]);
 
+  // Keep a warm (pre-opened, stopped) microphone while the studio is idle
+  // or paused: reopening AudioRecord on every start/resume used to cost
+  // 200-500 ms, which is what produced the silent gap at the head of a
+  // segment and the UI timer running ahead of the audio. Warming is
+  // best-effort (native swallows failures) and is dropped on background.
+  const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) => setAppActive(s === 'active'));
+    return () => sub.remove();
+  }, []);
+  useEffect(() => {
+    if (!appActive || currentScreen !== 'studio' || isSessionActive) return;
+    void StudioEngine.prepareRecorder(selectedDeviceId ?? -1);
+  }, [appActive, currentScreen, isSessionActive, selectedDeviceId]);
+
   const mainIcon: MainIcon =
     engineState === 'RECORDING' || engineState === 'PREVIEWING'
       ? 'pause'
