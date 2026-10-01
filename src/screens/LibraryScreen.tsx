@@ -50,6 +50,8 @@ import {
 import { DeleteConfirmationModal } from '../components/audio/DeleteConfirmationModal';
 import { RenameRecordingModal } from '../components/library/RenameRecordingModal';
 import { LibrarySortModal, SortOption } from '../components/library/LibrarySortModal';
+import { LibrarySearchBar } from '../components/library/LibrarySearchBar';
+import { useLibrarySearch } from '../services/search/useLibrarySearch';
 import { LibraryBatchBar } from '../components/library/LibraryBatchBar';
 import { RecordingCard } from '../components/library/RecordingCard';
 
@@ -101,8 +103,6 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const deckBottom = Math.max(insets.bottom + 20, 54);
   const toastTop = getToastTop(insets.top);
 
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   const [menuVisible, setMenuVisible] = useState(false);
   const [sortModalVisible, setSortModalVisible] = useState(false);
   const [sortOption, setSortOption] = useState<SortOption>('date_desc');
@@ -146,11 +146,20 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [exportTarget, setExportTarget] = useState<ExportTarget | null>(null);
 
+  const searchInputRef = useRef<TextInput | null>(null);
+  /** Only used to let the hardware back button step out of search first. */
+  const searchInputFocusedRef = useRef(false);
+  /**
+   * When the last back press consumed a search step (keyboard -> text ->
+   * filter). The strip is dismissed only as the step right after those, so a
+   * back press on an untouched list still leaves the screen instead of eating a
+   * press to hide a bar the user was not in.
+   */
+  const searchStepAtRef = useRef(0);
+
   const [toastData, setToastData] = useState<AppToastData | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const searchInputRef = useRef<TextInput | null>(null);
-  const searchFocusTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const showToast = useCallback(
     (
@@ -172,32 +181,8 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
-      searchFocusTimers.current.forEach(clearTimeout);
     };
   }, []);
-
-  // Opening the search bar mounts the input fresh; autoFocus alone is not
-  // reliable enough on Android 15+ edge-to-edge to bring up the IME, so the
-  // field is focused (and the native keyboard helper invoked) explicitly,
-  // with staggered retries to survive first-frame layout.
-  useEffect(() => {
-    if (!isSearching) return;
-    const attempt = (delay: number) => {
-      const id = setTimeout(() => {
-        try {
-          searchInputRef.current?.focus();
-        } catch {}
-        KeyboardHelper.show().catch(() => {});
-      }, delay);
-      searchFocusTimers.current.push(id);
-    };
-    attempt(120);
-    attempt(400);
-    return () => {
-      searchFocusTimers.current.forEach(clearTimeout);
-      searchFocusTimers.current = [];
-    };
-  }, [isSearching]);
 
   const activeRecording = recordings.find((r) => r.id === activeId) ?? null;
   const player = useAudioPlayer(activeRecording?.uri ?? null);
@@ -205,7 +190,15 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
   const playerRef = useRef(player);
   playerRef.current = player;
 
-  const progressPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Set once the current player has shown any sign of life (position or duration). */
+  const playbackLivedRef = useRef(false);
+  const playbackProbeRef = useRef(0);
+
+  useEffect(() => {
+    playbackLivedRef.current = false;
+    playbackProbeRef.current = 0;
+  }, [player, activeId]);
 
   useEffect(() => {
     if (!player || !activeRecording) return;
@@ -280,7 +273,33 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           durationRef.current = dur;
           setDuration(dur);
         }
-      } catch {}
+
+        // A decode that never delivers a single frame (deleted or truncated
+        // file) used to leave the row showing a spinner forever: play() is
+        // fire-and-forget in expo-audio. If the position has not moved after
+        // 2.5 s, drop out of the playing state and say why.
+        const moved = player.currentTime > 0.05 || dur > 0;
+        if (moved) {
+          playbackLivedRef.current = true;
+        } else if (!playbackLivedRef.current) {
+          if (playbackProbeRef.current === 0) playbackProbeRef.current = Date.now();
+          else if (Date.now() - playbackProbeRef.current > 2500) {
+            playbackProbeRef.current = 0;
+            setIsPlaying(false);
+            setActiveId(null);
+            showToast('Cannot Play', 'This file could not be opened. It may have been moved or deleted.', {
+              variant: 'warning',
+            });
+            return;
+          }
+        }
+      } catch {
+        if (!playbackLivedRef.current) {
+          setIsPlaying(false);
+          setActiveId(null);
+          showToast('Cannot Play', 'Playback failed on this file.', { variant: 'warning' });
+        }
+      }
     }, 40);
 
     return () => {
@@ -291,34 +310,64 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     };
   }, [isPlaying, player, activeRecording]);
 
+  // ---- search ------------------------------------------------------------------
+  // The whole search surface (query, tokens, time/length filter, recents) lives
+  // in one hook so the field, the list and the empty state cannot disagree.
+  const search = useLibrarySearch(recordings);
+  const {
+    text: searchText,
+    setText: setSearchText,
+    query: searchQuery,
+    filter: searchFilter,
+    setFilter: setSearchFilter,
+    recents,
+    visible: searchVisible,
+    setVisible: setSearchVisible,
+    commit: commitSearch,
+    clear: clearSearch,
+    removeRecent,
+    pending: searchPending,
+    results: searchResults,
+    highlights,
+    tokens: searchTokens,
+  } = search;
+
+  const searchActive = searchQuery.trim().length > 0 || searchFilter !== 'all';
+
+  /**
+   * Order: with no explicit sort chosen, the *search* ranks the list (best
+   * match first). Pick any sort and the matched set is kept but re-ordered,
+   * so "search then sort by length" behaves the way people expect.
+   */
   const processedRecordings = useMemo(() => {
-    let list = [...recordings];
-
-    if (searchQuery.trim().length > 0) {
-      const q = searchQuery.toLowerCase().trim();
-      list = list.filter((item) => item.name.toLowerCase().includes(q));
+    const hits = searchResults.hits;
+    if (!searchActive || sortOption === 'date_desc') {
+      return hits.map((h) => h.item);
     }
-
+    const list = [...hits];
     list.sort((a, b) => {
+      let primary = 0;
       switch (sortOption) {
         case 'name_asc':
-          return a.name.localeCompare(b.name);
+          primary = a.item.name.localeCompare(b.item.name);
+          break;
         case 'name_desc':
-          return b.name.localeCompare(a.name);
+          primary = b.item.name.localeCompare(a.item.name);
+          break;
         case 'duration_asc':
-          return a.durationMs - b.durationMs;
+          primary = a.item.durationMs - b.item.durationMs;
+          break;
         case 'duration_desc':
-          return b.durationMs - a.durationMs;
-        case 'date_asc':
-          return a.createdAt - b.createdAt;
-        case 'date_desc':
+          primary = b.item.durationMs - a.item.durationMs;
+          break;
         default:
-          return b.createdAt - a.createdAt;
+          primary = a.item.createdAt - b.item.createdAt;
+          break;
       }
+      return primary !== 0 ? primary : b.score - a.score;
     });
-
-    return list;
-  }, [recordings, searchQuery, sortOption]);
+    return list.map((h) => h.item);
+  }, [searchActive, searchResults, sortOption]);
 
   const handlePlayToggle = useCallback((item: SavedRecording) => {
     if (expandedIdRef.current !== item.id) {
@@ -454,10 +503,27 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
         setMenuVisible(false);
         return true;
       }
-      if (isSearching) {
-        setIsSearching(false);
-        setSearchQuery('');
+      // Step out of search before leaving the screen: drop the query, then the
+      // filter, then the keyboard, and only then the search strip itself. Each
+      // press undoes exactly one thing, and the last one hides the bar - so Back
+      // never quits the app while the user is still inside search.
+      if (searchActive && (searchText.length > 0 || searchFilter !== 'all')) {
+        if (searchText.length > 0) setSearchText('');
+        if (searchFilter !== 'all') setSearchFilter('all');
+        searchStepAtRef.current = Date.now();
+        return true;
+      }
+      if (searchInputFocusedRef.current) {
+        searchInputFocusedRef.current = false;
+        try {
+          searchInputRef.current?.blur();
+        } catch {}
         Keyboard.dismiss();
+        searchStepAtRef.current = Date.now();
+        return true;
+      }
+      if (searchVisible && Date.now() - searchStepAtRef.current < 2000) {
+        setSearchVisible(false);
         return true;
       }
       if (isEditMode) {
@@ -476,7 +542,13 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
     deleteModalVisible,
     sortModalVisible,
     menuVisible,
-    isSearching,
+    searchActive,
+    searchText,
+    searchFilter,
+    searchVisible,
+    setSearchVisible,
+    setSearchText,
+    setSearchFilter,
     isEditMode,
     onEditModeChange,
   ]);
@@ -569,14 +641,25 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
 
       const deletedCount = selectedIds.size;
       let updated = recordings;
+      let failed: string[] = [];
       for (const id of selectedIds) {
-        updated = await RecordingLibrary.delete(id);
+        try {
+          updated = await RecordingLibrary.delete(id);
+        } catch {
+          failed.push(id);
+        }
       }
-      onLibraryUpdate(updated);
+      onLibraryUpdate(updated.filter((r) => !selectedIds.has(r.id) || failed.indexOf(r.id) >= 0));
       setSelectedIds(new Set());
       setIsEditMode(false);
       onEditModeChange(false);
-      showToast('Takes Deleted', `${deletedCount} recordings removed`, { variant: 'delete' });
+      showToast(
+        'Takes Deleted',
+        failed.length
+          ? `${deletedCount - failed.length} removed, ${failed.length} could not be deleted`
+          : `${deletedCount} recordings removed`,
+        { variant: 'delete' }
+      );
     }
 
     setDeleteModalVisible(false);
@@ -735,6 +818,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
           onSeek={handleSeek}
           onOpenRename={handleOpenRename}
           onEdit={handleEditRecording}
+          highlights={highlights.get(item.id)}
           onExport={handleOpenExportSingle}
           onDelete={handleDeleteSingle}
           onLongPress={handleCardLongPress}
@@ -746,6 +830,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       currentTime,
       duration,
       expandedId,
+      highlights,
       handleDeleteSingle,
       handleOpenExportSingle,
       handleOpenRename,
@@ -769,89 +854,120 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
       ? `"${exportTarget.item.name}"`
       : `${exportCount} Recording${exportCount > 1 ? 's' : ''}`;
 
-  const handleClearSearch = () => {
-    setSearchQuery('');
-  };
+  // The field is always mounted now, so no focus juggling is needed to show
+  // the keyboard. We only track focus so the hardware back key steps out of
+  // the keyboard before it quits the app.
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidHide', () => {
+      searchInputFocusedRef.current = false;
+    });
+    return () => show.remove();
+  }, []);
 
-  const handleExitSearch = () => {
-    setSearchQuery('');
-    setIsSearching(false);
-    Keyboard.dismiss();
-  };
+  /** Removing a token chip edits the query in place (no full reset). */
+  const handleRemoveToken = useCallback(
+    (token: string) => {
+      const safe = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const next = searchText
+        .replace(new RegExp(`(^|\\s)${safe}(\\s|$)`, 'i'), ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      setSearchText(next ? `${next} ` : '');
+    },
+    [searchText, setSearchText]
+  );
 
   return (
     <View style={styles.container}>
       <View style={[styles.contentConstraint, { maxWidth: maxContentWidth }]}>
         {!isEditMode ? (
-          <View style={[styles.header, isSearching && styles.headerSearching]}>
-            {isSearching ? (
-              <View style={styles.searchColumn}>
-                <View style={styles.searchBarContainer}>
-                  <TouchableOpacity onPress={handleExitSearch} style={styles.searchBackBtn} hitSlop={8}>
-                    <ChevronRight size={18} color="#8E8E93" style={{ transform: [{ rotate: '180deg' }] }} />
-                  </TouchableOpacity>
-                  <Search size={16} color="#8E8E93" />
-                  {/* Focus is driven by the staggered retry effect below;
-                      autoFocus on mount races the first layout pass on
-                      Android and can leave the field focused before it is
-                      sized (no visible caret/text). */}
-                  <TextInput
-                    ref={searchInputRef}
-                    style={styles.searchInput}
-                    value={searchQuery}
-                    onChangeText={setSearchQuery}
-                    placeholder="Search recordings..."
-                    placeholderTextColor="#8E8E93"
-                    autoCorrect={false}
-                    autoCapitalize="none"
-                    returnKeyType="search"
-                    blurOnSubmit
-                    underlineColorAndroid="transparent"
-                    showSoftInputOnFocus
-                    cursorColor="#FFFFFF"
-                    selectionColor="#7C5CFF"
-                    textAlignVertical="center"
-                    maxLength={80}
-                    onFocus={() => {
-                      KeyboardHelper.show().catch(() => {});
-                    }}
-                    onSubmitEditing={Keyboard.dismiss}
-                  />
-                  {searchQuery.length > 0 ? (
-                    <TouchableOpacity onPress={handleClearSearch} style={styles.searchClearBtn} hitSlop={8}>
-                      <X size={16} color="#8E8E93" />
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-                <Text style={styles.searchResultCount}>
-                  {searchQuery.trim().length > 0
-                    ? `${processedRecordings.length} result${processedRecordings.length === 1 ? '' : 's'} for "${searchQuery.trim()}"`
-                    : `${recordings.length} recording${recordings.length === 1 ? '' : 's'}`}
-                </Text>
-              </View>
-            ) : (
-              <>
-                <Text style={styles.headerTitle}>All recordings</Text>
-                <View style={styles.headerRightActions}>
-                  <TouchableOpacity
-                    style={styles.headerIconBtn}
-                    onPress={() => setIsSearching(true)}
-                    activeOpacity={0.7}
-                  >
-                    <Search size={20} color="#FFFFFF" />
-                  </TouchableOpacity>
+          <>
+            <View style={styles.header}>
+              <Text style={styles.headerTitle}>
+                {searchActive ? 'Filtered results' : 'All recordings'}
+              </Text>
+              <View style={styles.headerRightActions}>
+                <TouchableOpacity
+                  style={styles.headerIconBtn}
+                  onPress={() => {
+                    // One button, both directions: open (and focus) the strip, or
+                    // close it. The query survives either way.
+                    if (searchVisible) {
+                      try {
+                        searchInputRef.current?.blur();
+                      } catch {}
+                      Keyboard.dismiss();
+                      setSearchVisible(false);
+                      return;
+                    }
+                    setSearchVisible(true);
+                    // The field has to be mounted before focus() will stick.
+                    setTimeout(() => {
+                      try {
+                        searchInputRef.current?.focus();
+                      } catch {}
+                    }, 60);
+                  }}
+                  activeOpacity={0.7}
+                  accessibilityLabel={searchVisible ? 'Hide search' : 'Search recordings'}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Search size={19} color={searchVisible || searchActive ? '#FFFFFF' : '#C7C7CE'} />
+                  {searchActive ? <View style={styles.headerIconDot} /> : null}
+                </TouchableOpacity>
 
-                  <TouchableOpacity
-                    style={styles.headerIconBtn}
-                    onPress={() => setMenuVisible(true)}
-                    activeOpacity={0.7}
-                  >
-                    <MoreVertical size={20} color="#FFFFFF" />
-                  </TouchableOpacity>
-                </View>
-              </>
-            )}
-          </View>
+                <TouchableOpacity
+                  style={styles.headerIconBtn}
+                  onPress={() => setMenuVisible(true)}
+                  activeOpacity={0.7}
+                  accessibilityLabel="Library options"
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <MoreVertical size={19} color="#C7C7CE" />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {searchVisible ? (
+              <LibrarySearchBar
+              inputRef={searchInputRef}
+              text={searchText}
+              pending={searchPending}
+              tokens={searchTokens}
+              filter={searchFilter}
+              recents={recents}
+              resultCount={processedRecordings.length}
+              totalCount={recordings.length}
+              sortOption={sortOption}
+              onChangeText={setSearchText}
+              onCommit={commitSearch}
+              onClear={clearSearch}
+              onRemoveToken={handleRemoveToken}
+              onPickRecent={(value) => {
+              // Picking a recent query focuses straight into results.
+              setSearchText(value);
+              commitSearch();
+              try {
+              searchInputRef.current?.blur();
+              } catch {}
+              }}
+              onRemoveRecent={removeRecent}
+              onFilterChange={setSearchFilter}
+              onPressSort={() => setSortModalVisible(true)}
+              onFocusChange={(isFocused) => {
+                searchInputFocusedRef.current = isFocused;
+              }}
+              onExit={() => {
+                Keyboard.dismiss();
+                try {
+                  searchInputRef.current?.blur();
+                } catch {}
+                searchStepAtRef.current = Date.now();
+              }}
+              onHide={() => setSearchVisible(false)}
+              />
+            ) : null}
+          </>
         ) : (
           <View style={styles.header}>
             <TouchableOpacity
@@ -888,7 +1004,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             bounces={false}
           >
             <View style={styles.emptyIconCircle}>
-              {searchQuery ? (
+              {searchActive ? (
                 <Search size={22} color="#52525B" strokeWidth={2} />
               ) : (
                 <Mic size={22} color="#52525B" strokeWidth={2} />
@@ -896,22 +1012,29 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             </View>
 
             <Text style={styles.emptyTitle}>
-              {searchQuery ? 'No Results Found' : 'No Recordings Yet'}
+              {searchActive ? 'Nothing matches that' : 'No Recordings Yet'}
             </Text>
             <Text style={styles.emptySub}>
-              {searchQuery
-                ? `Nothing matches "${searchQuery.trim()}". Try a different term.`
+              {searchActive
+                ? searchResults.unmatched.length > 0
+                  ? `No take matches ${searchResults.unmatched
+                      .map((t) => `"${t}"`)
+                      .join(' + ')}. Every term has to match, so drop the one that is wrong.`
+                  : 'No take matches this combination yet. Try fewer letters - "mon" finds Monday takes, "80s" finds 80 second ones.'
                 : 'Tap the microphone button below to begin your first take.'}
             </Text>
 
-            {searchQuery ? (
+            {searchActive ? (
               <TouchableOpacity
                 style={styles.emptyActionBtn}
-                onPress={handleClearSearch}
+                onPress={() => {
+                  clearSearch();
+                  setSearchFilter('all');
+                }}
                 activeOpacity={0.8}
               >
                 <X size={13} color="#000000" strokeWidth={3} />
-                <Text style={styles.emptyActionText}>Clear search</Text>
+                <Text style={styles.emptyActionText}>Reset search</Text>
               </TouchableOpacity>
             ) : null}
           </ScrollView>
@@ -920,12 +1043,17 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({
             data={processedRecordings}
             keyExtractor={(item) => item.id}
             renderItem={renderItem}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[
+              styles.listContent,
+              // With adjustResize the window already shrinks; this only adds
+              // the difference when the IME floats over the window instead.
+              keyboardOffset > 0 ? { paddingBottom: 200 + keyboardOffset } : null,
+            ]}
             showsVerticalScrollIndicator={false}
             removeClippedSubviews={false}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
-            extraData={`${expandedId}-${activeId}-${isPlaying}-${selectedIds.size}`}
+            extraData={`${expandedId}|${activeId}|${isPlaying}|${selectedIds.size}`}
           />
         )}
 
@@ -1116,22 +1244,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#1F1F1F',
   },
-  headerSearching: {
-    flexDirection: 'column',
-    alignItems: 'stretch',
-    justifyContent: 'flex-start',
-    paddingTop: 8,
-    paddingBottom: 8,
-    gap: 6,
-  },
-  searchColumn: {
-    width: '100%',
-    gap: 6,
-  },
-  searchBackBtn: {
-    padding: 2,
-    marginRight: 2,
-  },
   headerTitle: {
     color: '#FFFFFF',
     fontSize: 22,
@@ -1143,6 +1255,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
   },
+  headerIconDot: {
+    position: 'absolute',
+    top: 7,
+    right: 7,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#FFFFFF',
+    borderColor: '#0D0D10',
+    borderWidth: 1.5,
+  },
   headerIconBtn: {
     width: 38,
     height: 38,
@@ -1151,38 +1274,8 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: '#121212',
   },
-  searchBarContainer: {
-    width: '100%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#161618',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#2A2A31',
-    paddingHorizontal: 12,
-    height: 42,
-    gap: 8,
-  },
   // Deterministic sizing: the input must never collapse to zero (explicit
   // full-width container, flex + minWidth:0 on the input, full height).
-  searchInput: {
-    flex: 1,
-    minWidth: 0,
-    height: '100%',
-    color: '#FFFFFF',
-    fontSize: 15,
-    padding: 0,
-  },
-  searchClearBtn: {
-    padding: 4,
-  },
-  searchResultCount: {
-    color: '#71717A',
-    fontSize: 11,
-    fontWeight: '500',
-    paddingHorizontal: 4,
-    letterSpacing: 0.2,
-  },
   editModeActionBtn: {
     paddingVertical: 6,
     paddingHorizontal: 8,

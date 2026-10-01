@@ -27,6 +27,38 @@ import {
 } from 'lucide-react-native';
 import { SavedRecording } from '../../services/storage/recordingLibrary';
 
+/**
+ * Paints the matched characters of a search query inside the title. The
+ * ranges come from the search engine, so what is lit up is exactly what
+ * matched (including the fuzzy fallback), which makes odd queries explicable.
+ */
+const HighlightedName: React.FC<{
+  name: string;
+  ranges: { start: number; end: number }[];
+}> = ({ name, ranges }) => {
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  for (const r of sorted) {
+    if (r.start > name.length) break;
+    const start = Math.max(r.start, cursor);
+    const end = Math.min(r.end, name.length);
+    if (end <= start) continue;
+    if (start > cursor) parts.push(<Text key={`p${cursor}`}>{name.slice(cursor, start)}</Text>);
+    parts.push(
+      <Text
+        key={`h${start}`}
+        style={{ color: '#000000', backgroundColor: '#FFFFFF', borderRadius: 2, fontWeight: '700' }}
+      >
+        {name.slice(start, end)}
+      </Text>
+    );
+    cursor = end;
+  }
+  if (cursor < name.length) parts.push(<Text key={`t${cursor}`}>{name.slice(cursor)}</Text>);
+  return <>{parts}</>;
+};
+
 const THUMB_SIZE = 14;
 const TOUCH_HEIGHT = 32;
 const ACCORDION_TARGET_HEIGHT = 140;
@@ -47,6 +79,8 @@ interface RecordingCardProps {
   onOpenRename: (item: SavedRecording) => void;
   /** Opens the take in the studio (scrub, replace, re-record). */
   onEdit: (item: SavedRecording) => void;
+  /** Character ranges of the current search query inside `item.name`. */
+  highlights?: { start: number; end: number }[];
   onExport: (item: SavedRecording) => void;
   onDelete: (item: SavedRecording) => void;
   onLongPress?: (id: string) => void;
@@ -67,6 +101,7 @@ export const RecordingCard = memo<RecordingCardProps>(({
   onSeek,
   onOpenRename,
   onEdit,
+  highlights,
   onExport,
   onDelete,
   onLongPress,
@@ -311,7 +346,11 @@ export const RecordingCard = memo<RecordingCardProps>(({
 
         <View style={styles.cardInfoCol}>
           <Text style={styles.cardTitle} numberOfLines={1}>
-            {item.name}
+            {highlights && highlights.length > 0 ? (
+              <HighlightedName name={item.name} ranges={highlights} />
+            ) : (
+              item.name
+            )}
           </Text>
           <Text style={styles.cardTimestamp}>
             {new Date(item.createdAt).toLocaleDateString([], {

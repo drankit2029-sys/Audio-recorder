@@ -200,9 +200,50 @@ public class StudioEngineModule extends ReactContextBaseJavaModule implements St
         }
     }
 
+    @ReactMethod
+    public void preparePlayer(Promise promise) {
+        try {
+            engine.preparePlayer();
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_PREPARE_PLAY", message(t), t);
+        }
+    }
+
+    @ReactMethod
+    public void dropWarmPlayer(Promise promise) {
+        try {
+            engine.dropWarmPlayer();
+            promise.resolve(true);
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_DROP_PLAY", message(t), t);
+        }
+    }
+
+    @ReactMethod
+    public void reinitializeCapture(ReadableMap options, Promise promise) {
+        try {
+            int device = getInt(options, "inputDeviceId", -1);
+            boolean append = getBoolean(options, "appendAtEnd", true);
+            promise.resolve(toWritable(engine.reinitializeCapture(device, append)));
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_REINIT", message(t), t);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Queries
     // -----------------------------------------------------------------------
+
+    /** Free bytes on the volume takes are written to (Long.MAX_VALUE = unknown). */
+    @ReactMethod
+    public void getFreeBytes(Promise promise) {
+        try {
+            promise.resolve((double) engine.freeBytes());
+        } catch (Throwable t) {
+            promise.reject("E_STUDIO_STORAGE", message(t), t);
+        }
+    }
 
     @ReactMethod
     public void getStatus(Promise promise) {
@@ -290,6 +331,14 @@ public class StudioEngineModule extends ReactContextBaseJavaModule implements St
             }
         }
         return out;
+    }
+
+    private static boolean getBoolean(ReadableMap m, String key, boolean fallback) {
+        try {
+            return m != null && m.hasKey(key) && !m.isNull(key) ? m.getBoolean(key) : fallback;
+        } catch (Throwable t) {
+            return fallback;
+        }
     }
 
     private static String message(Throwable t) {

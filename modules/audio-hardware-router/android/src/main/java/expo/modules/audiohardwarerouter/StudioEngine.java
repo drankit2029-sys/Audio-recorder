@@ -1,11 +1,15 @@
 package expo.modules.audiohardwarerouter;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.media.AudioAttributes;
+import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
+import android.media.AudioRecordingConfiguration;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
@@ -59,6 +63,8 @@ final class StudioEngine {
     static final String EVENT_PROGRESS = "studioProgress";
     static final String EVENT_ERROR = "studioError";
     static final String EVENT_NOTIFICATION = "studioNotificationAction";
+    /** A call, another capture client, headphones being ripped out, screen off... */
+    static final String EVENT_INTERRUPTION = "studioInterruption";
 
     static final int MODE_IDLE = 0;
     static final int MODE_PAUSED = 1;
@@ -143,6 +149,8 @@ final class StudioEngine {
     private AudioTrack track;
     private Thread playThread;
     private volatile boolean playRun = false;
+    /** Set by the playback thread once AudioTrack.play() returned cleanly. */
+    private volatile boolean playStartedOk = false;
     private long playStartFrame = 0L;
     private int generation = 0;
 
@@ -160,21 +168,109 @@ final class StudioEngine {
     private int activeDeviceId = Integer.MIN_VALUE;
     private CaptureConfig activeConfig;
 
+    /**
+     * Same idea as {@link #warmRecorder}, for the other side of the studio: an
+     * AudioTrack is kept open (paused and flushed) between preview passes, so
+     * switching to preview costs a flush+play instead of the 50-200 ms it takes
+     * to build an AudioTrack and negotiate a mix with the audio service. The
+     * track is only reused while the session format still matches.
+     */
+    private AudioTrack warmTrack;
+    private int warmTrackRate = 0;
+    private int warmTrackChannels = 0;
+    private boolean warmTrackFloat = false;
+    /** True once a warmed track has actually been started: it can be reused. */
+    private boolean warmTrackPrimed = false;
+
     private boolean focusHeld = false;
     private Object focusRequest;
     private boolean serviceRequested = false;
+
+    // ---- interference watchers ---------------------------------------------
+    /**
+     * A pause requested because something else took the audio path (a call,
+     * an alarm, another capture app). Very short losses are ignored: many
+     * devices drop focus for a few tens of ms when routing changes, and
+     * pausing there would be more annoying than helpful.
+     */
+    private static final long FOCUS_PAUSE_AFTER_MS = 900L;
+    private long focusLostAt = 0L;
+    private boolean interruptionWatchersOn = false;
+    private Object recordingCallback;
+    private AudioDeviceCallback studioDeviceCallback;
+    private BroadcastReceiver interruptionReceiver;
+    /*
+     * There is deliberately NO auto-resume here. The product policy for an
+     * interruption (a call, a message, the mic being stolen, the screen going
+     * off) is pause-and-let-the-user-decide: the take is parked, the reason is
+     * reported to JS, and resuming re-opens the capture through
+     * reinitializeCapture(). Silently starting the mic again could record over
+     * the caller's own voice or keep a hot mic alive after they hung up.
+     */
+
+    private final Runnable deferredFocusPause = new Runnable() {
+        @Override
+        public void run() {
+            long elapsed = SystemClock.elapsedRealtime() - focusLostAt;
+            if (focusLostAt == 0L || elapsed < FOCUS_PAUSE_AFTER_MS) {
+                return;
+            }
+            control.execute(new Runnable() {
+                @Override
+                public void run() {
+                    synchronized (StudioEngine.this) {
+                        int m = mode;
+                        if (focusLostAt == 0L || (m != MODE_RECORDING && m != MODE_PREVIEWING)) {
+                            return;
+                        }
+                        boolean wasRecording = m == MODE_RECORDING;
+                        pause("focus_loss");
+                        // A recording that loses focus loses the microphone: the
+                        // take would keep growing with silence, so park it and
+                        // report why. Resuming is the user's call (see the note
+                        // above deferredFocusPause - no auto-resume by design).
+                        if (wasRecording) {
+                            emitInterruption("focus_loss", true);
+                        }
+                    }
+                }
+            });
+        }
+    };
 
     private final AudioManager.OnAudioFocusChangeListener focusListener =
             new AudioManager.OnAudioFocusChangeListener() {
                 @Override
                 public void onAudioFocusChange(int change) {
-                    if ((change == AudioManager.AUDIOFOCUS_LOSS
-                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
-                            && mode == MODE_PREVIEWING) {
+                    if (change == AudioManager.AUDIOFOCUS_GAIN) {
+                        focusLostAt = 0L;
+                        main.removeCallbacks(deferredFocusPause);
+                        return;
+                    }
+                    boolean permanent = change == AudioManager.AUDIOFOCUS_LOSS;
+                    boolean transientLoss = change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+                            || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK;
+                    if (!permanent && !transientLoss) {
+                        return;
+                    }
+                    if (transientLoss && !permanent) {
+                        // Defer: a short route flip must not pause a take.
+                        focusLostAt = SystemClock.elapsedRealtime();
+                        main.removeCallbacks(deferredFocusPause);
+                        main.postDelayed(deferredFocusPause, FOCUS_PAUSE_AFTER_MS);
+                        return;
+                    }
+                    focusLostAt = 0L;
+                    main.removeCallbacks(deferredFocusPause);
+                    if (mode == MODE_PREVIEWING || mode == MODE_RECORDING) {
                         control.execute(new Runnable() {
                             @Override
                             public void run() {
+                                boolean wasRecording = mode == MODE_RECORDING;
                                 pause("focus_loss");
+                                if (wasRecording) {
+                                    emitInterruption("focus_loss", true);
+                                }
                             }
                         });
                     }
@@ -260,6 +356,7 @@ final class StudioEngine {
         badge = badgeText != null ? badgeText : "";
         hasSession = true;
         mode = MODE_PAUSED;
+        startInterruptionWatchers();
         return sessionInfoLocked();
     }
 
@@ -307,8 +404,18 @@ final class StudioEngine {
                 int fb = ch * (flt ? 4 : 2);
                 long pcm = Math.max(0L, src.length() - StudioCodec.HEADER_BYTES);
                 bytes = pcm - (pcm % fb);
+                File volume = src.getParentFile();
+                if (volume != null && volume.getUsableSpace() <= 0L) {
+                    throw new IOException("Storage is full - this take cannot be opened for editing.");
+                }
                 r = new RandomAccessFile(src, "rw");
-                r.setLength(StudioCodec.HEADER_BYTES + bytes);
+                // A dangling partial frame from a killed writer is harmless at
+                // the tail of a WAV, and leaving it costs nothing: truncating the
+                // user's original file here would destroy data if the scan that
+                // follows ever failed. Only trim when there is real garbage.
+                if (pcm - bytes > 4L * fb) {
+                    r.setLength(StudioCodec.HEADER_BYTES + bytes);
+                }
                 StudioCodec.patchSizes(r, bytes);
                 sourceMime = "audio/wav";
                 sourceBitRate = rate * ch * (flt ? 32 : 16);
@@ -383,6 +490,7 @@ final class StudioEngine {
                 hasSession = true;
                 mode = MODE_PAUSED;
                 opening = false;
+                startInterruptionWatchers();
                 Map<String, Object> result = sessionInfoLocked();
                 result.put("sourceMime", sourceMime);
                 result.put("sourceBitRate", sourceBitRate);
@@ -544,6 +652,11 @@ final class StudioEngine {
     // Transport
     // =======================================================================
 
+    /** Below this, a new capture is not started at all (about 45 s of 48 kHz mono). */
+    private static final long MIN_FREE_CAPTURE_BYTES = 2L * 1024 * 1024;
+    /** Free-space poll interval while recording (cheap, but not per write). */
+    private static final long DISK_POLL_INTERVAL_MS = 5000L;
+
     /** Starts capturing at {@code positionMs}; a negative position appends at the end. */
     synchronized Map<String, Object> record(double positionMs, int inputDeviceId) throws Exception {
         requireUsableSession();
@@ -553,6 +666,13 @@ final class StudioEngine {
         if (start >= total && dataBytes >= MAX_DATA_BYTES) {
             throw new IOException("This take reached the maximum WAV size.");
         }
+        // AudioRecord happily "starts" on a full volume: the capture runs, every
+        // write throws IOException, and the user only finds out after the take.
+        // Fail before the mic opens instead.
+        File volume = sessionFile;
+        if (start >= total && volume != null && volume.getUsableSpace() < MIN_FREE_CAPTURE_BYTES) {
+            throw new IOException("Storage is full - free up some space before recording.");
+        }
 
         // Reuse the warm (pre-opened, stopped) mic when the device matches —
         // this skips the 200-500 ms AudioRecord setup that used to happen on
@@ -561,6 +681,14 @@ final class StudioEngine {
         AudioRecord rec = null;
         boolean fromWarm = false;
         AudioRecord warm = warmRecorder;
+        if (warm != null && warm.getState() != AudioRecord.STATE_INITIALIZED) {
+            // Another client (a call) may have killed it while we were paused.
+            releaseQuietly(warm);
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+            warm = null;
+        }
         if (warm != null && warmDeviceId == inputDeviceId) {
             rec = warm;
             cc = warmConfig;
@@ -614,7 +742,7 @@ final class StudioEngine {
         initTracker(start);
         captureRun = true;
         final int gen = ++generation;
-        captureThread = new Thread(new CaptureWorker(cc, gen), "StudioCapture");
+        captureThread = new Thread(new CaptureWorker(cc, gen, start), "StudioCapture");
         captureThread.start();
         mode = MODE_RECORDING;
         hasEdits = true;
@@ -632,8 +760,22 @@ final class StudioEngine {
         if (total - start <= 0L) {
             throw new IllegalStateException("There is nothing to play after this position.");
         }
-        AudioTrack t = buildTrack();
+        // Reuse the warm (pre-opened, paused) output when the format matches:
+        // that is the speaker-side twin of the warm mic, and it removes the
+        // AudioTrack build + mix negotiation from the preview/replace switch.
+        AudioTrack t = takeWarmTrack();
+        if (t == null) {
+            t = buildTrack();
+        }
+        if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+            try {
+                t.release();
+            } catch (Throwable ignored) {
+            }
+            throw new IOException("The audio output could not be opened.");
+        }
         track = t;
+        playStartedOk = false;
         playStartFrame = start;
         playFrame = start;
         positionFrames = start;
@@ -675,7 +817,8 @@ final class StudioEngine {
         if (mode == MODE_RECORDING) {
             return;
         }
-        if (warmRecorder != null && warmDeviceId == deviceId) {
+        if (warmRecorder != null && warmDeviceId == deviceId
+                && warmRecorder.getState() == AudioRecord.STATE_INITIALIZED) {
             return;
         }
         AudioRecord warm = warmRecorder;
@@ -707,6 +850,307 @@ final class StudioEngine {
             warmConfig = null;
             warmDeviceId = Integer.MIN_VALUE;
         }
+    }
+
+    /**
+     * Open (or swap) the warm output track so the next {@link #play} call has
+     * no AudioTrack setup latency. Mirrors {@link #prepareRecorder} for the
+     * speaker side. Never throws: warming is best effort.
+     */
+    public synchronized void preparePlayer() {
+        if (mode == MODE_PREVIEWING || !hasSession || exporting) {
+            return;
+        }
+        if (warmTrack != null && formatMatchesWarmTrack()) {
+            return;
+        }
+        dropWarmPlayerLocked();
+        try {
+            AudioTrack t = buildTrack();
+            if (t.getState() != AudioTrack.STATE_INITIALIZED) {
+                releaseQuietly(t);
+                return;
+            }
+            warmTrack = t;
+            warmTrackRate = sampleRate;
+            warmTrackChannels = channels;
+            warmTrackFloat = floatPcm;
+            warmTrackPrimed = false;
+        } catch (Throwable e) {
+            Log.w(TAG, "Warm player open failed", e);
+        }
+    }
+
+    /** Drop the warm output track (app backgrounded, or the user left the studio). */
+    public synchronized void dropWarmPlayer() {
+        if (mode == MODE_PREVIEWING) {
+            return;
+        }
+        dropWarmPlayerLocked();
+    }
+
+    private boolean formatMatchesWarmTrack() {
+        return warmTrack != null && warmTrackRate == sampleRate
+                && warmTrackChannels == channels && warmTrackFloat == floatPcm;
+    }
+
+    /**
+     * Hand back the warm track when it can be replayed as-is (flushed, so the
+     * head position starts at zero again), releasing it when it cannot.
+     */
+    private AudioTrack takeWarmTrack() {
+        AudioTrack t = warmTrack;
+        if (t == null) {
+            return null;
+        }
+        warmTrack = null;
+        warmTrackPrimed = false;
+        if (!formatMatchesWarmTrack(t) || !warmTrackPrimedBefore()) {
+            releaseQuietly(t);
+            return null;
+        }
+        try {
+            t.pause();
+            t.flush();
+            return t;
+        } catch (Throwable e) {
+            try {
+                t.release();
+            } catch (Throwable ignored) {
+            }
+            return null;
+        }
+    }
+
+    private boolean formatMatchesWarmTrack(AudioTrack t) {
+        return warmTrackRate == sampleRate && warmTrackChannels == channels
+                && warmTrackFloat == floatPcm;
+    }
+
+    /** A track that was never started cannot be trusted (it may be uninitialized). */
+    private boolean warmTrackPrimedBefore() {
+        return warmTrackPrimed;
+    }
+
+    private void releaseQuietly(AudioTrack t) {
+        if (t == null) {
+            return;
+        }
+        try {
+            t.pause();
+        } catch (Throwable ignored) {
+        }
+        try {
+            t.release();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void dropWarmPlayerLocked() {
+        AudioTrack t = warmTrack;
+        warmTrack = null;
+        warmTrackPrimed = false;
+        if (t != null) {
+            releaseQuietly(t);
+        }
+    }
+
+    // =======================================================================
+    // Internals: interference (calls, other capture clients, route changes)
+    // =======================================================================
+
+    /**
+     * Registered for as long as a session exists. Two independent signals,
+     * because a call does not always announce itself the same way:
+     *
+     *  - {@code AudioRecordingCallback}: the audio service tells us when the
+     *    mic has been handed to another client (a phone call, an assistant, a
+     *    QR scanner). This is the reliable "someone stole my microphone" event,
+     *    and it needs no extra permission.
+     *  - SCREEN_OFF: a call that arrives full-screen locks the display; an
+     *    in-flight take must be made safe (its header patched) even when the
+     *    JS context is gone.
+     */
+    private void startInterruptionWatchers() {
+        if (interruptionWatchersOn || audioManager == null) {
+            return;
+        }
+        interruptionWatchersOn = true;
+        try {
+            if (Build.VERSION.SDK_INT >= 24) {
+                recordingCallback = new AudioManager.AudioRecordingCallback() {
+                    @Override
+                    public void onRecordingConfigChanged(
+                            java.util.List<AudioRecordingConfiguration> configs) {
+                        // AudioRecordingConfiguration exposes no client id in
+                        // the public API, so ownership is inferred from the
+                        // count: while we hold the mic there is always at least
+                        // one active client. A list that empties under us means
+                        // the audio service dropped (or hid) our capture patch.
+                        int active = configs == null ? -1 : configs.size();
+                        if (active == 0 && mode == MODE_RECORDING) {
+                            control.execute(new Runnable() {
+                                @Override
+                                public void run() {
+                                    synchronized (StudioEngine.this) {
+                                        if (mode != MODE_RECORDING) {
+                                            return;
+                                        }
+                                        boolean wasOverwriting = overwriting;
+                                        pause("mic_taken");
+                                        emitInterruption("mic_taken", wasOverwriting);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                };
+                audioManager.registerAudioRecordingCallback(
+                        (AudioManager.AudioRecordingCallback) recordingCallback, main);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not watch the recording config", t);
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 24) {
+                studioDeviceCallback = new AudioDeviceCallback() {
+                    @Override
+                    public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
+                        noteRouteChange("device_added");
+                    }
+
+                    @Override
+                    public void onAudioDevicesRemoved(AudioDeviceInfo[] removed) {
+                        noteRouteChange("device_removed");
+                    }
+                };
+                audioManager.registerAudioDeviceCallback(studioDeviceCallback, main);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not watch audio devices", t);
+        }
+        try {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_SCREEN_OFF);
+            filter.addAction(Intent.ACTION_USER_PRESENT);
+            interruptionReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent == null ? null : intent.getAction();
+                    if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                        control.execute(new Runnable() {
+                            @Override
+                            public void run() {
+                                synchronized (StudioEngine.this) {
+                                    if (mode == MODE_PREVIEWING) {
+                                        // A preview nobody can hear: stop it, keep
+                                        // the warm mic for the next record.
+                                        pause("screen_off");
+                                    }
+                                }
+                            }
+                        });
+                    } else if (Intent.ACTION_USER_PRESENT.equals(action)) {
+                        // The user is back: re-open the warm mic the backgrounding
+                        // dropped, so resuming a take is instant again.
+                        if (mode != MODE_RECORDING) {
+                            prepareRecorder(activeDeviceId);
+                        }
+                        preparePlayer();
+                    }
+                }
+            };
+            IntentFilter receiverFilter = filter;
+            if (Build.VERSION.SDK_INT >= 33) {
+                app.registerReceiver(interruptionReceiver, receiverFilter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                app.registerReceiver(interruptionReceiver, receiverFilter);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not watch the screen state", t);
+        }
+    }
+
+    private void stopInterruptionWatchers() {
+        if (!interruptionWatchersOn) {
+            return;
+        }
+        interruptionWatchersOn = false;
+        try {
+            if (Build.VERSION.SDK_INT >= 24 && recordingCallback != null) {
+                audioManager.unregisterAudioRecordingCallback(
+                        (AudioManager.AudioRecordingCallback) recordingCallback);
+            }
+        } catch (Throwable ignored) {
+        }
+        recordingCallback = null;
+        try {
+            if (studioDeviceCallback != null) {
+                audioManager.unregisterAudioDeviceCallback(studioDeviceCallback);
+            }
+        } catch (Throwable ignored) {
+        }
+        studioDeviceCallback = null;
+        try {
+            if (interruptionReceiver != null) {
+                app.unregisterReceiver(interruptionReceiver);
+            }
+        } catch (Throwable ignored) {
+        }
+        interruptionReceiver = null;
+        main.removeCallbacks(deferredFocusPause);
+        focusLostAt = 0L;
+    }
+
+    /** Headphones unplugged mid-preview: the track survives, but say so. */
+    private void noteRouteChange(String what) {
+        if (mode == MODE_PREVIEWING) {
+            Log.i(TAG, "Audio route changed while previewing (" + what + ")");
+        }
+    }
+
+    /**
+     * Tell JS that a take was interrupted. When there is no JS context to ask,
+     * the engine keeps the take safe on its own and the capture is resumed
+     * automatically (the "re-initialise" half of the interruption handling).
+     */
+    private void emitInterruption(String reason, boolean pausedRecording) {
+        // The seam is reported (positionMs) but the peak table is left alone:
+        // zeroing the bucket at the punch-out would erase real audio that is
+        // already on the file. The UI draws the marker from these numbers.
+        long position = currentPositionMs();
+        Sink s = sink;
+        if (s != null) {
+            Map<String, Object> m = new HashMap<>();
+            m.put("reason", reason);
+            m.put("paused", pausedRecording);
+            m.put("recording", pausedRecording);
+            m.put("positionMs", (double) position);
+            m.put("durationMs", (double) framesToMs(dataBytes / Math.max(1, frameBytes), sampleRate));
+            m.put("overwriting", overwriting);
+            s.emit(EVENT_INTERRUPTION, m);
+        }
+    }
+
+    /**
+     * Re-open the capture path after an interruption. The warm mic is thrown
+     * away (the audio service may have left it attached to a dead client) and
+     * replaced by a fresh AudioRecord, then the take resumes by appending.
+     */
+    synchronized Map<String, Object> reinitializeCapture(int inputDeviceId, boolean appendAtEnd)
+            throws Exception {
+        requireUsableSession();
+        if (mode == MODE_RECORDING) {
+            return snapshotLocked();
+        }
+        AudioRecord warm = warmRecorder;
+        if (warm != null) {
+            releaseQuietly(warm);
+            warmRecorder = null;
+            warmConfig = null;
+            warmDeviceId = Integer.MIN_VALUE;
+        }
+        return record(appendAtEnd ? -1d : (double) currentPositionMs(), inputDeviceId);
     }
 
     // =======================================================================
@@ -887,12 +1331,24 @@ final class StudioEngine {
             }
             joinQuietly(playThread, 1000L);
             if (t != null) {
+                // Park the track (paused + flushed) instead of releasing it:
+                // the next preview reuses it with no setup cost. If the thread
+                // never confirmed the track actually started, it is dropped so
+                // a half-initialised instance can never be reused.
+                boolean keep = playStartedOk;
+                playStartedOk = false;
                 try {
                     t.release();
                 } catch (Throwable ignored) {
                 }
+                if (keep) {
+                    warmTrack = t;
+                    warmTrackRate = sampleRate;
+                    warmTrackChannels = channels;
+                    warmTrackFloat = floatPcm;
+                    warmTrackPrimed = true;
+                }
             }
-            joinQuietly(playThread, 1000L);
             playThread = null;
             track = null;
             long total = dataBytes / frameBytes;
@@ -912,6 +1368,10 @@ final class StudioEngine {
             warmConfig = null;
             warmDeviceId = Integer.MIN_VALUE;
         }
+        // The warm player is tied to this session's format; dropping it with
+        // the session keeps a stale track from being reused by the next one.
+        dropWarmPlayerLocked();
+        stopInterruptionWatchers();
         synchronized (ioLock) {
             closeRafLocked();
         }
@@ -1327,13 +1787,15 @@ final class StudioEngine {
         private final int capCh;
         private final boolean capFloat;
         private final int gen;
+        private final long startFrames;
 
-        CaptureWorker(CaptureConfig cc, int gen) {
+        CaptureWorker(CaptureConfig cc, int gen, long startFrames) {
             this.rec = cc.record;
             this.capRate = cc.rate;
             this.capCh = cc.channels;
             this.capFloat = cc.isFloat;
             this.gen = gen;
+            this.startFrames = startFrames;
         }
 
         @Override
@@ -1357,8 +1819,16 @@ final class StudioEngine {
 
             long lastMeter = 0L;
             long lastPatch = SystemClock.elapsedRealtime();
+            long lastSpaceCheck = SystemClock.elapsedRealtime();
+            long usableAtLastCheck = Long.MAX_VALUE;
             float meterPeak = 0f;
             int zeroReads = 0;
+            // Watchdogs for "the mic went away underneath us". A call, an
+            // assistant or another capture app can leave the AudioRecord alive
+            // but silent; without this the take just fills with silence.
+            long totalFrames = 0L;
+            long lastProgressAt = SystemClock.elapsedRealtime();
+            int zeroMeterWindows = 0;
 
             while (true) {
                 int n;
@@ -1384,6 +1854,10 @@ final class StudioEngine {
                     if (!captureRun) {
                         return;
                     }
+                    // ~2 s of "the HAL is not handing us anything". A mic taken by
+                    // another client usually reads 0 rather than erroring, and a
+                    // silent-mic take is worthless, so park it instead of filling
+                    // the file with nothing.
                     if (++zeroReads > 200) {
                         postCaptureFailure(gen, "The microphone stopped delivering audio.");
                         return;
@@ -1391,6 +1865,19 @@ final class StudioEngine {
                     continue;
                 }
                 zeroReads = 0;
+
+                totalFrames += n / capCh;
+                long progressAt = SystemClock.elapsedRealtime();
+                if (progressAt - lastProgressAt > 1500L) {
+                    if (rec.getState() != AudioRecord.STATE_INITIALIZED
+                            || rec.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                        postCaptureFailure(gen, "The microphone was taken by another app"
+                                + " (an incoming call or an assistant). The take was paused"
+                                + " so nothing was lost.");
+                        return;
+                    }
+                    lastProgressAt = progressAt;
+                }
 
                 int frames = n / capCh;
                 for (int i = 0; i < frames; i++) {
@@ -1463,6 +1950,7 @@ final class StudioEngine {
 
                 int bytes = outFrames * fb;
                 boolean sizeLimit;
+                boolean lowSpace = false;
                 try {
                     synchronized (ioLock) {
                         RandomAccessFile file = raf;
@@ -1483,6 +1971,17 @@ final class StudioEngine {
                             lastPatch = now;
                         }
                         sizeLimit = dataBytes >= MAX_DATA_BYTES;
+                        // A volume that fills up under a live take must not run
+                        // until `write()` corrupts the tail: park the take at the
+                        // last good byte while there is still room for it.
+                        if (!sizeLimit && now - lastSpaceCheck >= DISK_POLL_INTERVAL_MS) {
+                            lastSpaceCheck = now;
+                            File f2 = sessionFile;
+                            if (f2 != null) {
+                                usableAtLastCheck = f2.getUsableSpace();
+                            }
+                            lowSpace = usableAtLastCheck < MIN_FREE_CAPTURE_BYTES;
+                        }
                     }
                 } catch (IOException e) {
                     if (captureRun) {
@@ -1501,11 +2000,26 @@ final class StudioEngine {
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastMeter >= METER_INTERVAL_MS) {
                     lastMeter = now;
+                    zeroMeterWindows = meterPeak > 1e-5f ? 0 : zeroMeterWindows + 1;
                     emitMeter(meterPeak, writeFrame);
                     meterPeak = 0f;
+                    // 16 s of exactly-zero signal with the mic still open is not
+                    // a quiet room, it is a capture patch the HAL muted on us.
+                    if (zeroMeterWindows > 500) {
+                        postCaptureFailure(gen, "The microphone went silent — it was taken"
+                                + " over by another app. The take was paused and saved up to"
+                                + " this point.");
+                        return;
+                    }
                 }
                 if (sizeLimit) {
                     postSizeLimit(gen);
+                    return;
+                }
+                if (lowSpace) {
+                    postStopWithError(gen, "size_limit", "storage_low",
+                            "Storage is almost full, so the take was paused at "
+                                    + (usableAtLastCheck / (1024 * 1024L)) + " MB free.");
                     return;
                 }
                 if (!captureRun) {
@@ -1516,6 +2030,15 @@ final class StudioEngine {
     }
 
     private void postCaptureFailure(final int gen, final String message) {
+        postStopWithError(gen, "capture_failed", "error", message);
+    }
+
+    /**
+     * Park a running take and report why. {@code errorCode} goes to the JS
+     * error listener, {@code state} is the engine state emitted afterwards.
+     */
+    private void postStopWithError(
+            final int gen, final String errorCode, final String state, final String message) {
         Log.e(TAG, message);
         control.execute(new Runnable() {
             @Override
@@ -1525,8 +2048,8 @@ final class StudioEngine {
                         return;
                     }
                     stopActivityLocked();
-                    emitError("capture_failed", message);
-                    emitState("error");
+                    emitError(errorCode, message);
+                    emitState(state);
                     refreshService();
                 }
             }
@@ -1622,6 +2145,7 @@ final class StudioEngine {
             long lastHead = 0L;
             try {
                 t.play();
+                playStartedOk = true;
             } catch (Throwable e) {
                 postPlaybackFailure(gen, "Playback could not start: " + e.getMessage());
                 return;
@@ -1718,10 +2242,14 @@ final class StudioEngine {
                             t.flush();
                         } catch (Throwable ignored) {
                         }
-                        try {
-                            t.release();
-                        } catch (Throwable ignored) {
-                        }
+                        // Natural end of the take: park the (flushed, silent)
+                        // track as the warm output so the next preview is
+                        // immediate.
+                        warmTrack = t;
+                        warmTrackRate = sampleRate;
+                        warmTrackChannels = channels;
+                        warmTrackFloat = floatPcm;
+                        warmTrackPrimed = true;
                     }
                     positionFrames = dataBytes / frameBytes;
                     playFrame = positionFrames;
@@ -1744,6 +2272,8 @@ final class StudioEngine {
                         return;
                     }
                     stopActivityLocked();
+                    // The output path just failed: never hand it to the next play.
+                    dropWarmPlayerLocked();
                     emitError("playback_failed", message);
                     emitState("error");
                     refreshService();
@@ -1864,6 +2394,18 @@ final class StudioEngine {
 
     File sessionsDir() {
         return new File(app.getFilesDir(), "StudioSessions");
+    }
+
+    /**
+     * Bytes free on the volume the takes live on. Exposed so the UI can warn
+     * *before* a take is started (and before an edit rewrites a file) instead of
+     * failing in the middle of one.
+     */
+    long freeBytes() {
+        File dir = sessionsDir();
+        File probe = dir.exists() ? dir : app.getFilesDir();
+        long free = probe.getUsableSpace();
+        return free < 0L ? Long.MAX_VALUE : free;
     }
 
     private long msToFrames(double ms) {

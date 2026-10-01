@@ -403,6 +403,20 @@ export interface StudioNotificationEvent {
   action: 'resume' | 'stop' | 'pause';
 }
 
+/** Why a take stopped that the user did not ask for. */
+export interface StudioInterruptionEvent {
+  /** `screen_off` with paused=false means only a preview was cancelled. */
+  reason: 'focus_loss' | 'mic_taken' | 'screen_off' | 'call' | 'capture_lost' | string;
+  /** True when a *recording* was stopped by the interruption. */
+  paused: boolean;
+  /** True when the interrupted mode was recording (vs previewing). */
+  recording: boolean;
+  positionMs: number;
+  durationMs: number;
+  /** True when the take was mid-Replace when it was interrupted. */
+  overwriting: boolean;
+}
+
 export interface StudioFinalizeOptions {
   targetPath: string;
   format: StudioOutputFormat;
@@ -423,6 +437,7 @@ export interface StudioEventMap {
   studioProgress: StudioProgressEvent;
   studioError: StudioErrorEvent;
   studioNotificationAction: StudioNotificationEvent;
+  studioInterruption: StudioInterruptionEvent;
 }
 
 const StudioEmitter = NativeStudio ? new NativeEventEmitter(NativeStudio) : null;
@@ -566,6 +581,58 @@ export const StudioEngine = {
     return NativeStudio.dropWarmRecorder()
       .then(() => true)
       .catch(() => false);
+  },
+
+  /**
+   * Mirror of prepareRecorder for the other side of the studio: open (and
+   * prime) the output track while the take is idle or recording, so pressing
+   * Preview does not pay the AudioTrack setup cost. Best effort, never throws.
+   */
+  preparePlayer(): Promise<boolean> {
+    if (!NativeStudio || typeof NativeStudio.preparePlayer !== 'function') {
+      return Promise.resolve(false);
+    }
+    return NativeStudio.preparePlayer()
+      .then(() => true)
+      .catch(() => false);
+  },
+
+  /** Release the warm output track. */
+  dropWarmPlayer(): Promise<boolean> {
+    if (!NativeStudio || typeof NativeStudio.dropWarmPlayer !== 'function') {
+      return Promise.resolve(false);
+    }
+    return NativeStudio.dropWarmPlayer()
+      .then(() => true)
+      .catch(() => false);
+  },
+
+  /**
+   * Bytes free on the volume takes are written to. `Number.MAX_SAFE_INTEGER`
+   * when the platform cannot tell (never block a take on an unknown).
+   */
+  async getFreeBytes(): Promise<number> {
+    if (!NativeStudio || typeof NativeStudio.getFreeBytes !== 'function') {
+      return Number.MAX_SAFE_INTEGER;
+    }
+    try {
+      const v = await NativeStudio.getFreeBytes();
+      return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : Number.MAX_SAFE_INTEGER;
+    } catch {
+      return Number.MAX_SAFE_INTEGER;
+    }
+  },
+
+  /**
+   * Put the capture path back after an interruption (a call, another app
+   * taking the mic): the warm AudioRecord is thrown away, a fresh one is
+   * opened, and the take continues by appending.
+   */
+  reinitializeCapture(options: {
+    inputDeviceId: number;
+    appendAtEnd?: boolean;
+  }): Promise<StudioSnapshot> {
+    return requireStudio().reinitializeCapture(options);
   },
 
   addListener<K extends keyof StudioEventMap>(

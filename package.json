@@ -35,7 +35,12 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "test:search": "npx --yes tsx@4.23.15 scripts/tests/library-search.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:waveform": "npx --yes tsx@4.23.15 scripts/tests/waveform-model.test.ts",
+    "test": "npm run test:search && npm run test:waveform",
+    "check:worklets": "node scripts/verify/audit-worklet-closures.js"
   },
   "private": true
 }

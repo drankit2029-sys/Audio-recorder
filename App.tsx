@@ -38,6 +38,7 @@ import {
   Headphones,
   Replace,
   Play,
+  PhoneCall,
 } from 'lucide-react-native';
 
 import {
@@ -65,6 +66,11 @@ import {
   InterruptedTakeModal,
   InterruptedTakeInfo,
 } from './src/components/audio/InterruptedTakeModal';
+import {
+  InterruptionModal,
+  InterruptionInfo,
+  describeInterruption,
+} from './src/components/audio/InterruptionModal';
 import { useAudioInputDevices } from './src/services/audio/useAudioInputDevices';
 import { InputDeviceModal } from './src/components/audio/InputDeviceModal';
 import { BusyOverlay } from './src/components/common/BusyOverlay';
@@ -234,6 +240,8 @@ const timeStamp = () =>
 
 function AudioRecorderApp() {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('library');
+  const currentScreenRef = useRef<AppScreen>('library');
+  currentScreenRef.current = currentScreen;
   const [showPrompter, setShowPrompter] = useState(true);
 
   const [settingsVisible, setSettingsVisible] = useState(false);
@@ -252,6 +260,10 @@ function AudioRecorderApp() {
 
   const [orphan, setOrphan] = useState<Orphan | null>(null);
   const [interruptedModalVisible, setInterruptedModalVisible] = useState(false);
+
+  /** A take the engine paused by itself (call, mic stolen, lost capture). */
+  const [interruption, setInterruption] = useState<InterruptionInfo | null>(null);
+  const [interruptingResume, setInterruptingResume] = useState(false);
 
   const [editContext, setEditContextState] = useState<EditContext | null>(null);
   const editContextRef = useRef<EditContext | null>(null);
@@ -286,6 +298,8 @@ function AudioRecorderApp() {
   }, [saveVisible]);
 
   const pxPerSec = useSharedValue(AudioSettingsStorage.getWaveformZoom());
+  /** Where the last interference parked the take (0 = no seam to show). */
+  const seamMs = useSharedValue(0);
   const [cockpitCenterY, setCockpitCenterY] = useState(0);
   const [waveFrame, setWaveFrame] = useState({ y: 0, height: 54 });
   const [waveWidth, setWaveWidth] = useState(240);
@@ -427,6 +441,35 @@ function AudioRecorderApp() {
         e.message,
         { variant: 'warning', detail: e.message }
       );
+      // A capture that died on its own needs the same decision UI as a call
+      // interruption: resume (re-open the mic) or leave the take paused.
+      if (e.code !== 'size_limit') {
+        setInterruption(
+          describeInterruption('capture_lost', session.getPlayheadMs(), session.getDurationMs(), false)
+        );
+      }
+    },
+    onInterruption: (e) => {
+      // Policy: an interruption never resumes on its own. The native side parks
+      // the take, emits this event, and waits for reinitializeCapture() - so
+      // every event that reaches here needs the user's decision.
+      if (!e.paused) {
+        // Preview interrupted (e.g. screen locked): nobody needs a dialog for it.
+        return;
+      }
+      const info = describeInterruption(
+        e.reason,
+        e.positionMs,
+        e.durationMs,
+        e.overwriting
+      );
+      seamMs.value = e.positionMs;
+      if (isAppForegroundRef.current && currentScreenRef.current === 'studio') {
+        setInterruption(info);
+      } else {
+        showToastRef.current(info.title, info.detail, { variant: 'warning', detail: info.detail });
+        setInterruption(info);
+      }
     },
   });
 
@@ -457,20 +500,30 @@ function AudioRecorderApp() {
     if (!replaceEnabled && replaceArmedRef.current) setReplaceArmed(false);
   }, [replaceEnabled]);
 
-  // Keep a warm (pre-opened, stopped) microphone while the studio is idle
-  // or paused: reopening AudioRecord on every start/resume used to cost
-  // 200-500 ms, which is what produced the silent gap at the head of a
-  // segment and the UI timer running ahead of the audio. Warming is
-  // best-effort (native swallows failures) and is dropped on background.
+  // Keep BOTH halves of the studio's audio path ready: a pre-opened (stopped)
+  // microphone and a pre-opened (paused, flushed) output track. Reopening
+  // AudioRecord used to cost 200-500 ms and building an AudioTrack another
+  // 50-200 ms, which is exactly what the user felt as lag when switching
+  // between Record/Replace and Preview. Warming is best-effort (the native
+  // side swallows failures), is re-armed whenever the take goes idle, and is
+  // dropped when the app is backgrounded or the studio is left.
   const [appActive, setAppActive] = useState(() => AppState.currentState === 'active');
   useEffect(() => {
     const sub = AppState.addEventListener('change', (s) => setAppActive(s === 'active'));
     return () => sub.remove();
   }, []);
   useEffect(() => {
-    if (!appActive || currentScreen !== 'studio' || isSessionActive) return;
-    void StudioEngine.prepareRecorder(selectedDeviceId ?? -1);
-  }, [appActive, currentScreen, isSessionActive, selectedDeviceId]);
+    // Leaving the studio, or backgrounding: give the hardware back so other
+    // apps can use the mic and the speaker.
+    if (!appActive || currentScreen !== 'studio') {
+      session.coolAudioPath();
+      return;
+    }
+    // Warmed while idle or paused (a running take already owns its own
+    // recorder/track; the native side ignores the call in that case).
+    session.warmAudioPath(selectedDeviceId ?? -1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appActive, currentScreen, isSessionActive, selectedDeviceId, engineState]);
 
   const mainIcon: MainIcon =
     engineState === 'RECORDING' || engineState === 'PREVIEWING'
@@ -642,7 +695,9 @@ function AudioRecorderApp() {
     name: string
   ) => {
     const record: SavedRecording = {
-      id: `take_${Date.now()}`,
+      // Date.now() alone can collide for two takes committed in the same
+      // millisecond (undo + re-save), which makes delete/rename ambiguous.
+      id: `take_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       name,
       uri,
       sizeBytes,
@@ -734,7 +789,7 @@ function AudioRecorderApp() {
 
     try {
       try {
-        await session.pause();
+        await session.optimisticPause();
       } catch {}
 
       const takeMs = session.getDurationMs();
@@ -807,6 +862,9 @@ function AudioRecorderApp() {
   };
 
   // ---- transport ----------------------------------------------------------------
+  /** Below this, starting a take is a bad idea and the user should know. */
+  const LOW_STORAGE_WARN_BYTES = 120 * 1024 * 1024;
+
   /** Negative position appends at the end of the take. */
   const startCapture = async (positionMs: number) => {
     // Freeze the playhead before (not only during) the native switch:
@@ -817,6 +875,16 @@ function AudioRecorderApp() {
       session.endSwitch();
       return;
     }
+    try {
+      const free = await StudioEngine.getFreeBytes();
+      if (free < LOW_STORAGE_WARN_BYTES) {
+        showToastRef.current(
+          'Low Storage',
+          `${Math.max(1, Math.round(free / (1024 * 1024)))} MB free — the take will pause if it runs out.`,
+          { variant: 'warning' }
+        );
+      }
+    } catch {}
     await session.record(positionMs, selectedDeviceIdRef.current ?? -1);
   };
 
@@ -863,7 +931,7 @@ function AudioRecorderApp() {
 
     try {
       if (state === 'RECORDING' || state === 'PREVIEWING') {
-        await session.pause();
+        await session.optimisticPause();
       } else if (state === 'PAUSED') {
         await resumeFromPause();
       } else {
@@ -896,6 +964,9 @@ function AudioRecorderApp() {
       } else {
         await session.preview(session.getPlayheadMs());
       }
+      // A live punch is a transport switch: re-arm the warm path so the
+      // *next* switch is instant again (the running one already owns the mic).
+      session.warmAudioPath(selectedDeviceIdRef.current ?? -1);
     } catch (e: any) {
       Alert.alert('Capture Fault', e?.message ?? 'Unknown error');
     } finally {
@@ -916,7 +987,7 @@ function AudioRecorderApp() {
     if (action === 'stop') {
       void handleStopPressRef.current(true);
     } else if (action === 'pause') {
-      session.pause().catch(() => {});
+      session.optimisticPause().catch(() => {});
     } else if (action === 'resume') {
       if (engineStateRef.current !== 'PAUSED' || isTransportBusyRef.current) return;
       isTransportBusyRef.current = true;
@@ -942,6 +1013,40 @@ function AudioRecorderApp() {
   const handleZoomCommit = useCallback((value: number) => {
     AudioSettingsStorage.setWaveformZoom(value);
   }, []);
+
+  // ---- interruption recovery ---------------------------------------------------
+  /**
+   * Resume after the engine had to stop a take on its own (a call, another
+   * app grabbing the microphone). "Resume" is deliberately not a plain
+   * record(): the capture path is thrown away and opened again, because the
+   * AudioRecord we held may belong to a patch the audio service already
+   * tore down.
+   */
+  const resumeAfterInterruption = async () => {
+    if (interruptingResume) return;
+    setInterruptingResume(true);
+    try {
+      if (!(await acquireCaptureResources())) {
+        setInterruptingResume(false);
+        return;
+      }
+      await session.reinitializeAfterInterruption(selectedDeviceIdRef.current ?? -1, true);
+      setInterruption(null);
+      session.warmAudioPath(selectedDeviceIdRef.current ?? -1);
+      showToast('Capture Re-opened', 'Continuing the take from where it stopped.', {
+        variant: 'success',
+      });
+    } catch (e: any) {
+      Alert.alert(
+        'Could not resume the take',
+        `${e?.message ?? 'The microphone is still busy.'}\n\nNothing was lost — the take is still open and paused, so you can try again or save what you have.`
+      );
+    } finally {
+      setInterruptingResume(false);
+    }
+  };
+  const resumeAfterInterruptionRef = useRef(resumeAfterInterruption);
+  resumeAfterInterruptionRef.current = resumeAfterInterruption;
 
   // ---- editing library takes -----------------------------------------------------
   const handleEditRecording = async (item: SavedRecording) => {
@@ -1115,6 +1220,13 @@ function AudioRecorderApp() {
 
       refreshDevices();
       setRecordings(RecordingLibrary.getAll());
+      // Drop library entries whose file no longer exists (the first play attempt
+      // used to be the only way to find out).
+      void RecordingLibrary.pruneMissing()
+        .then((kept) => {
+          if (!cancelled) setRecordings(kept);
+        })
+        .catch(() => {});
 
       try {
         // 1. A JS reload while the native session kept running: re-attach.
@@ -1264,6 +1376,13 @@ function AudioRecorderApp() {
       : activePreset.badge.split(' ')[0] || 'FORMAT'
     : 'WAV';
 
+  // Once the user drives the transport again, the interruption has been
+  // answered (resumed, or knowingly left paused) - keep the seam marker, but
+  // stop nagging with the dialog.
+  useEffect(() => {
+    if (engineState === 'RECORDING' || engineState === 'PREVIEWING') setInterruption(null);
+  }, [engineState]);
+
   const isRecordingNow = engineState === 'RECORDING';
   const waveformInteractive = engineState === 'PAUSED' || engineState === 'PREVIEWING';
 
@@ -1374,6 +1493,8 @@ function AudioRecorderApp() {
                         playheadMs={playheadMs}
                         durationMs={durationMs}
                         peaks={peaks}
+                        peakVersion={session.peakVersion}
+                        seamMs={seamMs}
                         pxPerSec={pxPerSec}
                         isScrubbing={isScrubbing}
                         isRecording={isRecording}
@@ -1392,6 +1513,20 @@ function AudioRecorderApp() {
                     />
 
                     <View style={styles.optionsHorizontalRow}>
+                      {interruption ? (
+                        <TouchableOpacity
+                          style={[styles.cleanOptionBtn, styles.interruptedChip]}
+                          onPress={() => setInterruption(interruption)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
+                        >
+                          <PhoneCall size={11} color="#F59E0B" />
+                          <Text style={[styles.cleanOptionText, styles.interruptedChipText]}>
+                            Interrupted
+                          </Text>
+                        </TouchableOpacity>
+                      ) : null}
+
                       <TouchableOpacity
                         style={[styles.cleanOptionBtn, isSessionActive ? styles.cleanOptionBtnDisabled : null]}
                         onPress={handleOpenDeviceModal}
@@ -1582,6 +1717,18 @@ function AudioRecorderApp() {
         keepLabel={isRecordingNow ? 'KEEP RECORDING' : 'KEEP EDITING'}
       />
 
+      <InterruptionModal
+        visible={interruption !== null && !saveVisible && !warningModalVisible}
+        info={interruption}
+        busyLabel={interruptingResume ? 'Re-opening the microphone...' : null}
+        onResume={() => void resumeAfterInterruptionRef.current()}
+        onKeepPaused={() => {
+          // Stay paused: the take is intact and the normal transport applies.
+          setInterruption(null);
+          session.warmAudioPath(selectedDeviceIdRef.current ?? -1);
+        }}
+      />
+
       <InterruptedTakeModal
         visible={interruptedModalVisible}
         info={interruptedInfo}
@@ -1752,6 +1899,13 @@ const styles = StyleSheet.create({
   },
   cleanOptionBtnActive: {
     backgroundColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  interruptedChip: {
+    borderColor: 'rgba(245, 158, 11, 0.45)',
+    backgroundColor: 'rgba(245, 158, 11, 0.10)',
+  },
+  interruptedChipText: {
+    color: '#F59E0B',
   },
   cleanOptionBtnDisabled: {
     opacity: 0.35,

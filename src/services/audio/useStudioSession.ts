@@ -13,6 +13,7 @@ import {
   StudioErrorEvent,
   StudioFinalizeOptions,
   StudioFinalizeResult,
+  StudioInterruptionEvent,
   StudioMeterEvent,
   StudioMode,
   StudioNotificationEvent,
@@ -38,6 +39,20 @@ export const END_EPSILON_MS = 60;
 const DRIFT_SNAP_MS = 80;
 /** Watchdog: a running capture that stops reporting for this long is re-synced. */
 const METER_SILENCE_MS = 4000;
+/**
+ * A mode switch used to hold the playhead frozen until the hardware proved it
+ * was live, which is exactly what the eye reads as "the preview/replace button
+ * lags". With the warm mic and warm output track the audio really does start
+ * well inside this window, so the clock resumes after a short beat and any
+ * residual error is absorbed as a smooth slide (see ANCHOR_BLEND_*).
+ */
+const FIRST_METER_SOFT_MS = 140;
+/** Hard stop: if no meter ever arrives, the freeze cannot wedge the UI. */
+const FIRST_METER_HARD_MS = 1500;
+/** Fraction of a residual drift taken out of the playhead on each meter. */
+const ANCHOR_BLEND_SLOW = 0.12;
+/** A first meter may correct a little harder, but still never jumps. */
+const ANCHOR_BLEND_FIRST = 0.45;
 
 export interface StudioTelemetry {
   meteringDb: number;
@@ -46,6 +61,8 @@ export interface StudioTelemetry {
 export interface UseStudioSessionOptions {
   onNotificationAction?: (action: StudioNotificationEvent['action']) => void;
   onError?: (event: StudioErrorEvent) => void;
+  /** Something we did not ask for stopped (or will stop) the take. */
+  onInterruption?: (event: StudioInterruptionEvent) => void;
   /** A Replace pass reached the end of the old audio and is now appending. */
   onCaughtUp?: () => void;
 }
@@ -117,6 +134,13 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const anchorRef = useRef({ ms: 0, at: 0 });
   const durationRef = useRef(0);
   const peakCountRef = useRef(0);
+  /**
+   * Bumped (on the JS side) whenever the peak table grew by a block. The
+   * waveform rebuilds its level-of-detail tables on this signal instead of
+   * reading the whole peak array on every meter tick.
+   */
+  const [peakVersion, setPeakVersion] = useState(0);
+  const peakVersionAtRef = useRef(0);
   const hasEditsRef = useRef(false);
   const lastMeterAtRef = useRef(0);
   const scrubPauseRef = useRef(false);
@@ -129,20 +153,30 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const switchGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
    * The mode we are waiting for the first hardware meter of. The playhead
-   * clock stays frozen (isTransitioning) until that meter arrives: the
-   * native audio path takes up to ~0.5 s to prime, and letting the UI run
-   * ahead during that window is what caused the "timer moves before the
-   * audio starts" gap and the hard snap-back when the first meter (tens of
-   * ms behind the UI prediction) was blended in.
+   * clock is frozen for a short beat across a mode switch (the native audio
+   * path needs a moment to prime) and then released optimistically; the
+   * first meter still re-anchors the clock, and if the UI had already been
+   * running the residual error is absorbed as a waveform slide instead of a
+   * playhead jump.
    */
   const awaitingFirstMeterRef = useRef<EngineState | null>(null);
   const firstMeterGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const firstMeterHardGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** True once the soft release let the clock run ahead of the (still
+   *  unconfirmed) first meter: the correction then has to be absorbed
+   *  visually instead of by moving the playhead. */
+  const playheadSoftRunningRef = useRef(false);
 
   const releaseFirstMeterWait = useCallback(() => {
     awaitingFirstMeterRef.current = null;
+    playheadSoftRunningRef.current = false;
     if (firstMeterGuardRef.current) {
       clearTimeout(firstMeterGuardRef.current);
       firstMeterGuardRef.current = null;
+    }
+    if (firstMeterHardGuardRef.current) {
+      clearTimeout(firstMeterHardGuardRef.current);
+      firstMeterHardGuardRef.current = null;
     }
     // Also clear the beginSwitch() safety timer: a stale 5 s guard could
     // otherwise fire into the middle of a *new* switch and release that
@@ -157,12 +191,22 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const armFirstMeterWait = useCallback(
     (expected: EngineState) => {
       awaitingFirstMeterRef.current = expected;
+      playheadSoftRunningRef.current = false;
       if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
+      // Resume the clock shortly after the switch instead of waiting for the
+      // first hardware meter: at display rate a frozen playhead reads as lag,
+      // while a warm mic / warm output starts well inside one frame budget.
       firstMeterGuardRef.current = setTimeout(() => {
-        // Safety: if the meter never arrives (the engine never really
-        // started), release the freeze so the UI cannot wedge.
+        if (awaitingFirstMeterRef.current === expected) {
+          isTransitioning.value = false;
+          playheadSoftRunningRef.current = true;
+        }
+      }, FIRST_METER_SOFT_MS);
+      // Safety: if the meter never arrives at all (the engine never really
+      // started), drop the wait entirely so nothing can wedge.
+      firstMeterHardGuardRef.current = setTimeout(() => {
         releaseFirstMeterWait();
-      }, 1500);
+      }, FIRST_METER_HARD_MS);
     },
     [isTransitioning, releaseFirstMeterWait]
   );
@@ -250,6 +294,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
         durationMs.value = 0;
         peaks.value = [];
         peakCountRef.current = 0;
+        setPeakVersion((v) => v + 1);
         hasEditsRef.current = false;
         scrubPauseRef.current = false;
         lastActionRef.current = null;
@@ -288,9 +333,23 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const applyPeakDelta = useCallback(
     (start: number, values: number[]) => {
       peakCountRef.current = Math.max(peakCountRef.current, start + values.length);
+      const now = Date.now();
+      if (now - peakVersionAtRef.current > 500) {
+        peakVersionAtRef.current = now;
+        setPeakVersion((v) => v + 1);
+      }
+      // In-place update: `peaks` is a long-lived array (one entry per 20 ms),
+      // and rebuilding it on every meter is what made the bar crawl past a
+      // few minutes in.
       peaks.modify((arr) => {
         'worklet';
-        for (let i = arr.length; i < start; i++) arr.push(0);
+        let need = start + values.length;
+        if (need > arr.length) {
+          // Grow in blocks so a long take does not reallocate per bucket.
+          let cap = Math.max(4096, arr.length * 2);
+          while (cap < need) cap *= 2;
+          for (let i = arr.length; i < cap; i++) arr.push(0);
+        }
         for (let i = 0; i < values.length; i++) arr[start + i] = values[i];
         return arr;
       });
@@ -327,10 +386,29 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
         (waitingFor === 'RECORDING' ? e.recording : !e.recording)
       ) {
         const now = Date.now();
-        anchorRef.current = { ms: e.positionMs, at: now };
-        anchorMs.value = e.positionMs;
-        anchorAt.value = now;
-        playheadMs.value = e.positionMs;
+        if (playheadSoftRunningRef.current) {
+          // The clock was already running: correct it gently (the same rule
+          // the steady-state blend uses) so the first meter cannot produce a
+          // visible snap. The waveform covers the rest (see StudioWaveform).
+          const predicted = anchorRef.current.ms + (now - anchorRef.current.at);
+          const drift = e.positionMs - predicted;
+          if (Math.abs(drift) > DRIFT_SNAP_MS) {
+            anchorRef.current = { ms: e.positionMs, at: now };
+            playheadMs.value = e.positionMs;
+          } else {
+            anchorRef.current = {
+              ms: anchorRef.current.ms + drift * ANCHOR_BLEND_FIRST,
+              at: anchorRef.current.at,
+            };
+          }
+          anchorMs.value = anchorRef.current.ms;
+          anchorAt.value = anchorRef.current.at;
+        } else {
+          anchorRef.current = { ms: e.positionMs, at: now };
+          anchorMs.value = e.positionMs;
+          anchorAt.value = now;
+          playheadMs.value = e.positionMs;
+        }
         releaseFirstMeterWait();
       }
 
@@ -345,7 +423,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
         anchorRef.current =
           Math.abs(drift) > DRIFT_SNAP_MS
             ? { ms: e.positionMs, at: now }
-            : { ms: a.ms + drift * 0.12, at: a.at };
+            : { ms: a.ms + drift * ANCHOR_BLEND_SLOW, at: a.at };
         anchorMs.value = anchorRef.current.ms;
         anchorAt.value = anchorRef.current.at;
       }
@@ -359,7 +437,40 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     const arr = await StudioEngine.getPeaks(0, -1);
     peaks.value = arr;
     peakCountRef.current = arr.length;
+    setPeakVersion((v) => v + 1);
   }, [peaks]);
+
+  const resync = useCallback(async () => {
+    const status = await StudioEngine.getStatus();
+    if (!status) return;
+    if (!status.hasSession && engineStateRef.current === 'IDLE') return;
+    if (status.hasSession && (status.peakCount ?? 0) !== peakCountRef.current) {
+      try {
+        await loadPeaks();
+      } catch {}
+    }
+    applySnapshot(status, 'resync');
+  }, [applySnapshot, loadPeaks]);
+
+  /**
+   * Keep both halves of the audio path ready: a pre-opened (stopped) mic and a
+   * pre-opened (paused, flushed) output track. This is what makes the
+   * record/preview toggle feel instant instead of paying device setup on
+   * whichever side is being switched to.
+   */
+  const warmAudioPath = useCallback(
+    (deviceId: number) => {
+      void StudioEngine.prepareRecorder(deviceId);
+      void StudioEngine.preparePlayer();
+    },
+    []
+  );
+
+  /** Give the hardware back (backgrounded, or the user left the studio). */
+  const coolAudioPath = useCallback(() => {
+    void StudioEngine.dropWarmRecorder();
+    void StudioEngine.dropWarmPlayer();
+  }, []);
 
   // ---- native events -----------------------------------------------------------
   useEffect(() => {
@@ -374,21 +485,23 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       StudioEngine.addListener('studioNotificationAction', (e) =>
         optionsRef.current.onNotificationAction?.(e.action)
       ),
+      // Something took the audio path away (call, alarm, another capture
+      // client, screen locked). The engine has already parked the take safely;
+      // JS decides what the user should do about it.
+      StudioEngine.addListener('studioInterruption', (e) => {
+        if (e.recording) {
+          // A capture that stopped on its own must not keep the warm mic, and
+          // the playhead belongs to the engine now.
+          StudioEngine.dropWarmRecorder().catch(() => {});
+        }
+        void resync();
+        optionsRef.current.onInterruption?.(e);
+      }),
     ];
     return () => subs.forEach((s) => s?.remove());
-  }, [applySnapshot, handleMeter]);
-
-  const resync = useCallback(async () => {
-    const status = await StudioEngine.getStatus();
-    if (!status) return;
-    if (!status.hasSession && engineStateRef.current === 'IDLE') return;
-    if (status.hasSession && (status.peakCount ?? 0) !== peakCountRef.current) {
-      try {
-        await loadPeaks();
-      } catch {}
-    }
-    applySnapshot(status, 'resync');
-  }, [applySnapshot, loadPeaks]);
+    // resync is stable; listed so the linter keeps the closure honest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applySnapshot, handleMeter, resync]);
 
   // Watchdog: capture that stops reporting is re-read from native.
   useEffect(() => {
@@ -537,6 +650,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     return () => {
       if (switchGuardRef.current) clearTimeout(switchGuardRef.current);
       if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
+      if (firstMeterHardGuardRef.current) clearTimeout(firstMeterHardGuardRef.current);
     };
   }, []);
 
@@ -551,7 +665,13 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       } else {
         lastActionRef.current = null;
       }
+      // Flip the transport (and freeze the clock) on the UI thread *before*
+      // the native call, so the button answers the tap on the next frame
+      // rather than after the round trip. applySnapshot() below reconciles.
       isTransitioning.value = true;
+      isRecording.value = true;
+      isRunning.value = true;
+      setEngineState('RECORDING');
       try {
         const snap = await StudioEngine.record({ positionMs, inputDeviceId });
         hasEditsRef.current = true;
@@ -571,6 +691,11 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
         // position, so the UI never leads the hardware.
         armFirstMeterWait('RECORDING');
       } catch (e) {
+        // The engine refused: undo the optimistic flip before resyncing, so a
+        // failed record never leaves the transport showing a live take.
+        isRecording.value = false;
+        isRunning.value = false;
+        setEngineState('PAUSED');
         try {
           await resync();
         } catch {}
@@ -584,7 +709,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [applySnapshot, anchorAt, anchorMs, playheadMs, armFirstMeterWait, releaseFirstMeterWait, resync]
+    [applySnapshot, anchorAt, anchorMs, playheadMs, armFirstMeterWait, releaseFirstMeterWait, resync, setEngineState]
   );
 
   const preview = useCallback(async (positionMs: number) => {
@@ -592,6 +717,9 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     const uiPos = Math.max(0, Math.min(positionMs, dur));
     lastActionRef.current = { at: Date.now(), pos: uiPos };
     isTransitioning.value = true;
+    isRecording.value = false;
+    isRunning.value = true;
+    setEngineState('PREVIEWING');
     try {
       await StudioEngine.play(positionMs);
       // Flip the UI immediately instead of waiting for the native state
@@ -616,6 +744,9 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       // (see armFirstMeterWait).
       armFirstMeterWait('PREVIEWING');
     } catch (e) {
+      isRecording.value = false;
+      isRunning.value = false;
+      setEngineState('PAUSED');
       try {
         await resync();
       } catch {}
@@ -635,7 +766,57 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     playheadMs,
     releaseFirstMeterWait,
     resync,
+    setEngineState,
   ]);
+
+  /**
+   * Flip the transport UI before the native call resolves. Pausing has to
+   * join the capture thread (it is inside a blocking read), so the round
+   * trip is not free, and waiting for it is what made the button feel slow.
+   * The native snapshot is applied as soon as it lands; if the call fails we
+   * resynchronise instead of leaving the UI on a lie.
+   */
+  const optimisticPause = useCallback(async (): Promise<StudioSnapshot> => {
+    const wasRunning =
+      engineStateRef.current === 'RECORDING' || engineStateRef.current === 'PREVIEWING';
+    if (wasRunning) {
+      isTransitioning.value = true;
+      isRunning.value = false;
+      isRecording.value = false;
+      setEngineState('PAUSED');
+    }
+    try {
+      const snap = await StudioEngine.pause();
+      applySnapshot(snap, 'pause');
+      return snap;
+    } catch (e) {
+      if (wasRunning) {
+        try {
+          await resync();
+        } catch {}
+      }
+      throw e;
+    } finally {
+      isTransitioning.value = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applySnapshot, resync]);
+
+  /**
+   * Announce a mode switch to the UI immediately (icon, "Replace armed" pill,
+   * frozen clock) while the native transport is still catching up. Every
+   * command path ends with applySnapshot(), which corrects the picture if the
+   * engine disagreed.
+   */
+  const armTransition = useCallback(
+    (next: 'RECORDING' | 'PREVIEWING') => {
+      beginSwitch();
+      isRecording.value = next === 'RECORDING';
+      setEngineState(next);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [beginSwitch, isRecording]
+  );
 
   const pause = useCallback(async (): Promise<StudioSnapshot> => {
     const snap = await StudioEngine.pause();
@@ -659,6 +840,31 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       await StudioEngine.seek(positionMs);
     } catch {}
   }, []);
+
+  /**
+   * Re-arm capture after an interruption: the native side throws away the
+   * possibly-dead AudioRecord, opens a fresh one and continues the take.
+   */
+  const reinitializeAfterInterruption = useCallback(
+    async (inputDeviceId: number, appendAtEnd = true) => {
+      beginSwitch();
+      try {
+        const snap = await StudioEngine.reinitializeCapture({
+          inputDeviceId,
+          appendAtEnd,
+        });
+        hasEditsRef.current = true;
+        applySnapshot(snap, appendAtEnd ? 'record' : 'replace');
+        armFirstMeterWait('RECORDING');
+        return snap;
+      } catch (e) {
+        endSwitch();
+        throw e;
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [applySnapshot, armFirstMeterWait, beginSwitch, endSwitch]
+  );
 
   const finalize = useCallback(
     async (o: StudioFinalizeOptions): Promise<StudioFinalizeResult> => {
@@ -704,6 +910,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     isScrubbing,
     isRunning,
     isRecording,
+    peakVersion,
     getPlayheadMs,
     getDurationMs,
     createAndRecord,
@@ -712,6 +919,8 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     record,
     preview,
     pause,
+    optimisticPause,
+    armTransition,
     pauseForScrub,
     seek,
     finalize,
@@ -719,6 +928,9 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     resync,
     beginSwitch,
     endSwitch,
+    warmAudioPath,
+    coolAudioPath,
+    reinitializeAfterInterruption,
   };
 }
 
