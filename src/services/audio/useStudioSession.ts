@@ -23,36 +23,14 @@ import {
   StudioStatus,
 } from '../../../modules/audio-hardware-router/src';
 
-/**
- * PREVIEWING = playing the take back from the playhead (Replace not armed).
- * STOPPED / ERROR are kept for components that still switch on them.
- */
 export type EngineState = 'IDLE' | 'RECORDING' | 'PAUSED' | 'PREVIEWING' | 'STOPPED' | 'ERROR';
 
 export const isSessionState = (state: EngineState): boolean =>
   state === 'RECORDING' || state === 'PAUSED' || state === 'PREVIEWING';
 
-/** A playhead this close to the end counts as "at the end" (the next take appends). */
 export const END_EPSILON_MS = 60;
-
-/** Native position reports further than this from the UI clock re-anchor it hard. */
-const DRIFT_SNAP_MS = 80;
-/** Watchdog: a running capture that stops reporting for this long is re-synced. */
 const METER_SILENCE_MS = 4000;
-/**
- * A mode switch used to hold the playhead frozen until the hardware proved it
- * was live, which is exactly what the eye reads as "the preview/replace button
- * lags". With the warm mic and warm output track the audio really does start
- * well inside this window, so the clock resumes after a short beat and any
- * residual error is absorbed as a smooth slide (see ANCHOR_BLEND_*).
- */
-const FIRST_METER_SOFT_MS = 140;
-/** Hard stop: if no meter ever arrives, the freeze cannot wedge the UI. */
 const FIRST_METER_HARD_MS = 1500;
-/** Fraction of a residual drift taken out of the playhead on each meter. */
-const ANCHOR_BLEND_SLOW = 0.12;
-/** A first meter may correct a little harder, but still never jumps. */
-const ANCHOR_BLEND_FIRST = 0.45;
 
 export interface StudioTelemetry {
   meteringDb: number;
@@ -61,9 +39,7 @@ export interface StudioTelemetry {
 export interface UseStudioSessionOptions {
   onNotificationAction?: (action: StudioNotificationEvent['action']) => void;
   onError?: (event: StudioErrorEvent) => void;
-  /** Something we did not ask for stopped (or will stop) the take. */
   onInterruption?: (event: StudioInterruptionEvent) => void;
-  /** A Replace pass reached the end of the old audio and is now appending. */
   onCaughtUp?: () => void;
 }
 
@@ -89,14 +65,6 @@ const mapMode = (mode: StudioMode | undefined, hasSession: boolean): EngineState
   }
 };
 
-/**
- * One studio take at a time, owned by the native StudioEngine.
- *
- * Native state is the source of truth. The playhead that the waveform, the
- * timer and the prompter follow lives on the UI thread: it is extrapolated
- * every frame from the last native position report and gently corrected, so
- * it moves at display rate without a 60 Hz bridge stream.
- */
 export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -122,58 +90,23 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const isAppending = useSharedValue(false);
   const anchorMs = useSharedValue(0);
   const anchorAt = useSharedValue(0);
-  /**
-   * True while a user-initiated mode switch (preview <-> record) is in
-   * flight. The native switch takes a few hundred ms (AudioTrack /
-   * AudioRecord setup); freezing the playhead clock across it is what makes
-   * the punch-in / punch-out transition read as one continuous motion
-   * instead of a jump backwards.
-   */
   const isTransitioning = useSharedValue(false);
 
   const anchorRef = useRef({ ms: 0, at: 0 });
   const durationRef = useRef(0);
   const peakCountRef = useRef(0);
-  /**
-   * Bumped (on the JS side) whenever the peak table grew by a block. The
-   * waveform rebuilds its level-of-detail tables on this signal instead of
-   * reading the whole peak array on every meter tick.
-   */
   const [peakVersion, setPeakVersion] = useState(0);
   const peakVersionAtRef = useRef(0);
   const hasEditsRef = useRef(false);
   const lastMeterAtRef = useRef(0);
   const scrubPauseRef = useRef(false);
-  /**
-   * The position the user last asked the engine to start from. Snapshots
-   * that merely echo that start (command return + native state event) must
-   * not re-anchor the clock, or the playhead snaps back to the start frame.
-   */
   const lastActionRef = useRef<{ at: number; pos: number } | null>(null);
   const switchGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /**
-   * The mode we are waiting for the first hardware meter of. The playhead
-   * clock is frozen for a short beat across a mode switch (the native audio
-   * path needs a moment to prime) and then released optimistically; the
-   * first meter still re-anchors the clock, and if the UI had already been
-   * running the residual error is absorbed as a waveform slide instead of a
-   * playhead jump.
-   */
   const awaitingFirstMeterRef = useRef<EngineState | null>(null);
-  const firstMeterGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstMeterHardGuardRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** True once the soft release let the clock run ahead of the (still
-   *  unconfirmed) first meter: the correction then has to be absorbed
-   *  visually instead of by moving the playhead. */
-  const playheadSoftRunningRef = useRef(false);
 
   const releaseFirstMeterWait = useCallback(() => {
     awaitingFirstMeterRef.current = null;
-    playheadSoftRunningRef.current = false;
-    if (firstMeterGuardRef.current) {
-      clearTimeout(firstMeterGuardRef.current);
-      firstMeterGuardRef.current = null;
-    }
     if (firstMeterHardGuardRef.current) {
       clearTimeout(firstMeterHardGuardRef.current);
       firstMeterHardGuardRef.current = null;
@@ -188,19 +121,12 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   const armFirstMeterWait = useCallback(
     (expected: EngineState) => {
       awaitingFirstMeterRef.current = expected;
-      playheadSoftRunningRef.current = false;
-      if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
-      firstMeterGuardRef.current = setTimeout(() => {
-        if (awaitingFirstMeterRef.current === expected) {
-          isTransitioning.value = false;
-          playheadSoftRunningRef.current = true;
-        }
-      }, FIRST_METER_SOFT_MS);
+      if (firstMeterHardGuardRef.current) clearTimeout(firstMeterHardGuardRef.current);
       firstMeterHardGuardRef.current = setTimeout(() => {
         releaseFirstMeterWait();
       }, FIRST_METER_HARD_MS);
     },
-    [isTransitioning, releaseFirstMeterWait]
+    [releaseFirstMeterWait]
   );
 
   const setEngineState = useCallback((next: EngineState) => {
@@ -218,7 +144,7 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     setSessionInfoRaw(info);
   }, []);
 
-  // ---- UI-thread clock -----------------------------------------------------
+  // UI-thread clock: interpolates smoothly between native meter events
   const clock = useFrameCallback(() => {
     'worklet';
     if (!isRunning.value || isScrubbing.value || isTransitioning.value) return;
@@ -243,7 +169,6 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     []
   );
 
-  // ---- state application -----------------------------------------------------
   const resetMeter = () => {
     smoothedDbRef.current = -60;
     telemetry.current.meteringDb = -60;
@@ -349,48 +274,25 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
       durationRef.current = e.durationMs;
 
       const state = engineStateRef.current;
-
       const waitingFor = awaitingFirstMeterRef.current;
+
       if (
         waitingFor !== null &&
         state === waitingFor &&
         (waitingFor === 'RECORDING' ? e.recording : !e.recording)
       ) {
         const now = Date.now();
-        if (playheadSoftRunningRef.current) {
-          const predicted = anchorRef.current.ms + (now - anchorRef.current.at);
-          const drift = e.positionMs - predicted;
-          if (Math.abs(drift) > DRIFT_SNAP_MS) {
-            anchorRef.current = { ms: e.positionMs, at: now };
-            playheadMs.value = e.positionMs;
-          } else {
-            anchorRef.current = {
-              ms: anchorRef.current.ms + drift * ANCHOR_BLEND_FIRST,
-              at: anchorRef.current.at,
-            };
-          }
-          anchorMs.value = anchorRef.current.ms;
-          anchorAt.value = anchorRef.current.at;
-        } else {
-          anchorRef.current = { ms: e.positionMs, at: now };
-          anchorMs.value = e.positionMs;
-          anchorAt.value = now;
-          playheadMs.value = e.positionMs;
-        }
+        anchorRef.current = { ms: e.positionMs, at: now };
+        anchorMs.value = e.positionMs;
+        anchorAt.value = now;
+        playheadMs.value = e.positionMs;
         releaseFirstMeterWait();
-      }
-
-      if (!isTransitioning.value && (state === 'RECORDING' || state === 'PREVIEWING')) {
+      } else if (!isTransitioning.value && (state === 'RECORDING' || state === 'PREVIEWING')) {
+        // Sync anchor directly to the true hardware audio position on each meter tick
         const now = Date.now();
-        const a = anchorRef.current;
-        const predicted = a.ms + (now - a.at);
-        const drift = e.positionMs - predicted;
-        anchorRef.current =
-          Math.abs(drift) > DRIFT_SNAP_MS
-            ? { ms: e.positionMs, at: now }
-            : { ms: a.ms + drift * ANCHOR_BLEND_SLOW, at: a.at };
-        anchorMs.value = anchorRef.current.ms;
-        anchorAt.value = anchorRef.current.at;
+        anchorRef.current = { ms: e.positionMs, at: now };
+        anchorMs.value = e.positionMs;
+        anchorAt.value = now;
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -429,7 +331,6 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     void StudioEngine.dropWarmPlayer();
   }, []);
 
-  // ---- native events -----------------------------------------------------------
   useEffect(() => {
     const subs = [
       StudioEngine.addListener('studioState', (e) => {
@@ -482,7 +383,6 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
     return () => sub.remove();
   }, [resync]);
 
-  // ---- commands ------------------------------------------------------------------
   const createAndRecord = useCallback(
     async (o: {
       sampleRate: number;
@@ -587,7 +487,6 @@ export function useStudioSession(options: UseStudioSessionOptions = {}) {
   useEffect(() => {
     return () => {
       if (switchGuardRef.current) clearTimeout(switchGuardRef.current);
-      if (firstMeterGuardRef.current) clearTimeout(firstMeterGuardRef.current);
       if (firstMeterHardGuardRef.current) clearTimeout(firstMeterHardGuardRef.current);
     };
   }, []);

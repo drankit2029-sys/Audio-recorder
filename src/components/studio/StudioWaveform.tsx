@@ -31,7 +31,7 @@ export const LOD_FACTORS = [1, 4, 16, 64, 256];
 /** Rebuild-rate floor: never quantise the head finer than this (ms). */
 export const MIN_REBUILD_STEP_MS = 8;
 /** The newest bucket ramps up over this fraction of its own period. */
-const GROW_FRACTION = 3;
+const GROW_FRACTION = 1;
 
 export interface WaveformGeometry {
   /** Amplitudes (points from the centre line) and x positions, in points. */

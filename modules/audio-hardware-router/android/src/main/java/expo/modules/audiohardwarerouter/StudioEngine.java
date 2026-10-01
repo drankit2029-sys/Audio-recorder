@@ -187,12 +187,6 @@ final class StudioEngine {
     private boolean serviceRequested = false;
 
     // ---- interference watchers ---------------------------------------------
-    /**
-     * A pause requested because something else took the audio path (a call,
-     * an alarm, another capture app). Very short losses are ignored: many
-     * devices drop focus for a few tens of ms when routing changes, and
-     * pausing there would be more annoying than helpful.
-     */
     private static final long FOCUS_PAUSE_AFTER_MS = 900L;
     private long focusLostAt = 0L;
     private boolean interruptionWatchersOn = false;
@@ -1679,7 +1673,7 @@ final class StudioEngine {
             final boolean fileFloat = floatPcm;
             final int fb = frameBytes;
             final int fpb = framesPerBucket;
-            // Sample audio in ~10 ms chunks rather than 20-33 ms chunks to minimize input latency.
+            // Read in ~10 ms chunks to minimize hardware buffer lag
             final int framesPerRead = Math.max(128, capRate / 100);
             final short[] s16 = capFloat ? null : new short[framesPerRead * capCh];
             final float[] f32 = capFloat ? new float[framesPerRead * capCh] : null;
